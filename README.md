@@ -14,7 +14,7 @@
 | [goal-driven-development](goal-driven-development/SKILL.md) | 以终为始开发功能：目标与标准 → 问题拆解 → 借鉴论文与开源 → 验证集迭代 → 测试集验收 | 目标与标准、拆解、来源筛选、验证与测试的参考，以及计划/日志/报告模板 |
 | [data-science-project](data-science-project/SKILL.md) | 数据科学项目的全周期规划、执行、验收与解释 | 工作流、数据审查、EDA 与验收报告规范 |
 | [publish-private-project](publish-private-project/SKILL.md) | 把私有项目首次公开到 GitHub：隐私核查、清理、全新历史、发布配套 | 核查清单与仓库配套模板 |
-| [submit](submit/SKILL.md) | 按检查清单提交快照；参数为 `1` 或 `同步` 时再推送到远程，没有远程仓库就新建一个私有仓库 | 提交与同步检查清单 |
+| [submit](submit/SKILL.md) | 按检查清单提交快照；参数为 `1` 或 `同步` 时再推送到远程，没有远程仓库就新建一个私有仓库 | 检查清单 [`checklist.md`](submit/checklist.md) |
 | [tidy-docs](tidy-docs/SKILL.md) | 整理项目：精简 agent 规则文件并补入新原则，同步用户文档与 agent 记忆，清理临时文件，过时文件归档到 `archive/` | 单文件 Skill |
 | [synchronous](synchronous/SKILL.md) | 把 skill 或通用原则同步到本机各 agent（Claude Code、Codex、Kimi Code、WorkBuddy、Pi） | 单文件 Skill |
 | [api](api/SKILL.md) | 为项目暴露对外接口：plugin、skills、MCP、CLI、HTTP API、SDK；默认由 agent 按项目情况选择，也可用参数指定 | 单文件 Skill |
