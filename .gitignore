@@ -13,3 +13,7 @@ clear-reporting/checks/
 
 # tidy-docs 运行时记录的本机状态
 tidy-docs/state/
+# 只在本机使用的技能（含私有项目名、服务器地址或本机路径，不进公开仓库）
+dev-flow/
+release-handoff/
+test-server/

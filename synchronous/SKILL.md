@@ -17,7 +17,6 @@ disable-model-invocation: true
 |---|---|---|
 | Claude Code | `~/.claude/CLAUDE.md`（设置了 `CLAUDE_CONFIG_DIR` 时在该目录下） | `~/.claude/skills/`（同上） |
 | Codex | `~/.codex/AGENTS.md` | `~/.codex/skills/` |
-| Kimi Code | `~/.kimi-code/AGENTS.md` | `~/.kimi-code/skills/` |
 | WorkBuddy | `~/.workbuddy/MEMORY.md`（用户长期记忆） | `~/.workbuddy/skills/` |
 | Pi | `~/.pi/agent/AGENTS.md` | `~/.pi/agent/skills/` |
 

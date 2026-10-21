@@ -16,7 +16,7 @@
 | [publish-private-project](publish-private-project/SKILL.md) | 把私有项目首次公开到 GitHub：隐私核查、清理、全新历史、发布配套 | 核查清单与仓库配套模板 |
 | [submit](submit/SKILL.md) | 按检查清单提交快照；参数为 `1` 或 `同步` 时再推送到远程，没有远程仓库就新建一个私有仓库 | 检查清单 [`checklist.md`](submit/checklist.md) |
 | [tidy-docs](tidy-docs/SKILL.md) | 整理项目：精简 agent 规则文件并补入新原则，同步用户文档与 agent 记忆，清理临时文件，过时文件归档到 `archive/` | 单文件 Skill |
-| [synchronous](synchronous/SKILL.md) | 把 skill 或通用原则同步到本机各 agent（Claude Code、Codex、Kimi Code、WorkBuddy、Pi） | 单文件 Skill |
+| [synchronous](synchronous/SKILL.md) | 把 skill 或通用原则同步到本机各 agent（Claude Code、Codex、WorkBuddy、Pi） | 单文件 Skill |
 | [api](api/SKILL.md) | 为项目暴露对外接口：plugin、skills、MCP、CLI、HTTP API、SDK；默认由 agent 按项目情况选择，也可用参数指定 | 单文件 Skill |
 | [white-box-explainer](https://github.com/ac0033/white-box-explainer) | 讲清代码、数据科学与机器学习项目 | 独立仓库，以 Git submodule 收录 |
 | [Humanizer-zh](https://github.com/ac0033/Humanizer-zh) | 编辑中文文本中的常见 AI 写作痕迹 | 第三方技能的个人 fork，以 Git submodule 收录 |
