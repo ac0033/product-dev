@@ -12,6 +12,7 @@
 | [systems-thinking](systems-thinking/SKILL.md) | 系统性构思、计划与讲解，统一用"层次→维度→板块→具体事项"组织 | 框架指南、写作与讲解规范、模板和示例 |
 | [cognitive-receiver](cognitive-receiver/SKILL.md) | 向用户讲解复杂内容时降低认知负荷，维护双方共通的概念 | 单文件 Skill |
 | [goal-driven-development](goal-driven-development/SKILL.md) | 以终为始开发功能：目标与标准 → 问题拆解 → 借鉴论文与开源 → 验证集迭代 → 测试集验收 | 目标与标准、拆解、来源筛选、验证与测试的参考，以及计划/日志/报告模板 |
+| [产品设计技能组](product-design-orchestrator/README.md) | 从想法推进到 PRD、交互原型、系统架构和实施交接 | 总控与三个专业技能，共享协议、产物模板和行为验收用例 |
 | [data-science-project](data-science-project/SKILL.md) | 数据科学项目的全周期规划、执行、验收与解释 | 工作流、数据审查、EDA 与验收报告规范 |
 | [publish-private-project](publish-private-project/SKILL.md) | 把私有项目首次公开到 GitHub：隐私核查、清理、全新历史、发布配套 | 核查清单与仓库配套模板 |
 | [submit](submit/SKILL.md) | 按检查清单提交快照；参数为 `1` 或 `同步` 时再推送到远程，没有远程仓库就新建一个私有仓库 | 检查清单 [`checklist.md`](submit/checklist.md) |
