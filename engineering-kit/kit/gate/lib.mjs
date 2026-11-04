@@ -93,10 +93,9 @@ function pathLines(text) {
 export function changedFiles(root, base) {
   const set = new Set();
   // 基准分支解析不了时必须报错：若静默返回空列表，已提交的功能分支会被判定为“没有改动”而放行（失败放行）。
-  const mb = git(root, ['merge-base', base, 'HEAD']);
-  if (!mb.ok) throw new Error(`无法解析基准分支 ${base}（请先 git fetch，或在 engineering.config.json 的 base 里写正确的分支）`);
-  for (const f of pathLines(git(root, ['diff', '--name-only', mb.out.trim(), 'HEAD']).out)) set.add(f);
+  const { rev } = baseRevision(root, base);
   if (git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).ok) {
+    for (const f of pathLines(git(root, ['diff', '--name-only', rev, 'HEAD']).out)) set.add(f);
     for (const f of pathLines(git(root, ['diff', '--name-only', 'HEAD']).out)) set.add(f);
   }
   for (const f of pathLines(git(root, ['ls-files', '--others', '--exclude-standard']).out)) set.add(f);
@@ -108,9 +107,46 @@ export function changedFiles(root, base) {
  */
 export function newFiles(root, base) {
   const out = new Set(pathLines(git(root, ['ls-files', '--others', '--exclude-standard']).out));
-  const mb = git(root, ['merge-base', base, 'HEAD']);
-  if (mb.ok) for (const f of pathLines(git(root, ['diff', '--name-only', '--diff-filter=A', mb.out.trim(), 'HEAD']).out)) out.add(f);
+  if (git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).ok) {
+    const { rev } = baseRevision(root, base);
+    for (const f of pathLines(git(root, ['diff', '--name-only', '--diff-filter=A', rev, 'HEAD']).out)) out.add(f);
+  }
   return [...out].sort();
+}
+
+/** 仓库里所有已跟踪与未跟踪（未忽略）的文件，用于判断“是否已有源码或测试”。 */
+export function repoFiles(root) {
+  return pathLines(git(root, ['ls-files', '--cached', '--others', '--exclude-standard']).out);
+}
+
+/** 空树基线与 merge-base 两种情况共用的解析：返回可用于 git diff 的修订。 */
+function baseRevision(root, base) {
+  const resolved = resolveBase(root, base);
+  if (resolved === EMPTY_TREE) return { rev: EMPTY_TREE };
+  const mb = git(root, ['merge-base', resolved, 'HEAD']);
+  if (!mb.ok) throw new Error(`无法解析基准分支 ${resolved}（请先 git fetch，或在 engineering.config.json 的 base 里写正确的分支）`);
+  return { rev: mb.out.trim() };
+}
+
+/** git 的空树对象（所有仓库都有）：首次提交前没有任何基准提交时，用它当作基线。 */
+export const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+/** 自动识别基准分支时依次尝试的候选（远程默认分支优先，其次本地主干）。 */
+const AUTO_BASE_CANDIDATES = ['origin/HEAD', 'origin/main', 'origin/master', 'main', 'master'];
+
+/**
+ * 把配置里的 base 解析为一个可比较的修订。
+ * base 为 auto：依次取第一个存在的候选；都不存在但仓库还没有任何提交时，返回空树（首次提交前的全部文件都算改动）；
+ *   其余情况报错（失败不放行）。
+ * base 为明确的分支名：原样返回，解析失败由 baseRevision 报错。
+ */
+export function resolveBase(root, base) {
+  if (base !== 'auto') return base;
+  for (const c of AUTO_BASE_CANDIDATES) {
+    if (git(root, ['rev-parse', '--verify', '--quiet', `${c}^{commit}`]).ok) return c;
+  }
+  if (!git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).ok) return EMPTY_TREE;
+  throw new Error('无法自动识别基准分支（试过 origin/HEAD、origin/main、origin/master、main、master），请在 engineering.config.json 的 modules.gate.base 写明');
 }
 
 /**
@@ -139,14 +175,23 @@ export function scopeFiles(root, config) {
  * 文件不存在（已删除）记为 deleted。只看这些文件的当前内容，与是否提交无关。
  */
 export function treeHash(root, files) {
-  const h = crypto.createHash('sha256');
-  for (const f of [...files].sort()) {
+  const sorted = [...files].sort();
+  const present = sorted.filter((f) => {
     const p = path.join(root, f);
-    const content =
-      fs.existsSync(p) && fs.statSync(p).isFile()
-        ? crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')
-        : 'deleted';
-    h.update(`${f}\t${content}\n`);
+    return fs.existsSync(p) && fs.statSync(p).isFile();
+  });
+  // 内容哈希交给 git hash-object（与 git add 相同的清洗过滤器）：Windows 的 core.autocrlf 会在 checkout 时
+  // 把 LF 改成 CRLF，直接读字节会让同一份提交的哈希变化，从而误判“代码变了”。
+  const hashes = new Map();
+  if (present.length > 0) {
+    const r = spawnSync('git', ['-C', root, 'hash-object', '--stdin-paths'], { input: `${present.join('\n')}\n`, encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`计算代码树哈希失败：${r.stderr}`);
+    const out = r.stdout.split('\n').filter(Boolean);
+    present.forEach((f, i) => hashes.set(f, out[i]));
+  }
+  const h = crypto.createHash('sha256');
+  for (const f of sorted) {
+    h.update(`${f}\t${hashes.has(f) ? hashes.get(f) : 'deleted'}\n`);
   }
   return h.digest('hex');
 }

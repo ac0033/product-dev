@@ -4,7 +4,7 @@
 // 用法：node scripts/engineering/gate/hygiene.mjs [--json]    有错误时退出码 1
 import fs from 'node:fs';
 import path from 'node:path';
-import { git, isMain, loadConfig, repoRoot } from './lib.mjs';
+import { EMPTY_TREE, git, isMain, loadConfig, repoRoot, resolveBase } from './lib.mjs';
 import crypto from 'node:crypto';
 
 /** 列出仓库中已跟踪和未忽略的文件（相对路径，斜杠分隔）。 */
@@ -43,6 +43,21 @@ export function statusOf(text) {
   return m ? m[1].toLowerCase() : null;
 }
 
+/** glob 里字面的顶层目录名（例如以 tests 开头的 glob 得到 tests；含通配符的段不算）。 */
+export function literalTopDirs(globs) {
+  return globs.map((g) => g.split('/')[0]).filter((s) => s && !/[*?{[]/.test(s));
+}
+
+/** 解析基准分支；无法解析或为空树时返回 null（巡检只跳过已合并分支检查，不报错）。 */
+function baseOrNull(root, base) {
+  try {
+    const r = resolveBase(root, base);
+    return r === EMPTY_TREE ? null : r;
+  } catch {
+    return null;
+  }
+}
+
 /** 运行巡检，返回 { root, findings: { error: [], warn: [] }, ok }。不删除、不修改任何文件。 */
 export function runHygiene(root) {
   const cfg = loadConfig(root);
@@ -54,7 +69,9 @@ export function runHygiene(root) {
   const dirs = topLevelDirs(files);
 
   // 1. 顶层目录白名单
-  for (const d of dirs) if (!layout.topLevelAllowed.includes(d)) err(`顶层目录不在白名单：${d}/（允许：${layout.topLevelAllowed.join('、')}）`);
+  // 源码与测试目录由 glob 推出（如 tests/**/*.test.ts → tests），不必再在白名单里重复登记，避免两处不一致。
+  const allowed = new Set([...layout.topLevelAllowed, ...literalTopDirs([...layout.sourceGlobs, ...layout.testGlobs])]);
+  for (const d of dirs) if (!allowed.has(d)) err(`顶层目录不在白名单：${d}/（允许：${[...allowed].join('、')}）`);
 
   // 2. 禁用的文件名片段（copy、final、bak 等）
   for (const f of files) {
@@ -116,8 +133,8 @@ export function runHygiene(root) {
 
   // 7. 已合并的分支与残留的工作树
   const branches = git(root, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
-  const base = cfg.base;
-  if (branches.ok && git(root, ['rev-parse', '--verify', '--quiet', base]).ok) {
+  const base = baseOrNull(root, cfg.base);
+  if (branches.ok && base && git(root, ['rev-parse', '--verify', '--quiet', base]).ok) {
     const current = git(root, ['branch', '--show-current']).out.trim();
     for (const b of branches.out.split('\n').filter(Boolean)) {
       if (b === current || b === 'main' || b === 'master') continue;

@@ -8,6 +8,7 @@
 //   node sync.mjs --target <项目> --dry-run            只列出计划，不写入
 //   node sync.mjs --target <项目> --check              整包漂移检查（有差异退出码 1）
 //   node sync.mjs --target <项目> --from-tag <标签>    回滚（或安装）到源仓库的某个版本标签
+//   node sync.mjs --target <项目> --init --profile ts|python   从零开始：非 git 目录先 git init -b main，并按技术栈写入配置与脚手架
 //   加 --force 覆盖项目里有本地修改的套件文件；加 --no-hooks 不安装钩子
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -16,22 +17,38 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isMain, git, repoRoot } from './gate/lib.mjs';
 import { checkBundle, executePlan, loadBundle, planBundle } from './tools/bundle-lib.mjs';
+import { PRESETS, projectName } from './tools/presets.mjs';
 
 /** 整包根目录（本文件所在 kit 目录的上一级，即 engineering-kit/）。 */
 export const BUNDLE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
  * 同步整包到项目。返回 { ok, version, dryRun, actions, conflicts, messages }。
- * 选项：bundleRoot（默认当前整包；回滚时指向标签导出的目录）、force、hooks、dryRun、inject（仅测试）。
+ * 选项：bundleRoot（默认当前整包；回滚时指向标签导出的目录）、force、hooks、dryRun、inject（仅测试）、
+ *   preset（技术栈预设，仅首次创建配置时生效）、init（目标不是 git 仓库时，允许自动 git init -b main）。
+ * 非 git 目录又未指定 init 时拒绝安装：闸门与钩子都依赖 git，不能装一半。
  */
-export function syncKit({ target, dryRun = false, force = false, hooks = true, bundleRoot = BUNDLE_ROOT, inject } = {}) {
+export function syncKit({ target, dryRun = false, force = false, hooks = true, bundleRoot = BUNDLE_ROOT, inject, preset = null, init = false } = {}) {
   const root = path.resolve(target);
   const bundle = loadBundle(bundleRoot);
-  const plan = planBundle({ root, bundleRoot, bundle, force, hooks });
+  const notes = [];
+  if (hooks && !fs.existsSync(path.join(root, '.git'))) {
+    if (!init) {
+      return { ok: false, version: bundle.bundleVersion, dryRun, actions: [], conflicts: [], messages: ['目标目录不是 git 仓库。闸门与钩子依赖 git：加 --init 自动执行 git init -b main 后再安装'] };
+    }
+    if (dryRun) notes.push('试运行：将执行 git init -b main（试运行不实际初始化）');
+    else {
+      fs.mkdirSync(root, { recursive: true });
+      const r = spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: root, encoding: 'utf8' });
+      if (r.status !== 0) throw new Error(`git init 失败：${r.stderr}`);
+      notes.push('已执行 git init -b main');
+    }
+  }
+  const plan = planBundle({ root, bundleRoot, bundle, force, hooks, preset, projectName: projectName(root) });
   // 原子同步：存在未处理的冲突时整包一个文件也不写，列出冲突，由用户处理或 --force 覆盖
   const blocked = plan.conflicts.length > 0 && !force;
   if (!dryRun && !blocked) executePlan({ root, bundleRoot, bundle, plan, opts: { inject } });
-  const messages = blocked ? [...plan.messages, '存在冲突：整包未写入（原子同步）。请处理冲突，或确认后加 --force 覆盖。'] : plan.messages;
+  const messages = [...notes, ...(blocked ? [...plan.messages, '存在冲突：整包未写入（原子同步）。请处理冲突，或确认后加 --force 覆盖。'] : plan.messages)];
   return {
     ok: !blocked,
     version: bundle.bundleVersion,
@@ -83,13 +100,19 @@ function parseArgs(argv) {
     force: flags.has('--force'),
     hooks: !flags.has('--no-hooks'),
     check: flags.has('--check'),
+    init: flags.has('--init'),
+    profile: val('--profile'),
   };
 }
 
 if (isMain(import.meta.url)) {
   const a = parseArgs(process.argv.slice(2));
   if (!a.target) {
-    console.error('用法：node sync.mjs --target <项目目录> [--dry-run] [--force] [--no-hooks] [--check] [--from-tag <标签>]');
+    console.error('用法：node sync.mjs --target <项目目录> [--dry-run] [--force] [--no-hooks] [--check] [--from-tag <标签>] [--init] [--profile ts|python]');
+    process.exit(2);
+  }
+  if (a.profile !== undefined && !PRESETS[a.profile]) {
+    console.error(`未知技术栈 ${a.profile}，可选：${Object.keys(PRESETS).join('、')}`);
     process.exit(2);
   }
   try {
@@ -102,7 +125,7 @@ if (isMain(import.meta.url)) {
       console.log(bad.length === 0 ? '整包与清单一致' : `有 ${bad.length} 项与清单不一致`);
       process.exit(bad.length === 0 ? 0 : 1);
     }
-    const r = syncKit({ target: a.target, dryRun: a.dryRun, force: a.force, hooks: a.hooks, bundleRoot });
+    const r = syncKit({ target: a.target, dryRun: a.dryRun, force: a.force, hooks: a.hooks, bundleRoot, init: a.init, preset: a.profile ? PRESETS[a.profile] : null });
     console.log(`${r.dryRun ? '[试运行] ' : ''}整包版本 ${r.version}${a.fromTag ? `（来自标签 ${a.fromTag}）` : ''}`);
     for (const x of r.actions) console.log(`  [${x.type}] ${x.file}`);
     for (const m of r.messages) console.log(`  ! ${m}`);

@@ -7,7 +7,10 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { syncKit, extractTag, BUNDLE_ROOT } from '../sync.mjs';
-import { applyBlock, findBlock, checkBundle, validateBundle, LOCK_REL } from '../tools/bundle-lib.mjs';
+import { applyBlock, findBlock, checkBundle, validateBundle, loadBundle, LOCK_REL } from '../tools/bundle-lib.mjs';
+
+/** 当前整包版本从清单读取（不写死），发布新版本时测试不需要跟着改。 */
+const CURRENT = loadBundle(BUNDLE_ROOT).bundleVersion;
 import { commitAll, read, tmpRepo, write } from './helpers.mjs';
 
 /** 一个带用户内容的 AGENTS.md（块外内容必须原样保留）。 */
@@ -75,8 +78,8 @@ test('整包同步：规则进入 AGENTS.md 的标记块，项目原有内容保
   assert.ok(agents.startsWith(USER_AGENTS), '块外的项目内容必须原样保留');
   assert.ok(findBlock(agents), '应当写入标记块');
   const lock = JSON.parse(read(root, LOCK_REL));
-  assert.equal(lock.bundleVersion, '0.2.0');
-  assert.equal(lock.blocks['AGENTS.md'], '0.2.0');
+  assert.equal(lock.bundleVersion, CURRENT);
+  assert.equal(lock.blocks['AGENTS.md'], CURRENT);
 });
 
 test('整包更新：新版本只替换标记块，块外内容仍然不变', () => {
@@ -150,7 +153,7 @@ test('按标签回滚：旧版本（0.1.0，扁平配置、无标记块）能装
   assert.equal(JSON.parse(read(root, LOCK_REL)).bundleVersion, '0.1.0');
   // 再升级回当前版本
   syncKit({ target: root });
-  assert.equal(JSON.parse(read(root, LOCK_REL)).bundleVersion, '0.2.0');
+  assert.equal(JSON.parse(read(root, LOCK_REL)).bundleVersion, CURRENT);
 });
 
 test('换行风格：CRLF 文件里插入的标记块也用 CRLF，不混入 LF；重复应用仍然幂等', () => {

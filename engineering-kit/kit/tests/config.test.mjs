@@ -74,6 +74,6 @@ test('模板文件本身是合法的 profile，并能展开', () => {
   const raw = JSON.parse(readFileSync(TEMPLATE, 'utf8'));
   assert.equal(raw.profile, 2);
   const eff = normalizeConfig(raw);
-  assert.equal(eff.base, 'origin/main');
+  assert.equal(eff.base, 'auto');
   assert.ok(eff.sourceGlobs.length > 0);
 });

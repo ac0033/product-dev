@@ -70,9 +70,9 @@ test('钩子：gh 带全局选项、gh.exe、git 选项带等号、git.exe 都�
   assert.equal(classify('gh -R owner/repo pr create --draft'), 'push');
 });
 
-test('配置读取：缺省基准分支是 origin/main', () => {
+test('配置读取：缺省基准分支是 auto（自动识别，不写死远程名）', () => {
   const root = tmpRepo();
   write(root, 'engineering.config.json', '{}\n');
-  assert.equal(loadConfig(root).base, 'origin/main');
+  assert.equal(loadConfig(root).base, 'auto');
 });
 

@@ -1,7 +1,7 @@
 ---
 name: engineering-kit
 description: 工程能力包：把工程规则（AGENTS.md 标记块）、闸门脚本（测试先行、注释、复审记录、推送核对）、钩子、巡检、目录与文档模板整体装进任意 git 项目；整包升级、整包漂移检查、按版本标签回滚；反向把经验整理为变更集（用户经验直接应用，agent 经验先提案待确认）并发布版本。原则在全局 CLAUDE.md 的“工程纪律”和“经验提炼”，流程细则在 references/process.md。
-argument-hint: "[项目目录] [--check | --dry-run | --force | --from-tag <标签>]"
+argument-hint: "[项目目录] [--init] [--profile ts|python] [--check | --dry-run | --force | --from-tag <标签>]"
 disable-model-invocation: true
 ---
 
@@ -14,6 +14,17 @@ disable-model-invocation: true
 整包的清单是 `bundle.json`（组件、安装位置、所有权、整包版本）。下文 `<kit>` 指本技能的 `kit/` 目录，`<整包>` 指本技能目录。
 
 ## 1. 一键复用（装进新项目）
+
+从零开始（推荐，项目第一天就配好规则、结构与技术栈）：
+
+```bash
+node "<kit>/sync.mjs" --target "<项目>" --init --profile ts      # 空目录：git init -b main + TypeScript 配置与脚手架
+node "<kit>/sync.mjs" --target "<项目>" --init --profile python  # 空目录：git init -b main + Python（pytest）配置与脚手架
+```
+
+`--profile` 只在首次创建 engineering.config.json 时生效；配置已存在时不改写，并提示手动修改。脚手架文件（package.json、pyproject.toml、.gitignore）只在不存在时创建。预设定义在 `kit/tools/presets.mjs`。
+
+已有项目（已是 git 仓库）也可以直接装，不加 `--profile`，然后按下面的说明手动调整配置：
 
 ```bash
 node "<kit>/sync.mjs" --target "<项目>" --dry-run   # 先看计划
@@ -82,7 +93,11 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 
 ## 6. 套件的范围与局限
 
-- 只支持 git 仓库。源文件判断依赖 `sourceGlobs` 与 `testGlobs`，配置不准，闸门就不准。
+- 必须是 git 仓库：目标不是 git 仓库时拒绝安装，加 `--init` 才会自动 git init。
+- 基准分支默认 `base: "auto"`：依次取 origin/HEAD、origin/main、origin/master、main、master；仓库还没有任何提交时，首次提交前的全部文件都按改动检查。没有远程也能用。
+- 尚无源码与测试文件时，闸门不运行测试命令（记录为“无需测试”）；一旦出现源码，测试先行检查就会要求测试。
+- Python 预设的测试命令是 `python -m pytest`：需要 Python 3.12 与 pytest 在 PATH 中。TypeScript 预设用 Node 24 的 `node --test` 直接运行 .test.ts，不做 tsc 类型检查。
+- 源文件判断依赖 `sourceGlobs` 与 `testGlobs`，配置不准，闸门就不准。
 - 测试先行靠“测试文件是否 import 了源文件的模块名”判断。经 index 再导出的间接引用识别不出来，应在豁免表里写理由。
 - 注释检查：文件开头（连续注释行，或 Python 文档字符串含多行）要有至少 8 个字的说明；JS/TS 导出函数、类、常量、枚举前要紧挨注释。Python 只查文件头。
 - Claude 钩子只防误操作，挡不住刻意绕过；终端直接 `git push` 不经过 Claude 钩子，靠 git pre-push 钩子兜底。

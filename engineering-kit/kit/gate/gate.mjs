@@ -12,10 +12,12 @@ import {
   changedFiles,
   isMain,
   isSourceFile,
+  isTestFile,
   loadConfig,
   loadExempt,
   matchesAny,
   recordDir,
+  repoFiles,
   repoRoot,
   scopeFiles,
   treeHash,
@@ -43,6 +45,25 @@ export function runGate({ root }) {
         messages: ['静态检查未通过（未运行测试）：', ...problems.map((p) => `  - ${p.message}`)],
         record: null,
       };
+    }
+
+    // 尚无源码与测试文件（例如只有脚手架的首次提交）：没有可运行的测试，记录为“无需测试”。
+    // 一旦出现源码，上面的测试先行检查就会要求测试，所以跳过这里不会放过未测试的代码。
+    if (!repoFiles(root).some((f) => isSourceFile(f, config) || isTestFile(f, config))) {
+      fs.mkdirSync(recordDir(root), { recursive: true });
+      const noTestRecord = {
+        passed: true,
+        treeHash: treeHash(root, scopeFiles(root, config)),
+        command: null,
+        skipped: 'no-code',
+        exitCode: null,
+        changedDuringRun: false,
+        log: null,
+        sourcesChecked: 0,
+        at: new Date().toISOString(),
+      };
+      writeRecord(root, 'tests.json', noTestRecord);
+      return { ok: true, messages: ['尚无源码与测试文件，未运行测试命令（写第一份源码时，测试先行检查会要求先写测试）'], record: noTestRecord };
     }
 
     const before = treeHash(root, scopeFiles(root, config));

@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeConfig, toFlat, toProfile } from '../gate/config.mjs';
+import { applyPreset, scaffoldFiles } from './presets.mjs';
 
 /** 项目内套件目录（相对项目根）。 */
 export const TARGET_DIR = 'scripts/engineering';
@@ -235,7 +236,7 @@ function configContent(existingRaw, templateRaw, wantFormat) {
  * 返回 { ops: [{ rel, abs, content, exec, action }], actions, conflicts, messages, newLock }。
  * 任何结构错误在这里抛出，所以到写入阶段时已确认整包可安装。
  */
-export function planBundle({ root, bundleRoot, bundle, force = false, hooks = true }) {
+export function planBundle({ root, bundleRoot, bundle, force = false, hooks = true, preset = null, projectName = 'project' }) {
   const lock = readLock(root);
   const ops = [];
   const actions = [];
@@ -246,6 +247,19 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
   const cfgRaw = readJsonFile(cfgAbs, 'engineering.config.json');
   const templateCfgComp = bundle.components.find((c) => c.kind === 'config');
   const templateRaw = templateCfgComp ? JSON.parse(fs.readFileSync(path.join(bundleRoot, templateCfgComp.source), 'utf8')) : {};
+  // 技术栈预设只在首次创建配置时生效（配置之后由项目维护）；脚手架文件只在不存在时创建。
+  const newCfgRaw = preset ? applyPreset(templateRaw, preset) : templateRaw;
+  if (preset && cfgRaw) messages.push('engineering.config.json 已存在，--profile 只在首次创建时生效；技术栈设置请手动修改该文件');
+  if (preset) {
+    for (const [rel, content] of Object.entries(scaffoldFiles(preset, projectName))) {
+      const abs = path.join(root, rel);
+      if (fs.existsSync(abs)) actions.push({ type: 'keep', file: rel });
+      else {
+        ops.push({ rel, abs, content, action: 'create' });
+        actions.push({ type: 'create', file: rel });
+      }
+    }
+  }
 
   for (const comp of bundle.components) {
     if ((comp.kind === 'claude-settings' || comp.kind === 'git-hook') && !hooks) continue;
@@ -324,7 +338,7 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
       if (comp.kind === 'config') {
         const exists = fs.existsSync(abs);
         const raw = exists ? cfgRaw : null;
-        const content = configContent(raw, templateRaw, bundle.configFormat);
+        const content = configContent(raw, newCfgRaw, bundle.configFormat);
         if (!exists) {
           ops.push({ rel, abs, content, action: 'create' });
           actions.push({ type: 'create', file: rel });

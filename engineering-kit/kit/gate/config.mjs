@@ -15,7 +15,7 @@ export const FLAT_KEYS = [
 
 /** 扁平字段的缺省值。 */
 export const DEFAULTS = {
-  base: 'origin/main',
+  base: 'auto',
   sourceGlobs: [],
   testGlobs: [],
   reviewIgnore: ['**/*.md', 'docs/**'],
@@ -31,7 +31,7 @@ export const DEFAULTS = {
 /** 目录布局与巡检的缺省值（profile 的 layout、hygiene 段）。 */
 export const LAYOUT_DEFAULTS = {
   stages: ['01-原型', '02-需求分析', '03-架构设计', '04-开发', '05-测试', '06-预发部署'],
-  topLevelAllowed: ['docs', 'src', 'tests', 'scripts', 'config', 'templates', '.github'],
+  topLevelAllowed: ['docs', 'src', 'tests', 'scripts', 'config', 'templates', '.github', '.claude'],
 };
 export const HYGIENE_DEFAULTS = {
   bannedNameTokens: ['copy', 'final', 'bak', 'old', 'tmp'],

@@ -9,6 +9,10 @@ import { applyChangeset, listPending, proposeChangeset, validateChangeset } from
 import { releaseBundle } from '../tools/release.mjs';
 import { git, tmpRepo, write, read, commitAll } from './helpers.mjs';
 import { BUNDLE_ROOT } from '../sync.mjs';
+import { loadBundle } from '../tools/bundle-lib.mjs';
+
+/** 当前整包版本从清单读取（不写死），发布新版本时测试不需要跟着改。 */
+const CURRENT = loadBundle(BUNDLE_ROOT).bundleVersion;
 
 /** 临时副本的整包（去掉 changesets 与 .git），返回路径。 */
 function bundleCopy() {
@@ -79,7 +83,7 @@ test('套件测试失败：改动与版本全部恢复原样，提案仍在待�
   assert.throws(() => applyChangeset({ bundleDir: dir, id: 'cs-fail', checkRunner: failRunner }), /已恢复/);
   assert.equal(read(dir, 'kit/templates/docs/README.md'), before);
   assert.equal(read(dir, 'bundle.json'), bundleBefore);
-  assert.equal(read(dir, 'kit/VERSION').trim(), '0.2.0');
+  assert.equal(read(dir, 'kit/VERSION').trim(), CURRENT);
   assert.deepEqual(listPending(dir).map((x) => x.id), ['cs-fail']);
 });
 
