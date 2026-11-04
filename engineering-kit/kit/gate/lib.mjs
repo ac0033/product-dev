@@ -16,8 +16,16 @@ export const EXEMPT_FILE = 'scripts/engineering/exempt.json';
 import { normalizeConfig } from './config.mjs';
 
 /** 判断当前脚本是否被直接运行（而不是被测试 import），用于决定是否执行命令行入口。 */
+// 入口判断按真实路径比较：Node 的模块地址是真实路径，而命令行里可能经过目录连接（junction/符号链接），
+// 只比较字符串会让命令静默不执行（例如 Windows 上 D:_软件安装 指向 D:_Software）。
 export function isMain(importMetaUrl) {
-  return Boolean(process.argv[1]) && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(importMetaUrl));
+  if (!process.argv[1]) return false;
+  const here = fileURLToPath(importMetaUrl);
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(here);
+  } catch {
+    return path.resolve(process.argv[1]) === path.resolve(here);
+  }
 }
 
 /** 执行 git，返回 { ok, out, err }，不抛错，由调用方决定如何处理。 */
