@@ -168,7 +168,7 @@ test('推送前核对：完整流程通过；改源文件后作废；只改文�
   commitAll(root, 'feat: dedup sorted');
   assert.equal(verify({ root }).ok, true, JSON.stringify(verify({ root })));
 
-  write(root, 'docs/note.md', '只改文档\n');
+  write(root, 'docs/04-开发/note.md', '只改文档\n');
   assert.equal(verify({ root }).ok, true, '只改文档不应使复审失效');
 
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return items;\n}\n`);

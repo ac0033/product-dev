@@ -1,202 +1,84 @@
-// 工程闸门同步器：把本套件（闸门脚本、钩子、模板）一键装进任意 git 项目；也可检查已装版本是否漂移。
-// 业务含义：
-//   - 套件文件（scripts/engineering/ 下的 gate、hooks、VERSION）由套件拥有，同步时更新；但若项目里改过且不是套件记录的版本，
-//     视为本地修改：默认不覆盖并报告冲突，--force 才覆盖。套件版本记在 scripts/engineering/kit.lock.json。
-//   - 项目自己的配置（engineering.config.json、scripts/engineering/exempt.json）只在首次创建，之后不动。
-//   - .claude/settings.json 只追加本套件的钩子，保留原有内容；JSON 不合法时整体报错，且不写入任何文件。
-//   - git pre-push 钩子只在没有其他钩子时安装；已有其他钩子时不覆盖，只给出提示。
-// 用法：
-//   node sync.mjs --target <项目目录> [--dry-run] [--force] [--no-hooks]   安装或升级
-//   node sync.mjs --target <项目目录> --check                              只检查是否漂移（有漂移退出码 1）
+// 工程能力包同步器（源端入口）：把整包一键装进项目，整包升级，整包漂移检查，按标签回滚。
+// 业务含义：同步是原子事务（见 tools/bundle-lib.mjs）：先校验整包并算出全部改动，再统一写入，
+// 再冒烟测试，最后写锁文件；任一步失败整体回滚，项目不留半成品。
+// 所有权：套件文件覆盖更新（项目有未登记的本地修改则冲突，--force 才覆盖）；规则只替换标记块；
+// 项目配置与豁免表只在首次创建（配置格式不同时只做格式迁移）；.claude/settings.json 只追加钩子。
+// 用法（在套件目录或任意位置，目标是项目根）：
+//   node sync.mjs --target <项目>                      安装或升级到当前整包版本
+//   node sync.mjs --target <项目> --dry-run            只列出计划，不写入
+//   node sync.mjs --target <项目> --check              整包漂移检查（有差异退出码 1）
+//   node sync.mjs --target <项目> --from-tag <标签>    回滚（或安装）到源仓库的某个版本标签
+//   加 --force 覆盖项目里有本地修改的套件文件；加 --no-hooks 不安装钩子
 import { spawnSync } from 'node:child_process';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isMain } from './gate/lib.mjs';
+import { isMain, git, repoRoot } from './gate/lib.mjs';
+import { checkBundle, executePlan, loadBundle, planBundle } from './tools/bundle-lib.mjs';
 
-/** 套件目录（本文件所在目录）。 */
-const KIT = path.dirname(fileURLToPath(import.meta.url));
-/** 项目内套件目录（相对项目根）。 */
-const TARGET_DIR = 'scripts/engineering';
-/** 写在 pre-push 钩子里的标记，用来识别这是本套件安装的钩子。 */
-const HOOK_MARK = 'engineering-kit:pre-push';
-/** Claude Code 钩子：事件、匹配器与脚本名。 */
-const CLAUDE_HOOKS = [
-  { event: 'PreToolUse', matcher: 'Bash|PowerShell', script: 'pre-bash.mjs' },
-  { event: 'PostToolUse', matcher: 'Edit|Write|MultiEdit', script: 'post-edit.mjs' },
-];
-/** 只在项目里不存在时创建、之后归项目所有的文件。 */
-const CREATE_ONCE = [
-  { src: 'templates/engineering.config.json', dst: 'engineering.config.json' },
-  { src: 'templates/exempt.json', dst: `${TARGET_DIR}/exempt.json` },
-];
+/** 整包根目录（本文件所在 kit 目录的上一级，即 engineering-kit/）。 */
+export const BUNDLE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-/** sha256（十六进制）。 */
-function sha(buf) {
-  return crypto.createHash('sha256').update(buf).digest('hex');
+/**
+ * 同步整包到项目。返回 { ok, version, dryRun, actions, conflicts, messages }。
+ * 选项：bundleRoot（默认当前整包；回滚时指向标签导出的目录）、force、hooks、dryRun、inject（仅测试）。
+ */
+export function syncKit({ target, dryRun = false, force = false, hooks = true, bundleRoot = BUNDLE_ROOT, inject } = {}) {
+  const root = path.resolve(target);
+  const bundle = loadBundle(bundleRoot);
+  const plan = planBundle({ root, bundleRoot, bundle, force, hooks });
+  // 原子同步：存在未处理的冲突时整包一个文件也不写，列出冲突，由用户处理或 --force 覆盖
+  const blocked = plan.conflicts.length > 0 && !force;
+  if (!dryRun && !blocked) executePlan({ root, bundleRoot, bundle, plan, opts: { inject } });
+  const messages = blocked ? [...plan.messages, '存在冲突：整包未写入（原子同步）。请处理冲突，或确认后加 --force 覆盖。'] : plan.messages;
+  return {
+    ok: !blocked,
+    version: bundle.bundleVersion,
+    dryRun,
+    actions: plan.actions,
+    conflicts: plan.conflicts,
+    messages,
+  };
 }
 
-/** 套件拥有的文件：源（套件内相对路径）与目标（项目内相对路径）。 */
-export function kitFiles() {
-  const out = [];
-  const gateDir = path.join(KIT, 'gate');
-  for (const f of fs.readdirSync(gateDir).filter((x) => x.endsWith('.mjs')).sort()) {
-    out.push({ src: `gate/${f}`, dst: `${TARGET_DIR}/gate/${f}` });
-  }
-  for (const f of ['pre-bash.mjs', 'post-edit.mjs']) out.push({ src: `hooks/${f}`, dst: `${TARGET_DIR}/hooks/${f}` });
-  out.push({ src: 'VERSION', dst: `${TARGET_DIR}/VERSION` });
-  return out;
-}
-
-/** 当前套件版本号。 */
-function kitVersion() {
-  return fs.readFileSync(path.join(KIT, 'VERSION'), 'utf8').trim();
-}
-
-/** 项目的 pre-push 钩子路径（绝对路径）；不是 git 仓库时返回 null。 */
-function gitHookPath(target) {
-  const r = spawnSync('git', ['-C', target, 'rev-parse', '--path-format=absolute', '--git-path', 'hooks/pre-push'], { encoding: 'utf8' });
-  return r.status === 0 ? r.stdout.trim() : null;
-}
-
-/** 把本套件的 Claude 钩子追加进 settings 对象（已有则不重复，其他配置原样保留）。 */
-function mergeSettings(obj) {
-  const s = structuredClone(obj);
-  s.hooks = s.hooks || {};
-  for (const h of CLAUDE_HOOKS) {
-    const list = (s.hooks[h.event] = s.hooks[h.event] || []);
-    const has = list.some((g) => (g.hooks || []).some((x) => String(x.command || '').includes(`${TARGET_DIR}/hooks/${h.script}`)));
-    if (!has) {
-      list.push({
-        matcher: h.matcher,
-        hooks: [{ type: 'command', command: `node "$CLAUDE_PROJECT_DIR/${TARGET_DIR}/hooks/${h.script}"`, timeout: 60 }],
-      });
-    }
-  }
-  return s;
+/** 兼容旧接口：返回每个套件文件的 { file, state }。 */
+export function checkKit({ target, bundleRoot = BUNDLE_ROOT } = {}) {
+  return checkBundle({ root: path.resolve(target), bundleRoot }).items.map((i) => ({ file: i.file, state: i.state }));
 }
 
 /**
- * 计划并（非 dry-run 时）执行同步。先完成全部校验与计划，再统一写入，
- * 所以 settings.json 不合法等错误发生时不会留下半成品。
- * 返回 { ok, version, dryRun, actions, conflicts, messages }。
+ * 把某个 git 标签下的整包导出到临时目录，返回目录路径（用于回滚或安装旧版本）。
+ * 标签位于套件所在的源仓库（skills 仓库）中，路径为 engineering-kit/。
  */
-export function syncKit({ target, dryRun = false, force = false, hooks = true }) {
-  const root = path.resolve(target);
-  const version = kitVersion();
-  const lockFile = path.join(root, TARGET_DIR, 'kit.lock.json');
-  const lock = fs.existsSync(lockFile) ? JSON.parse(fs.readFileSync(lockFile, 'utf8')) : { version: null, files: {} };
-  const actions = [];
-  const conflicts = [];
-  const messages = [];
-  const writes = [];
-  const lockFiles = { ...lock.files };
-
-  for (const { src, dst } of kitFiles()) {
-    const content = fs.readFileSync(path.join(KIT, src));
-    const want = sha(content);
-    const abs = path.join(root, dst);
-    const cur = fs.existsSync(abs) ? sha(fs.readFileSync(abs)) : null;
-    if (cur === want) {
-      lockFiles[dst] = want;
-      actions.push({ type: 'skip', file: dst });
-      continue;
-    }
-    const recorded = lock.files[dst];
-    const locallyModified = cur !== null && (recorded === undefined || cur !== recorded);
-    if (locallyModified && !force) {
-      conflicts.push(dst);
-      actions.push({ type: 'conflict', file: dst });
-      messages.push(`冲突：${dst} 与套件版本不同，且项目里有本地修改，未覆盖（确认后用 --force 覆盖）`);
-      continue;
-    }
-    actions.push({ type: cur === null ? 'create' : 'update', file: dst });
-    writes.push({ abs, content });
-    lockFiles[dst] = want;
+export function extractTag(tag, bundleDir = BUNDLE_ROOT) {
+  const top = repoRoot(bundleDir);
+  const rel = path.relative(top, bundleDir).replace(/\\/g, '/');
+  const ref = git(top, ['rev-parse', '--verify', '--quiet', `${tag}^{commit}`]);
+  if (!ref.ok) throw new Error(`找不到版本标签 ${tag}`);
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), `ekit-${tag}-`));
+  const files = git(top, ['ls-tree', '-r', '--name-only', tag, rel]);
+  if (!files.ok) throw new Error(`读取标签 ${tag} 失败`);
+  for (const f of files.out.split('\n').filter(Boolean)) {
+    const body = spawnSync('git', ['-C', top, 'show', `${tag}:${f}`], { encoding: 'buffer' });
+    if (body.status !== 0) throw new Error(`读取 ${tag}:${f} 失败`);
+    const dst = path.join(out, path.relative(rel, f));
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.writeFileSync(dst, body.stdout);
   }
-
-  for (const { src, dst } of CREATE_ONCE) {
-    const abs = path.join(root, dst);
-    if (fs.existsSync(abs)) {
-      actions.push({ type: 'keep', file: dst });
-      continue;
-    }
-    actions.push({ type: 'create', file: dst });
-    writes.push({ abs, content: fs.readFileSync(path.join(KIT, src)) });
-  }
-
-  if (hooks) {
-    const sFile = path.join(root, '.claude', 'settings.json');
-    const before = fs.existsSync(sFile) ? fs.readFileSync(sFile, 'utf8') : null;
-    let obj = {};
-    if (before !== null) {
-      try {
-        obj = JSON.parse(before);
-      } catch (e) {
-        throw new Error(`.claude/settings.json 不是合法 JSON，已停止，未写入任何文件：${e.message}`);
-      }
-    }
-    const text = `${JSON.stringify(mergeSettings(obj), null, 2)}\n`;
-    if (text === before) actions.push({ type: 'skip', file: '.claude/settings.json' });
-    else {
-      actions.push({ type: before === null ? 'create' : 'update', file: '.claude/settings.json' });
-      writes.push({ abs: sFile, content: text });
-    }
-
-    const hookFile = gitHookPath(root);
-    const hookText = fs.readFileSync(path.join(KIT, 'hooks', 'pre-push.sh'), 'utf8');
-    if (!hookFile) messages.push('目标目录不是 git 仓库，未安装 pre-push 钩子');
-    else if (!fs.existsSync(hookFile)) {
-      actions.push({ type: 'create', file: '.git/hooks/pre-push' });
-      writes.push({ abs: hookFile, content: hookText, exec: true });
-    } else {
-      const cur = fs.readFileSync(hookFile, 'utf8');
-      if (!cur.includes(HOOK_MARK)) {
-        messages.push('已有其他 pre-push 钩子，未覆盖。请在其中加入一行：node scripts/engineering/gate/verify.mjs');
-        actions.push({ type: 'conflict', file: '.git/hooks/pre-push' });
-        conflicts.push('.git/hooks/pre-push');
-      } else if (cur !== hookText) {
-        actions.push({ type: 'update', file: '.git/hooks/pre-push' });
-        writes.push({ abs: hookFile, content: hookText, exec: true });
-      } else actions.push({ type: 'skip', file: '.git/hooks/pre-push' });
-    }
-  }
-
-  if (!dryRun) {
-    writes.push({ abs: lockFile, content: `${JSON.stringify({ version, files: lockFiles }, null, 2)}\n` });
-    for (const w of writes) {
-      fs.mkdirSync(path.dirname(w.abs), { recursive: true });
-      fs.writeFileSync(w.abs, w.content);
-      if (w.exec) {
-        try {
-          fs.chmodSync(w.abs, 0o755);
-        } catch {
-          // Windows 上 chmod 无效，git 仍会按 sh 执行钩子
-        }
-      }
-    }
-  }
-  return { ok: conflicts.length === 0, version, dryRun, actions, conflicts, messages };
-}
-
-/** 检查漂移：每个套件文件的状态为 ok / modified（内容与套件不同）/ missing（不存在）。 */
-export function checkKit({ target }) {
-  const root = path.resolve(target);
-  return kitFiles().map(({ src, dst }) => {
-    const abs = path.join(root, dst);
-    if (!fs.existsSync(abs)) return { file: dst, state: 'missing' };
-    const same = sha(fs.readFileSync(abs)) === sha(fs.readFileSync(path.join(KIT, src)));
-    return { file: dst, state: same ? 'ok' : 'modified' };
-  });
+  return out;
 }
 
 /** 解析命令行参数。 */
 function parseArgs(argv) {
-  const flags = new Set(argv.filter((a) => a.startsWith('--')));
-  const i = argv.indexOf('--target');
+  const val = (k) => {
+    const i = argv.indexOf(k);
+    return i >= 0 ? argv[i + 1] : undefined;
+  };
+  const flags = new Set(argv);
   return {
-    target: i >= 0 ? argv[i + 1] : undefined,
+    target: val('--target'),
+    fromTag: val('--from-tag'),
     dryRun: flags.has('--dry-run'),
     force: flags.has('--force'),
     hooks: !flags.has('--no-hooks'),
@@ -207,25 +89,27 @@ function parseArgs(argv) {
 if (isMain(import.meta.url)) {
   const a = parseArgs(process.argv.slice(2));
   if (!a.target) {
-    console.error('用法：node sync.mjs --target <项目目录> [--dry-run] [--force] [--no-hooks]  或  --check');
+    console.error('用法：node sync.mjs --target <项目目录> [--dry-run] [--force] [--no-hooks] [--check] [--from-tag <标签>]');
     process.exit(2);
   }
   try {
+    const bundleRoot = a.fromTag ? extractTag(a.fromTag) : BUNDLE_ROOT;
     if (a.check) {
-      const drift = checkKit({ target: a.target });
-      const bad = drift.filter((d) => d.state !== 'ok');
-      for (const d of bad) console.log(`[${d.state}] ${d.file}`);
-      console.log(bad.length === 0 ? '套件文件与套件版本一致' : `有 ${bad.length} 个文件与套件不一致`);
+      const rep = checkBundle({ root: path.resolve(a.target), bundleRoot });
+      const bad = rep.items.filter((i) => i.state !== 'ok');
+      console.log(`整包 ${rep.bundleVersion}，项目安装的是 ${rep.installedVersion ?? '未安装'}`);
+      for (const i of bad) console.log(`  [${i.state}] ${i.component}  ${i.file}${i.detail ? `  (${i.detail})` : ''}`);
+      console.log(bad.length === 0 ? '整包与清单一致' : `有 ${bad.length} 项与清单不一致`);
       process.exit(bad.length === 0 ? 0 : 1);
     }
-    const r = syncKit({ target: a.target, dryRun: a.dryRun, force: a.force, hooks: a.hooks });
-    console.log(`${r.dryRun ? '[试运行] ' : ''}套件版本 ${r.version}`);
+    const r = syncKit({ target: a.target, dryRun: a.dryRun, force: a.force, hooks: a.hooks, bundleRoot });
+    console.log(`${r.dryRun ? '[试运行] ' : ''}整包版本 ${r.version}${a.fromTag ? `（来自标签 ${a.fromTag}）` : ''}`);
     for (const x of r.actions) console.log(`  [${x.type}] ${x.file}`);
     for (const m of r.messages) console.log(`  ! ${m}`);
     console.log(r.ok ? '同步完成' : '同步完成，但有冲突未处理（见上）');
     process.exit(r.ok ? 0 : 1);
   } catch (e) {
-    console.error(`同步失败：${e.message}`);
+    console.error(`同步失败（未留下部分写入）：${e.message}`);
     process.exit(1);
   }
 }

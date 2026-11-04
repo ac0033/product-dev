@@ -76,5 +76,3 @@ test('配置读取：缺省基准分支是 origin/main', () => {
   assert.equal(loadConfig(root).base, 'origin/main');
 });
 
-void fs;
-void path;

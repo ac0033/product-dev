@@ -92,12 +92,18 @@ test('已有的 settings.json 不是合法 JSON：报错且不写入任何文件
   assert.equal(fs.existsSync(path.join(root, 'scripts/engineering')), false, '校验失败时不应写入闸门文件');
 });
 
-test('配置文件只在首次创建，之后同步不覆盖目标项目的编辑', () => {
+test('配置文件只在首次创建；同步时只做格式迁移，项目的取值保持不变', () => {
   const root = targetRepo();
   syncKit({ target: root });
   write(root, 'engineering.config.json', '{"base":"origin/dev"}\n');
-  syncKit({ target: root });
-  assert.equal(read(root, 'engineering.config.json'), '{"base":"origin/dev"}\n');
+  const r = syncKit({ target: root });
+  assert.ok(r.actions.some((a) => a.type === 'migrate' && a.file === 'engineering.config.json'), JSON.stringify(r.actions));
+  const cfg = JSON.parse(read(root, 'engineering.config.json'));
+  assert.equal(cfg.profile, 2, '旧扁平配置迁移为 profile 结构');
+  assert.equal(cfg.modules.gate.base, 'origin/dev', '项目取值必须保留');
+  // 已经是 profile 的配置不再改动
+  const again = syncKit({ target: root });
+  assert.equal(again.actions.find((a) => a.file === 'engineering.config.json').type, 'keep');
 });
 
 test('已有的其他 pre-push 钩子：不覆盖，并给出提示', () => {

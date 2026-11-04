@@ -13,20 +13,7 @@ export const CONFIG_FILE = 'engineering.config.json';
 /** 豁免表（相对仓库根）。每一条都必须写理由，复审时逐条核对。 */
 export const EXEMPT_FILE = 'scripts/engineering/exempt.json';
 
-/** 配置缺省值：项目配置里没写的字段用这里的值。 */
-const DEFAULTS = {
-  base: 'origin/main',
-  sourceGlobs: [],
-  testGlobs: [],
-  reviewIgnore: ['**/*.md', 'docs/**'],
-  commentMode: 'header+exports',
-  testCommand: 'npm test',
-  testEnv: {},
-  reviewers: ['feature-dev:code-reviewer', '/code-review', 'general-purpose'],
-  reviewMinChars: 200,
-  reviewKeyword: '结论',
-  lockMaxAgeMinutes: 90,
-};
+import { normalizeConfig } from './config.mjs';
 
 /** 判断当前脚本是否被直接运行（而不是被测试 import），用于决定是否执行命令行入口。 */
 export function isMain(importMetaUrl) {
@@ -54,7 +41,7 @@ export function gitCommonDir(root) {
   return r.out.trim();
 }
 
-/** 读取项目配置并补齐缺省值；配置缺失或不是合法 JSON 时报错，提示如何修复。 */
+/** 读取项目配置（profile 结构或旧版扁平结构）并展开为有效配置；缺失、不是合法 JSON 或结构错误时报错。 */
 export function loadConfig(root) {
   const file = path.join(root, CONFIG_FILE);
   if (!fs.existsSync(file)) throw new Error(`缺少 ${CONFIG_FILE}，请先运行同步脚本创建`);
@@ -64,15 +51,15 @@ export function loadConfig(root) {
   } catch (e) {
     throw new Error(`${CONFIG_FILE} 不是合法 JSON：${e.message}`);
   }
-  return { ...DEFAULTS, ...user };
+  return normalizeConfig(user);
 }
 
 /** 读取豁免表；没有则为空。豁免只放行被列出的路径，不影响其他文件。 */
 export function loadExempt(root) {
   const file = path.join(root, EXEMPT_FILE);
-  if (!fs.existsSync(file)) return { testFirst: {}, comments: {} };
+  if (!fs.existsSync(file)) return { testFirst: {}, comments: {}, newFiles: {} };
   const j = JSON.parse(fs.readFileSync(file, 'utf8'));
-  return { testFirst: j.testFirst || {}, comments: j.comments || {} };
+  return { testFirst: j.testFirst || {}, comments: j.comments || {}, newFiles: j.newFiles || {} };
 }
 
 /** 路径（斜杠分隔）是否匹配任一 glob。 */
@@ -114,6 +101,16 @@ export function changedFiles(root, base) {
   }
   for (const f of pathLines(git(root, ['ls-files', '--others', '--exclude-standard']).out)) set.add(f);
   return [...set].sort();
+}
+
+/**
+ * 本次新增的文件：未跟踪的文件，加上相对基准分支已提交新增（diff-filter=A）的文件。
+ */
+export function newFiles(root, base) {
+  const out = new Set(pathLines(git(root, ['ls-files', '--others', '--exclude-standard']).out));
+  const mb = git(root, ['merge-base', base, 'HEAD']);
+  if (mb.ok) for (const f of pathLines(git(root, ['diff', '--name-only', '--diff-filter=A', mb.out.trim(), 'HEAD']).out)) out.add(f);
+  return [...out].sort();
 }
 
 /**

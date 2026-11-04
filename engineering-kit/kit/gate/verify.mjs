@@ -8,6 +8,7 @@ import { checkTestFirst } from './check-test-first.mjs';
 import {
   changedFiles,
   isMain,
+  newFiles,
   isSourceFile,
   loadConfig,
   loadExempt,
@@ -19,6 +20,31 @@ import {
   uncommittedInScope,
 } from './lib.mjs';
 
+/**
+ * 新文件的位置检查：文档只能落在阶段目录、记录目录、索引或模板目录；新的顶层目录须在白名单内（以点开头的工具目录不查）。
+ * 不在允许位置、又没有豁免理由（exempt.newFiles）的新文件，推送时拦截。
+ */
+export function newFileProblems(root, config, exempt) {
+  const out = [];
+  const allowedDoc = (rel) =>
+    rel === 'docs/README.md' ||
+    rel.startsWith('docs/_templates/') ||
+    config.layout.stages.some((s) => rel.startsWith(`docs/${s}/`)) ||
+    config.hygiene.recordDirs.some((d) => rel.startsWith(`${d}/`));
+  const ex = exempt.newFiles || {};
+  for (const f of newFiles(root, config.base)) {
+    if (ex[f]) continue;
+    if (f.startsWith('docs/') && !allowedDoc(f)) {
+      out.push(`新文件不在允许的文档位置，且无理由：${f}（请放入阶段目录或记录目录，或在豁免表 newFiles 中写明理由）`);
+    }
+    const top = f.includes('/') ? f.split('/')[0] : null;
+    if (top && !top.startsWith('.') && !config.layout.topLevelAllowed.includes(top)) {
+      out.push(`新文件所在顶层目录不在白名单：${f}（允许：${config.layout.topLevelAllowed.join('、')}）`);
+    }
+  }
+  return out;
+}
+
 /** 核对推送条件。返回 { ok, problems, note }。 */
 export function verify({ root }) {
   const config = loadConfig(root);
@@ -26,10 +52,14 @@ export function verify({ root }) {
   const changed = changedFiles(root, config.base);
   const sources = changed.filter((f) => isSourceFile(f, config) && !matchesAny(f, config.reviewIgnore));
   const scope = scopeFiles(root, config);
+  const newProblems = newFileProblems(root, config, exempt);
   // 范围 = 本次所有非忽略的改动（源文件、闸门脚本、配置等）。只有文档类改动才可以不要记录。
-  if (scope.length === 0) return { ok: true, problems: [], note: '本次只有文档类改动（reviewIgnore 之内），无需闸门记录' };
+  if (scope.length === 0) {
+    return { ok: newProblems.length === 0, problems: newProblems, note: '本次只有文档类改动（reviewIgnore 之内），无需闸门记录' };
+  }
 
   const problems = [
+    ...newProblems,
     ...checkTestFirst({ root, changed, config, exempt: exempt.testFirst }).map((p) => p.message),
     ...checkComments({ root, files: sources, config, exempt: exempt.comments }).map((p) => p.message),
   ];

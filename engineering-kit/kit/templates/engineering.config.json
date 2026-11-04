@@ -1,26 +1,33 @@
 {
-  "_说明": "项目配置：同步时只创建一次，之后由本项目维护（同步不覆盖）。sourceGlobs / testGlobs 必须按本项目目录结构修改；testCommand 是闸门运行的测试命令。",
-  "base": "origin/main",
-  "sourceGlobs": [
-    "src/**/*.ts"
-  ],
-  "testGlobs": [
-    "test/**/*.test.ts",
-    "tests/**/*.test.ts"
-  ],
-  "reviewIgnore": [
-    "**/*.md",
-    "docs/**"
-  ],
-  "commentMode": "header+exports",
-  "testCommand": "npm test",
-  "testEnv": {},
-  "reviewers": [
-    "feature-dev:code-reviewer",
-    "/code-review",
-    "general-purpose"
-  ],
-  "reviewMinChars": 200,
-  "reviewKeyword": "结论",
-  "lockMaxAgeMinutes": 90
+  "_说明": "项目配置（profile 2）：同步时只创建一次，之后由本项目维护，同步不覆盖。modules 是模块参数，layout 是目录布局，hygiene 是巡检参数，rules 是闸门规则。sourceGlobs、testGlobs、testCommand 必须按本项目修改。",
+  "profile": 2,
+  "modules": {
+    "gate": {
+      "base": "origin/main",
+      "testCommand": "npm test",
+      "testEnv": {},
+      "lockMaxAgeMinutes": 90
+    },
+    "review": {
+      "reviewers": ["feature-dev:code-reviewer", "/code-review", "general-purpose"],
+      "reviewMinChars": 200,
+      "reviewKeyword": "结论"
+    }
+  },
+  "layout": {
+    "sourceGlobs": ["src/**/*.ts"],
+    "testGlobs": ["test/**/*.test.ts", "tests/**/*.test.ts"],
+    "stages": ["01-原型", "02-需求分析", "03-架构设计", "04-开发", "05-测试", "06-预发部署"],
+    "topLevelAllowed": ["docs", "src", "tests", "scripts", "config", "templates", ".github"]
+  },
+  "hygiene": {
+    "bannedNameTokens": ["copy", "final", "bak", "old", "tmp"],
+    "staleDraftDays": 30,
+    "recordDirs": ["docs/acceptance", "docs/adr", "docs/release"],
+    "statusValues": ["draft", "active", "accepted", "superseded", "done", "archived"]
+  },
+  "rules": {
+    "reviewIgnore": ["**/*.md", "docs/**"],
+    "commentMode": "header+exports"
+  }
 }
