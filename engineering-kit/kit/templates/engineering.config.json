@@ -1,0 +1,26 @@
+{
+  "_说明": "项目配置：同步时只创建一次，之后由本项目维护（同步不覆盖）。sourceGlobs / testGlobs 必须按本项目目录结构修改；testCommand 是闸门运行的测试命令。",
+  "base": "origin/main",
+  "sourceGlobs": [
+    "src/**/*.ts"
+  ],
+  "testGlobs": [
+    "test/**/*.test.ts",
+    "tests/**/*.test.ts"
+  ],
+  "reviewIgnore": [
+    "**/*.md",
+    "docs/**"
+  ],
+  "commentMode": "header+exports",
+  "testCommand": "npm test",
+  "testEnv": {},
+  "reviewers": [
+    "feature-dev:code-reviewer",
+    "/code-review",
+    "general-purpose"
+  ],
+  "reviewMinChars": 200,
+  "reviewKeyword": "结论",
+  "lockMaxAgeMinutes": 90
+}
