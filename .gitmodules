@@ -1,6 +1,0 @@
-[submodule "white-box-explainer"]
-	path = white-box-explainer
-	url = https://github.com/ac0033/white-box-explainer.git
-[submodule "Humanizer-zh"]
-	path = Humanizer-zh
-	url = https://github.com/ac0033/Humanizer-zh.git
