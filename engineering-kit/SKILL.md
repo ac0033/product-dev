@@ -1,6 +1,6 @@
 ---
 name: engineering-kit
-description: 工程能力包：把工程规则（AGENTS.md 标记块）、闸门脚本（测试先行、注释、复审记录、推送核对）、钩子、巡检、目录与文档模板整体装进任意 git 项目；整包升级、整包漂移检查、按版本标签回滚；反向把经验整理为变更集（用户经验直接应用，agent 经验先提案待确认）并发布版本。原则在全局 CLAUDE.md 的“工程纪律”和“经验提炼”，流程细则在 references/process.md。
+description: 工程能力包：向 Git 项目安装、升级和检查工程规则、闸门、钩子与模板；按项目规则编排开发交付，并把项目经验整理成可复用记录或套件变更。
 argument-hint: "[项目目录] [--init] [--profile ts|python] [--check | --dry-run | --force | --from-tag <标签>]"
 disable-model-invocation: true
 ---
@@ -9,7 +9,10 @@ disable-model-invocation: true
 
 参数：`$ARGUMENTS`
 
-本技能只做两类事：把整包装进或升级到项目；以及把项目里得到的经验整理为变更集、发布为版本。它不授予超出项目规则的权限：推送、合并、部署仍按项目授权规则执行。
+按任务选择：安装或维护工程能力包；编排需求明确后的开发交付；记录用户可复用的经验；或将经验整理为套件变更。推送、合并、部署仍按用户授权与项目规则执行。
+
+- 开发交付：先读 `references/process.md`；本机存在 `references/dev-flow.local.md` 且任务涉及对应项目时，再读其中项目专用流程。没有该文件时以项目实际规则为准。
+- 经验记录：读 `references/process.md` 的“经验记录”节；只在用户确有可复用经验时记录。
 
 整包的清单是 `bundle.json`（组件、安装位置、所有权、整包版本）。下文 `<kit>` 指本技能的 `kit/` 目录，`<整包>` 指本技能目录。
 

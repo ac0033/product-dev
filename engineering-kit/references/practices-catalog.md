@@ -1,5 +1,7 @@
 # 可复用工程实践目录
 
+说明：本文件保留盘点时的历史结论；经验记录的现行规则见 `process.md` 的“经验记录”节。
+
 来源：LearnMap（D:\4_Projects\LearnMap）的 AGENTS.md、docs/engineering/（playbook、code-gate、git、sessions、development）、scripts/dev/（gate、hooks、merge）、memory 与 practices/。盘点日期 2026-11-04。
 
 通用度：★ 任何项目都适用；◇ 机制通用，参数或语言需按项目适配；● 项目特定，只作参考。
