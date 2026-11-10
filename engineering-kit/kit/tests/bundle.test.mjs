@@ -131,7 +131,7 @@ test('整包漂移检查：同步后全部一致；改动标记块或删除文�
 test('文档：阶段目录与索引、模板随整包安装；模板不会被当作阶段', () => {
   const root = targetRepo();
   syncKit({ target: root });
-  for (const stage of ['01-原型', '02-需求分析', '03-架构设计', '04-开发', '05-测试', '06-预发部署']) {
+  for (const stage of ['00-总览', '01-需求', '02-原型', '03-架构', '04-开发', '05-测试', '06-发布']) {
     assert.ok(fs.existsSync(path.join(root, 'docs', stage, 'README.md')), `缺少阶段 ${stage}`);
   }
   assert.ok(fs.existsSync(path.join(root, 'docs', 'README.md')));

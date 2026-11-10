@@ -88,7 +88,7 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 
 ## 5. 日常闸门与当前适配状态
 
-目标流程和各阶段检查以 `references/process.md` 第 4、5 节为唯一出处，两种流程的命令也写在第 4 节。0.3.1 的闸门按项目配置 `modules.gate.reviewFlow` 走其中一种：
+目标流程和各阶段检查以 `references/process.md` 第 4、5 节为唯一出处，两种流程的命令也写在第 4 节。0.4.0 的闸门按项目配置 `modules.gate.reviewFlow` 走其中一种：
 
 | 流程 | 推送核对（`verify.mjs`） | 复审登记（`review.mjs`） | 合并 |
 |---|---|---|---|
@@ -111,7 +111,7 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 - Claude 钩子只防误操作，挡不住刻意绕过；终端直接 `git push` 不经过 Claude 钩子，靠 git pre-push 钩子兜底。
 - 复审记录是本机约定，不是密码学证明；复审者名字由登记者填写，套件不验证它确是独立子代理。守住它靠 PR 里公开的复审摘要。
 - 测试记录与 `pre-push` 流程的复审记录放在各工作树自己的 git 目录（`engineering-gate/`），多个工作树互不覆盖，不进工作区；闸门锁与 `pr` 流程的 PR 审查记录（`engineering-gate/pr/<编号>/`）放在 git 公共目录，所有工作树共用：同一仓库同时只跑一个闸门，复审与合并可以在不同工作树进行。
-- `pr` 流程只支持 GitHub（经 `gh`）；`gh` 不存在或调用失败时登记与合并都报错，不放行。只改文档的 PR（全部文件在 `reviewIgnore` 之内）合并时只核对 PR 打开与 CI 全过，不要求审查记录；PR 文件列表为空或达到 100 个（`gh` 可能截断）时按含代码处理。其余 PR 合并入口不判断风险档位：代码复审必需，一致性审能否延期由登记者按 `references/process.md` 第 4 节的分档判断。
+- `pr` 流程只支持 GitHub（经 `gh`）；`gh` 不存在或调用失败时登记与合并都报错，不放行。只改文档的 PR 和各风险档位怎样审，见 `references/process.md` 第 4 节。
 - 巡检的“已合并分支”判断基于补丁等价（git cherry），squash 合并后的分支需人工复核。
 
 ## 7. 维护

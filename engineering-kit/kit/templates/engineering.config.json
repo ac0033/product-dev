@@ -18,14 +18,14 @@
   "layout": {
     "sourceGlobs": ["src/**/*.ts"],
     "testGlobs": ["test/**/*.test.ts", "tests/**/*.test.ts"],
-    "stages": ["01-原型", "02-需求分析", "03-架构设计", "04-开发", "05-测试", "06-预发部署"],
+    "stages": ["00-总览", "01-需求", "02-原型", "03-架构", "04-开发", "05-测试", "06-发布"],
     "topLevelAllowed": ["docs", "src", "tests", "scripts", "config", "templates", ".github", ".claude"]
   },
   "hygiene": {
     "bannedNameTokens": ["copy", "final", "bak", "old", "tmp"],
     "staleDraftDays": 30,
     "recordDirs": ["docs/acceptance", "docs/adr", "docs/release"],
-    "statusValues": ["draft", "active", "accepted", "superseded", "done", "archived"]
+    "statusValues": ["draft", "review", "active", "accepted", "superseded", "done", "archived"]
   },
   "rules": {
     "reviewIgnore": ["**/*.md", "docs/**"],

@@ -34,14 +34,14 @@ export const REVIEW_FLOWS = ['pre-push', 'pr'];
 
 /** 目录布局与巡检的缺省值（profile 的 layout、hygiene 段）。 */
 export const LAYOUT_DEFAULTS = {
-  stages: ['01-原型', '02-需求分析', '03-架构设计', '04-开发', '05-测试', '06-预发部署'],
+  stages: ['00-总览', '01-需求', '02-原型', '03-架构', '04-开发', '05-测试', '06-发布'],
   topLevelAllowed: ['docs', 'src', 'tests', 'scripts', 'config', 'templates', '.github', '.claude'],
 };
 export const HYGIENE_DEFAULTS = {
   bannedNameTokens: ['copy', 'final', 'bak', 'old', 'tmp'],
   staleDraftDays: 30,
   recordDirs: ['docs/acceptance', 'docs/adr', 'docs/release'],
-  statusValues: ['draft', 'active', 'accepted', 'superseded', 'done', 'archived'],
+  statusValues: ['draft', 'review', 'active', 'accepted', 'superseded', 'done', 'archived'],
 };
 
 /** 是否为普通对象（不是数组、不是 null）。 */
