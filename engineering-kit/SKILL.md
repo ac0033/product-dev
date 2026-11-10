@@ -11,10 +11,10 @@ disable-model-invocation: true
 
 按任务选择：安装或维护工程能力包；编排需求明确后的开发交付；记录用户可复用的经验；或将经验整理为套件变更。推送、合并、部署仍按用户授权与项目规则执行。
 
-- 开发交付：先读 `references/process.md`；本机存在 `references/dev-flow.local.md` 且任务涉及对应项目时，再读其中项目专用流程。没有该文件时以通用流程和项目实际规则为准，不推断缺失的项目命令。
+- 开发交付：先读 `references/process.md`；本机存在 `references/dev-flow.local.md` 且任务涉及对应项目时，再读其中项目专用流程。`references/*.local.md` 是只留本机的记录（项目专用流程、试装与验收记录、实践来源），不进仓库。没有该文件时以通用流程和项目实际规则为准，不推断缺失的项目命令。
 - 经验记录：读 `references/process.md` 的“经验记录”节；只在用户确有可复用经验时记录，按当前用户授权记录，不把普通对话视为持久化授权。
 
-注意：闸门有两种复审流程（`modules.gate.reviewFlow`）：默认 `pre-push` 仍是推送前单项复审；`pr` 提供 CI 后双审与合并入口，但受影响测试选择仍未实现，也尚未在真实 GitHub 仓库里走通。安装或升级前先看第 5 节，已使用自有闸门的项目不要覆盖。
+注意：闸门有两种复审流程（`modules.gate.reviewFlow`）：默认 `pre-push` 仍是推送前单项复审；`pr` 提供 CI 后双审与合并入口，但受影响测试选择仍未实现。安装或升级前先看第 5 节，已使用自有闸门的项目不要覆盖。
 
 整包的清单是 `bundle.json`（组件、安装位置、所有权、整包版本）。下文 `<kit>` 指本技能的 `kit/` 目录，`<整包>` 指本技能目录。
 
@@ -97,7 +97,7 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 
 `pr` 流程需要 GitHub 远程、已登录的 `gh`，且 PR 上有 CI 检查（一项都没有视为未通过）；不满足的项目留在 `pre-push`。把 `reviewFlow` 改回 `pre-push` 即恢复旧流程。
 
-尚未实现：受影响测试选择（推送前仍跑配置的 `testCommand` 全量）；同一 PR 三轮审查的自动计数。未验证：`pr` 流程尚未在带 CI 的真实 GitHub 仓库里走通（见 `references/contract-pr-review-merge.md`）。已采用自有闸门的项目优先使用自己的闸门，不要用本版本覆盖。
+尚未实现：受影响测试选择（推送前仍跑配置的 `testCommand` 全量）；同一 PR 三轮审查的自动计数。真实验证：`pr` 流程已由用户在带 CI 的 GitHub 仓库里走通（2026-11-10，用户报告，见 `references/contract-pr-review-merge.md`）。已采用自有闸门的项目优先使用自己的闸门，不要用本版本覆盖。
 
 ## 6. 套件的范围与局限
 
@@ -113,12 +113,10 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 - 测试记录与 `pre-push` 流程的复审记录放在各工作树自己的 git 目录（`engineering-gate/`），多个工作树互不覆盖，不进工作区；闸门锁与 `pr` 流程的 PR 审查记录（`engineering-gate/pr/<编号>/`）放在 git 公共目录，所有工作树共用：同一仓库同时只跑一个闸门，复审与合并可以在不同工作树进行。
 - `pr` 流程只支持 GitHub（经 `gh`）；`gh` 不存在或调用失败时登记与合并都报错，不放行。只改文档的 PR（全部文件在 `reviewIgnore` 之内）合并时只核对 PR 打开与 CI 全过，不要求审查记录；PR 文件列表为空或达到 100 个（`gh` 可能截断）时按含代码处理。其余 PR 合并入口不判断风险档位：代码复审必需，一致性审能否延期由登记者按 `references/process.md` 第 4 节的分档判断。
 - 巡检的“已合并分支”判断基于补丁等价（git cherry），squash 合并后的分支需人工复核。
-- 试装记录（PDFtranslator）：`references/trial-pdftranslator.md`。
 
 ## 7. 维护
 
-- 源目录：`D:\4_Projects\ai_agent\skills\engineering-kit\`（ac0033/skills 仓库，分支 `feat/engineering-kit-bundle`，未推送）。生效副本：`D:\3_软件安装\ClaudeCodeData\skills\engineering-kit\`，与源目录保持一致。
+- 源目录是源仓库（ac0033/skills）的 `engineering-kit/`；本机若另有生效副本（如 Claude Code 的技能目录），改动后把源目录复制过去，保持一致。
 - 验证：`cd "<kit>" && node --test tests/*.test.mjs`（changeset 测试在临时副本上运行）。
 - 版本：`bundle.json` 的 `bundleVersion` 与 `kit/VERSION` 必须一致。发布前运行 `release.mjs --check`。
-- 实践目录（约 60 条纪律的来源与适用范围）：`references/practices-catalog.md`。
-- LearnMap 仍使用自己的闸门（`scripts/dev/gate/`），未迁移到本整包。迁移前不要在 LearnMap 上运行同步。
+- 已有自己闸门的项目不要直接运行同步；迁移前先比对两边规则，具体项目的情况记在本机的 `references/*.local.md`。

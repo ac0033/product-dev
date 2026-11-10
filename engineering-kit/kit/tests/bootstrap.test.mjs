@@ -181,7 +181,7 @@ test('树哈希：同一份提交内容在 CRLF 与 LF 的工作区下哈希相�
 });
 
 test('命令行入口：经由目录连接（junction/符号链接）调用时也要执行，不能静默什么都不做', () => {
-  // Windows 上 D:\3_软件安装 可能是指向 D:\3_Software 的连接，Node 会把模块路径解析为真实路径；
+  // Windows 上安装目录可能是指向另一个目录的连接，Node 会把模块路径解析为真实路径；
   // 若入口判断只比较字符串，就会出现“退出码 0、什么输出也没有”。
   const real = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-real-'));
   const link = `${real}-link`;

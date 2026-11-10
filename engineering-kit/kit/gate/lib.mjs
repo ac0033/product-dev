@@ -18,7 +18,7 @@ import { normalizeConfig } from './config.mjs';
 
 /** 判断当前脚本是否被直接运行（而不是被测试 import），用于决定是否执行命令行入口。 */
 // 入口判断按真实路径比较：Node 的模块地址是真实路径，而命令行里可能经过目录连接（junction/符号链接），
-// 只比较字符串会让命令静默不执行（例如 Windows 上 D:_软件安装 指向 D:_Software）。
+// 只比较字符串会让命令静默不执行（例如 Windows 上安装目录是指向另一个目录的连接）。
 export function isMain(importMetaUrl) {
   if (!process.argv[1]) return false;
   const here = fileURLToPath(importMetaUrl);
