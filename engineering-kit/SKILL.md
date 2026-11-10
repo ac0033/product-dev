@@ -11,8 +11,10 @@ disable-model-invocation: true
 
 按任务选择：安装或维护工程能力包；编排需求明确后的开发交付；记录用户可复用的经验；或将经验整理为套件变更。推送、合并、部署仍按用户授权与项目规则执行。
 
-- 开发交付：先读 `references/process.md`；本机存在 `references/dev-flow.local.md` 且任务涉及对应项目时，再读其中项目专用流程。没有该文件时以项目实际规则为准。
-- 经验记录：读 `references/process.md` 的“经验记录”节；只在用户确有可复用经验时记录。
+- 开发交付：先读 `references/process.md`；本机存在 `references/dev-flow.local.md` 且任务涉及对应项目时，再读其中项目专用流程。没有该文件时以通用流程和项目实际规则为准，不推断缺失的项目命令。
+- 经验记录：读 `references/process.md` 的“经验记录”节；只在用户确有可复用经验时记录，按当前用户授权记录，不把普通对话视为持久化授权。
+
+注意：本版套件的闸门仍执行旧流程，与当前目标流程不一致；安装或升级前先看第 5 节，已使用新流程的项目不要覆盖。
 
 整包的清单是 `bundle.json`（组件、安装位置、所有权、整包版本）。下文 `<kit>` 指本技能的 `kit/` 目录，`<整包>` 指本技能目录。
 
@@ -75,6 +77,7 @@ node "<kit>/sync.mjs" --target "<项目>" --from-tag engineering-kit-v0.1.0
 - agent 总结的经验：先登记为提案，批量列给用户确认（推荐项在前），用户确认后才以 `--approved` 应用。
 
 ```bash
+node "<kit>/tools/changeset.mjs" propose <变更集.json>      # 登记为提案
 node "<kit>/tools/changeset.mjs" list                       # 待确认列表（推荐项在前）
 node "<kit>/tools/changeset.mjs" apply <id> [--approved]    # 应用
 node "<kit>/tools/release.mjs" --check                      # 检查整包可发布
@@ -83,29 +86,22 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 
 变更集格式见 `kit/tools/changeset.mjs` 顶部注释。应用后不提交，由 `release.mjs` 提交。
 
-## 5. 日常闸门（装进项目之后）
+## 5. 日常闸门与当前适配状态
 
-1. 先写测试，再写带注释的实现。
-2. `node scripts/engineering/gate/gate.mjs`：静态检查（测试先行、注释）通过后运行 `testCommand`，结果绑定当前代码树。
-3. 子代理复审（独立子代理，不把自己的结论交给它）；报告保存到仓库之外，含“结论”一节。
-4. `node scripts/engineering/gate/review.mjs pass --reviewer <名> --report <报告> --summary "<一句话>"`。
-5. `git push` 时 pre-push 钩子核对：范围内改动已提交；测试与复审记录对应当前代码；新文件在允许位置。
-6. 收工与巡检：`node scripts/engineering/gate/hygiene.mjs`。巡检只报告，删除须先列清单经用户确认。
-
-完整流程（开工、方案、文档规则、收工的经验提炼、巡检的语义一致性审、授权边界）见 `references/process.md`。
+目标流程和各阶段检查以 `references/process.md` 第 4、5 节为唯一出处。当前 0.2.2 的脚本仍要求推送前单项复审，测试只执行配置的 `testCommand`，没有 CI 后双审查、最终 PR 绑定或受影响测试选择的通用实现；不能声称已自动支持目标流程。已采用新流程的项目优先使用自己的闸门，不要用本版本覆盖。
 
 ## 6. 套件的范围与局限
 
 - 必须是 git 仓库：目标不是 git 仓库时拒绝安装，加 `--init` 才会自动 git init。
 - 基准分支默认 `base: "auto"`：依次取 origin/HEAD、origin/main、origin/master、main、master；仓库还没有任何提交时，首次提交前的全部文件都按改动检查。没有远程也能用。
-- 尚无源码与测试文件时，闸门不运行测试命令（记录为“无需测试”）；一旦出现源码，测试先行检查就会要求测试。
+- 尚无源码与测试文件时，闸门不运行测试命令（记录为“无需测试”）；一旦出现源码，测试先行检查就会要求测试。本次改动里有代码文件、却没有任何文件匹配 `sourceGlobs` 与 `testGlobs` 时，闸门报错（多半是配置没按项目修改），不记为通过。
 - Python 预设的测试命令是 `python -m pytest`：需要 Python 3.12 与 pytest 在 PATH 中。TypeScript 预设用 Node 24 的 `node --test` 直接运行 .test.ts，不做 tsc 类型检查。
 - 源文件判断依赖 `sourceGlobs` 与 `testGlobs`，配置不准，闸门就不准。
 - 测试先行靠“测试文件是否 import 了源文件的模块名”判断。经 index 再导出的间接引用识别不出来，应在豁免表里写理由。
 - 注释检查：文件开头（连续注释行，或 Python 文档字符串含多行）要有至少 8 个字的说明；JS/TS 导出函数、类、常量、枚举前要紧挨注释。Python 只查文件头。
 - Claude 钩子只防误操作，挡不住刻意绕过；终端直接 `git push` 不经过 Claude 钩子，靠 git pre-push 钩子兜底。
 - 复审记录是本机约定，不是密码学证明。守住它靠 PR 里公开的复审摘要。
-- 记录放在 git 公共目录（`.git/engineering-gate/`），不进工作区。
+- 测试与复审记录放在各工作树自己的 git 目录（`engineering-gate/`），多个工作树互不覆盖，不进工作区；闸门锁放在 git 公共目录，同一仓库同时只跑一个闸门。
 - 巡检的“已合并分支”判断基于补丁等价（git cherry），squash 合并后的分支需人工复核。
 - 试装记录（PDFtranslator）：`references/trial-pdftranslator.md`。
 
