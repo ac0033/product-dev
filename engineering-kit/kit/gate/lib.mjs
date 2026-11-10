@@ -334,10 +334,10 @@ export function ciProblems(checks) {
 
 /**
  * 读取 PR 的状态、最终提交与 CI 结果（gh pr view；statusCheckRollup 是最终提交上的检查）。
- * 返回 { state, head, ciProblems }；gh 失败或输出不合法时抛错。
+ * 返回 { state, head, ciProblems, files }（files 是 PR 改动的文件路径，gh 最多返回 100 个）；gh 失败或输出不合法时抛错。
  */
 export function readPr(root, pr, gh) {
-  const out = runGh(gh, ['pr', 'view', pr, '--json', 'state,headRefOid,statusCheckRollup'], root);
+  const out = runGh(gh, ['pr', 'view', pr, '--json', 'state,headRefOid,statusCheckRollup,files'], root);
   let j;
   try {
     j = JSON.parse(out);
@@ -345,7 +345,8 @@ export function readPr(root, pr, gh) {
     throw new Error(`gh pr view 的输出不是合法 JSON：${e.message}`);
   }
   if (!j || !j.headRefOid) throw new Error('gh pr view 的输出缺少最终提交（headRefOid）');
-  return { state: j.state, head: j.headRefOid, ciProblems: ciProblems(j.statusCheckRollup) };
+  const files = Array.isArray(j.files) ? j.files.map((f) => f.path) : [];
+  return { state: j.state, head: j.headRefOid, ciProblems: ciProblems(j.statusCheckRollup), files };
 }
 
 /** PR 审查记录文件：git 公共目录下 engineering-gate/pr/<编号>/<kind>.json（复审与合并可能在不同工作树进行，所以不放 recordDir）。 */

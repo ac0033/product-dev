@@ -71,7 +71,7 @@ function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, 
   const no = prNumber(pr);
   let text = null;
   if (verdict === 'defer') {
-    if (kind !== 'consistency') return { ok: false, message: '只有一致性审可以延期（defer 只接受 --kind consistency），代码复审始终必需' };
+    if (kind !== 'consistency') return { ok: false, message: '只有一致性审可以延期（defer 只接受 --kind consistency），代码复审不能延期' };
     if (!reason || !reason.trim()) return { ok: false, message: '延期须用 --reason 写明理由' };
   } else {
     const checked = checkReport(config, verdict, reviewer, reportPath);

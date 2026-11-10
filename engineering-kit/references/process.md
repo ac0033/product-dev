@@ -42,7 +42,7 @@
 
 | 改动 | 代码复审 | 一致性审 |
 |---|---|---|
-| 只改文档（`reviewIgnore` 之内） | 不做（`pr` 流程的合并入口仍要求登记，见本节末） | 并入每周巡检（第 8 节） |
+| 只改文档（`reviewIgnore` 之内） | 不做 | 并入每周巡检（第 8 节） |
 | 低风险小改动 | 每个 PR 合并前 | 可延期：并入每周巡检，或与其他 PR 集中审；延期要写明理由 |
 | 中高风险 | 每个 PR 合并前 | 每个 PR 合并前 |
 
@@ -55,7 +55,7 @@
   - 代码复审：`review.mjs pass|fail --pr <编号> --kind code --reviewer <名> --report <报告> --summary "<一句话>"`。
   - 一致性审：同上，`--kind consistency`；按分档可延期时用 `review.mjs defer --pr <编号> --kind consistency --reason "<理由>"`。
   - 合并：`merge.mjs <编号> [--method squash|merge|rebase]`。PR 打开、CI 全过、代码复审为 pass、一致性审为 pass 或延期、两份记录的提交都等于当前最终提交，才执行 `gh pr merge --match-head-commit`（默认 squash 并删除远端分支）；否则逐条列出原因，不合并。PR 又有新提交时记录过期，重新审查后再登记。
-  - 合并入口不判断风险档位：代码复审始终必需，只改文档的 PR 也要登记；能否延期一致性审由登记者按上表判断。
+  - 只改文档的 PR（全部文件在 `reviewIgnore` 之内）按上表不做审查，合并入口只核对 PR 打开与 CI 全过；PR 文件列表为空或达到 100 个（`gh` 可能截断）时按含代码处理。其余 PR 合并入口不判断风险档位：代码复审必需，能否延期一致性审由登记者按上表判断。
   - 需要 GitHub 远程和已登录的 `gh`；没有 CI 的项目留在 `pre-push`。
 
 ## 5. 预发、生产与事故回归

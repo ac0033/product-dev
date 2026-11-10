@@ -33,8 +33,8 @@ const GREEN = [
 ];
 
 /** gh pr view 的输出。 */
-function prView({ state = 'OPEN', head = HEAD, checks = GREEN } = {}) {
-  return { state, headRefOid: head, statusCheckRollup: checks };
+function prView({ state = 'OPEN', head = HEAD, checks = GREEN, files = ['src/dedup.ts', 'test/dedup.test.ts'] } = {}) {
+  return { state, headRefOid: head, statusCheckRollup: checks, files: files.map((p) => ({ path: p, additions: 1, deletions: 0 })) };
 }
 
 /** 假的 gh：pr view 返回给定 PR，其余命令成功；所有调用记在 calls 里。 */
@@ -278,4 +278,37 @@ test('验收 10：pr 流程项目同步后有 merge.mjs、冒烟通过；回滚�
   git(root, ['checkout', '-q', 'main']);
   assert.equal(syncKit({ target: root }).ok, true);
   assert.equal(JSON.parse(read(root, 'engineering.config.json')).modules.gate.reviewFlow, 'pr');
+});
+
+test('只改文档的 PR：没有任何审查记录、CI 全过时合并；CI 未过时拒绝', () => {
+  const root = prRepo();
+  const docs = ['README.md', 'docs/04-开发/note.md'];
+  const gh = fakeGh(prView({ files: docs }));
+  const res = mergePr({ root, pr: '7', gh });
+  assert.equal(res.ok, true, JSON.stringify(res.problems));
+  assert.deepEqual(gh.calls.at(-1), ['pr', 'merge', '7', '--squash', '--match-head-commit', HEAD, '--delete-branch']);
+
+  const red = fakeGh(prView({ files: docs, checks: [...GREEN, { __typename: 'CheckRun', name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] }));
+  const r2 = mergePr({ root, pr: '7', gh: red });
+  assert.equal(r2.ok, false);
+  assert.ok(r2.problems.some((p) => p.includes('CI 检查未通过')), r2.problems.join('\n'));
+  assert.equal(merged(red), false);
+});
+
+test('文档与代码混合的 PR 没有审查记录时拒绝合并', () => {
+  const gh = fakeGh(prView({ files: ['README.md', 'src/dedup.ts'] }));
+  const res = mergePr({ root: prRepo(), pr: '7', gh });
+  assert.equal(res.ok, false);
+  assert.ok(res.problems.some((p) => p.includes('缺少代码复审记录')), res.problems.join('\n'));
+  assert.equal(merged(gh), false);
+});
+
+test('文件列表为空或达到 100 个（可能被截断）时不按只改文档处理', () => {
+  for (const files of [[], Array.from({ length: 100 }, (_, i) => `docs/n${i}.md`)]) {
+    const gh = fakeGh(prView({ files }));
+    const res = mergePr({ root: prRepo(), pr: '7', gh });
+    assert.equal(res.ok, false, `文件数 ${files.length}`);
+    assert.ok(res.problems.some((p) => p.includes('缺少代码复审记录')), res.problems.join('\n'));
+    assert.equal(merged(gh), false);
+  }
 });

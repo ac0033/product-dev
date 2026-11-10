@@ -1,20 +1,32 @@
 // 合并入口（复审流程为 pr 的项目）：PR 只经这里合并。业务含义：合并时要能证明 CI 已对 PR 的最终提交全部通过，
 // 且代码复审和一致性审都是针对这个最终提交做的。依次核对：PR 打开；CI 在最终提交上全部通过；代码复审有 pass 记录；
-// 一致性审有 pass 或延期（defer）记录；两份记录的提交都等于当前最终提交。全部满足才执行
+// 一致性审有 pass 或延期（defer）记录；两份记录的提交都等于当前最终提交。只改文档的 PR（全部文件在 reviewIgnore 之内）
+// 按分档不做审查，只核对 PR 打开与 CI 全过。全部满足才执行
 // gh pr merge --match-head-commit（核对之后再有人推送，GitHub 会拒绝合并），默认 squash 并删除远端分支。
 // 任一项不满足就逐条列出原因、以 1 退出、不合并；gh 不存在或调用失败同样报错退出。
 // 用法：node scripts/engineering/gate/merge.mjs <PR> [--method squash|merge|rebase]
 import fs from 'node:fs';
-import { defaultGh, isMain, loadConfig, prNumber, prRecordFile, readPr, repoRoot, runGh } from './lib.mjs';
+import { defaultGh, isMain, loadConfig, matchesAny, prNumber, prRecordFile, readPr, repoRoot, runGh } from './lib.mjs';
 
 /** 允许的合并方式（对应 gh pr merge 的 --squash、--merge、--rebase）。 */
 const METHODS = ['squash', 'merge', 'rebase'];
 
-/** 合并前要求的审查：代码复审始终必需；一致性审可以是 pass，也可以是写明理由的延期。 */
+/** 含代码的 PR 合并前要求的审查：代码复审必需；一致性审可以是 pass，也可以是写明理由的延期。 */
 const REQUIRED = [
   { kind: 'code', name: '代码复审', accept: ['pass'] },
   { kind: 'consistency', name: '一致性审', accept: ['pass', 'defer'] },
 ];
+
+/** gh pr view 的 files 最多返回的文件数；达到它时列表可能被截断。 */
+const GH_FILES_LIMIT = 100;
+
+/**
+ * PR 是否只改文档（全部文件都在 reviewIgnore 之内）：按分档表这类 PR 不做代码复审、一致性审并入巡检。
+ * 保守处理：文件列表为空，或达到 gh 的返回上限（可能被截断）时，不算只改文档。
+ */
+function docsOnly(files, config) {
+  return files.length > 0 && files.length < GH_FILES_LIMIT && files.every((f) => matchesAny(f, config.reviewIgnore));
+}
 
 /** 读取一条 PR 审查记录；不存在或损坏返回 null（视为未登记）。 */
 function readPrRecord(root, pr, kind) {
@@ -41,7 +53,7 @@ export function mergePr({ root, pr, method = 'squash', gh = defaultGh }) {
   const problems = [];
   if (st.state !== 'OPEN') problems.push(`PR #${no} 不是打开状态（${st.state}）`);
   for (const p of st.ciProblems) problems.push(`${p}（最终提交 ${short(st.head)}）`);
-  for (const r of REQUIRED) {
+  for (const r of docsOnly(st.files, config) ? [] : REQUIRED) {
     const rec = readPrRecord(root, no, r.kind);
     if (!rec) problems.push(`缺少${r.name}记录：先运行 review.mjs … --pr ${no} --kind ${r.kind}`);
     else if (!r.accept.includes(rec.verdict)) problems.push(`${r.name}结论是 ${rec.verdict}，不是 ${r.accept.join(' 或 ')}`);

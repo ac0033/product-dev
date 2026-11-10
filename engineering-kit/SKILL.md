@@ -93,7 +93,7 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 | 流程 | 推送核对（`verify.mjs`） | 复审登记（`review.mjs`） | 合并 |
 |---|---|---|---|
 | `pre-push`（默认） | 静态检查、测试记录、复审记录，都绑定当前代码树 | 推送前登记单项复审 | 套件不提供入口；钩子拒绝直接 `gh pr merge`，按项目约定的入口合并 |
-| `pr` | 静态检查、测试记录；不要求复审记录 | CI 全部通过后按 PR 登记代码复审与一致性审，绑定 PR 最终提交 | `merge.mjs <PR>` 核对 PR 打开、CI 全过、两项记录与最终提交一致后执行 `gh pr merge --match-head-commit` |
+| `pr` | 静态检查、测试记录；不要求复审记录 | CI 全部通过后按 PR 登记代码复审与一致性审，绑定 PR 最终提交 | `merge.mjs <PR>` 核对 PR 打开、CI 全过、两项记录与最终提交一致（只改文档的 PR 不要求记录）后执行 `gh pr merge --match-head-commit` |
 
 `pr` 流程需要 GitHub 远程、已登录的 `gh`，且 PR 上有 CI 检查（一项都没有视为未通过）；不满足的项目留在 `pre-push`。把 `reviewFlow` 改回 `pre-push` 即恢复旧流程。
 
@@ -111,7 +111,7 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 - Claude 钩子只防误操作，挡不住刻意绕过；终端直接 `git push` 不经过 Claude 钩子，靠 git pre-push 钩子兜底。
 - 复审记录是本机约定，不是密码学证明；复审者名字由登记者填写，套件不验证它确是独立子代理。守住它靠 PR 里公开的复审摘要。
 - 测试记录与 `pre-push` 流程的复审记录放在各工作树自己的 git 目录（`engineering-gate/`），多个工作树互不覆盖，不进工作区；闸门锁与 `pr` 流程的 PR 审查记录（`engineering-gate/pr/<编号>/`）放在 git 公共目录，所有工作树共用：同一仓库同时只跑一个闸门，复审与合并可以在不同工作树进行。
-- `pr` 流程只支持 GitHub（经 `gh`）；`gh` 不存在或调用失败时登记与合并都报错，不放行。合并入口不判断风险档位：代码复审始终必需（只改文档的 PR 也要登记），一致性审能否延期由登记者按 `references/process.md` 第 4 节的分档判断。
+- `pr` 流程只支持 GitHub（经 `gh`）；`gh` 不存在或调用失败时登记与合并都报错，不放行。只改文档的 PR（全部文件在 `reviewIgnore` 之内）合并时只核对 PR 打开与 CI 全过，不要求审查记录；PR 文件列表为空或达到 100 个（`gh` 可能截断）时按含代码处理。其余 PR 合并入口不判断风险档位：代码复审必需，一致性审能否延期由登记者按 `references/process.md` 第 4 节的分档判断。
 - 巡检的“已合并分支”判断基于补丁等价（git cherry），squash 合并后的分支需人工复核。
 - 试装记录（PDFtranslator）：`references/trial-pdftranslator.md`。
 
