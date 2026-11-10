@@ -1,4 +1,0 @@
-interface:
-  display_name: "数据科学项目"
-  short_description: "结合技术实现、理论依据与业务实际，清晰推进数据科学全周期工作"
-  default_prompt: "使用 $data-science-project，结合业务目标和当前进度制定计划，经我评估同意后由执行 agent 执行，再由主 agent 验收并解释操作与结果。"
