@@ -9,5 +9,5 @@
 # 开发者私人材料（设计稿、交接记录等）
 .notes/
 
-# 开发流程的本机项目专用细则
-engineering-kit/references/dev-flow.local.md
+# 只留本机的记录（项目专用流程、试装与验收记录、实践来源：含私有项目名或本机路径）
+engineering-kit/references/*.local.md
