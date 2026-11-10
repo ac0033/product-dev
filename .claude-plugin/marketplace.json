@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "ac0033-skills",
+  "description": "产品开发综合插件 product-dev 的插件市场：从想法到交付，一个入口自动分流。",
+  "owner": {
+    "name": "YuanLumen",
+    "url": "https://github.com/ac0033"
+  },
+  "plugins": [
+    {
+      "name": "product-dev",
+      "version": "0.2.0",
+      "source": "./product-dev",
+      "description": "只说想法，由一个入口判断情况并按对应路线逐步推进，每一步由插件自带的技能、子代理、脚本和方法文档执行。",
+      "homepage": "https://github.com/ac0033/skills",
+      "keywords": ["product", "development", "workflow", "design", "engineering"]
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "ac0033-skills",
+  "interface": {
+    "displayName": "ac0033 Skills"
+  },
+  "plugins": [
+    {
+      "name": "product-dev",
+      "version": "0.2.0",
+      "description": "只说想法，由一个入口判断情况并按对应路线逐步推进，每一步由插件自带的技能、子代理、脚本和方法文档执行。",
+      "source": {
+        "source": "local",
+        "path": "./product-dev"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

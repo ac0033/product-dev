@@ -15,12 +15,35 @@
 
 ## 获取与使用
 
+### 安装综合插件（推荐）
+
+综合插件 `product-dev` 是唯一需要接入 agent 的部分。装好后只说想法，它会判断情况并按对应路线推进。
+
+Claude Code（2.1.275 或更高版本）：
+
+```
+/plugin install product-dev --marketplace ac0033/skills
+```
+
+较早的版本分两步：`/plugin marketplace add ac0033/skills`，再 `/plugin install product-dev@ac0033-skills`。
+
+Codex：
+
+```bash
+codex plugin marketplace add ac0033/skills
+codex plugin add product-dev@ac0033-skills
+```
+
+### 单独使用某个组件
+
+组件各自完整，可以不装综合插件单独使用，见[组件清单](COMPONENTS.md)。
+
 ```bash
 git clone https://github.com/ac0033/skills.git
 cd skills
 ```
 
-让支持读取文件的 Agent 打开所选技能的 `SKILL.md`，并提供任务与材料。
+把所需组件的目录放进 agent 的技能目录，或让支持读取文件的 Agent 打开它的 `SKILL.md`。
 
 ## 来源与许可
 
