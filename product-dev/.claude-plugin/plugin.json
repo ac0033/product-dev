@@ -1,6 +1,6 @@
 {
   "name": "product-dev",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "产品开发综合插件：只说想法，由一个入口判断情况（新项目、加功能、修 bug、小改动、只改文档、装或升级工程套件）并按对应路线逐步推进，每一步由插件自带的技能、子代理、脚本和方法文档执行。自有内容 MIT；内含第三方内容，各自保留原许可，见 THIRD_PARTY_NOTICES.md。",
   "author": {
     "name": "YuanLumen",

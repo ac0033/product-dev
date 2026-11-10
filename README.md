@@ -1,76 +1,114 @@
-# Agent Skills
+# Product Dev
 
-自研与收录的 Agent 技能集合，覆盖工程流程、产品需求、交互原型和系统架构。每个技能以 `SKILL.md` 为入口。
+**面向 Claude Code 和 Codex 的产品开发工作流（0.2.1）。** 从产品想法、功能需求或 bug 出发，Product Dev 会先查项目现状，判断该走哪条路线，再把需求确认、方案设计、实现、验证和审查接成一条可接续的流程。
 
-## 技能目录
+[快速开始](#快速开始) · [怎么用](#怎么用) · [流程图](#流程图) · [参考与许可](#参考与许可)
 
-| 入口 | 适用任务 | 配套内容 |
-|---|---|---|
-| [product-dev 综合插件](product-dev/skills/product-dev/SKILL.md)（0.2.0） | 只说想法，由一个入口判断情况（新项目、加功能、修 bug、小改动、只改文档、装或升级工程套件）并按对应路线逐步推进 | 下面各组件和部分第三方内容的装配结果，供 Claude Code 与 Codex 作为插件安装；入口的每一步写明目标、原则、工具和过关证据 |
-| [产品设计技能组](product-design-orchestrator/README.md) | 从想法推进到 PRD、交互原型、系统架构和实施交接 | 总控（唯一入口）与三个专业技能，共享协议和产物模板 |
-| [engineering-kit](engineering-kit/SKILL.md) | 工程规则与闸门、开发流程和经验整理 | 同步工具、工程模板、流程规范和测试 |
-| [evals](evals/cases.md) | 技能包自身的验证 | 一致性检查、插件构建检查与入口检查（`node --test evals/*.test.mjs`）、冲突矩阵、行为用例 |
-| [组件清单](COMPONENTS.md) | 了解仓库由哪些组件构成、各自的来源与许可 | 自有组件与第三方组件两张表 |
-| [语言风格 System Prompt](语言风格%20System%20Prompt.md) | 独立的中文表达约定 | 单文件 |
+## Product Dev 怎么推进一次任务
 
-## 获取与使用
+你从**同一个入口**描述目标、现状和想先做到哪一步。Product Dev 判断需要哪些阶段，沿用项目已有的规则和检查，并把前一阶段确认的结果带进下一阶段。
 
-### 安装综合插件（推荐）
+1. **判断路线。** 先读项目规则、工作区和已有记录。新项目从需求开始，加功能先梳理现有行为，修 bug 先复现。小改动、纯文档和套件维护有各自的短路线。
+2. **推进当前阶段。** 例如做新产品时，先确认需求，再做原型走查和架构设计。功能改动进入开发前，先写清验收标准。你也可以只做设计、复审或验收中的一段。
+3. **交付可核对的结果。** 每阶段有产物和通过条件，交接时说明已完成、已验证和待确认的事项。接着做以前的任务时，可以直接提供相关分支、PR 或设计文档。
 
-综合插件 `product-dev` 是唯一需要接入 agent 的部分。装好后只说想法，它会判断情况并按对应路线推进。
+## 快速开始
 
-Claude Code（2.1.275 或更高版本）：
+### Claude Code
 
-```
-/plugin install product-dev --marketplace ac0033/skills
+在终端安装。
+
+```bash
+claude plugin install product-dev --marketplace ac0033/skills
 ```
 
-较早的版本分两步：`/plugin marketplace add ac0033/skills`，再 `/plugin install product-dev@ac0033-skills`。
+较早的版本可以在终端分两步安装。
 
-Codex：
+```bash
+claude plugin marketplace add ac0033/skills
+claude plugin install product-dev@ac0033-skills
+```
+
+打开 Claude Code，在输入框用 `/product-dev:product-dev` 加上你的任务。若在现有会话安装后尚未看到入口，可运行 `/reload-plugins` 或重新启动 Claude Code。
+
+### Codex
+
+在终端运行下面的命令。需要支持 `codex plugin` 子命令的 Codex CLI。
 
 ```bash
 codex plugin marketplace add ac0033/skills
 codex plugin add product-dev@ac0033-skills
 ```
 
-### 单独使用某个组件
+在 Codex 桌面端的输入框技能列表选择插件下的 `product-dev`。CLI 中可用 `/skills` 选择 `product-dev:product-dev`。桌面端若仍显示旧列表，可重启后再试。
 
-组件各自完整，可以不装综合插件单独使用，见[组件清单](COMPONENTS.md)。
+### 试一句
+
+> 我想做一个给读书会用的活动报名工具。先梳理参与者和组织者的需求，给出第一版范围和验收标准。等我确认需求后再做原型。
+
+<details>
+<summary><strong>升级已有的 GitHub 市场安装</strong></summary>
+
+Claude Code 在终端运行下面的命令，然后重新启动。
 
 ```bash
-git clone https://github.com/ac0033/skills.git
-cd skills
+claude plugin marketplace update ac0033-skills
+claude plugin update product-dev@ac0033-skills
 ```
 
-把所需组件的目录放进 agent 的技能目录，或让支持读取文件的 Agent 打开它的 `SKILL.md`。
+Codex 在终端运行下面的命令，然后重新启动桌面端。
 
-## 来源与许可
+```bash
+codex plugin marketplace upgrade ac0033-skills
+codex plugin add product-dev@ac0033-skills
+```
 
-本仓库自有的内容以 MIT 许可发布，见 [LICENSE](LICENSE)。收录或改写的第三方内容保留各自的许可，不受该 MIT 许可覆盖。
+</details>
 
-### 综合插件收录的第三方内容
+## 怎么用
 
-`product-dev/` 里收录了下列项目的内容。前三项是原文：我们只改了两个技能文件头的可见性字段（并加一行改动说明），没有收录 archify 的示例成品页和 impeccable 的会话钩子，其余原样。后两项是翻译和改写：入口技能的方法文档取用它们的方法，译为中文并按本插件的流程调整（部分段落接近直译），每份文件末尾注明出处和改动，没有收录它们的原文件。impeccable 的启动脚本首次运行时会联网下载它的引擎程序，archify 带有联网的更新检查，详见声明。逐项的来源、版本、改动、版权声明和许可全文见 [product-dev/THIRD_PARTY_NOTICES.md](product-dev/THIRD_PARTY_NOTICES.md)。
+在目标项目目录开始对话。把**目标、已知约束、你希望停下确认的阶段**交给 Product Dev。比如把「加个候补」说成「给活动报名加候补，按报名时间递补。先写清规则和验收标准，等我确认后再实现」。
 
-| 项目 | 收录内容 | 许可 |
-|---|---|---|
-| [impeccable](https://github.com/pbakaus/impeccable) 4.8.2 | 界面设计技能和它的四个子代理 | Apache-2.0 |
-| [archify](https://github.com/tt-a1i/archify) 3.2.0 | 图表技能（含渲染器，不含示例成品页） | Apache-2.0，内含的品牌标识、字体等另有各自条款 |
-| [feature-dev](https://github.com/anthropics/claude-plugins-official) 1.0.1 | 代码探索、方案设计、代码复审三个子代理 | Apache-2.0 |
-| [ponytail](https://github.com/DietrichGebert/ponytail) 5.3.3 | 翻译和改写：最小改动规则、推送前自查清单 | MIT |
-| [agent-skills](https://github.com/addyosmani/agent-skills) 0.6.15 | 翻译和改写：任务拆解、逐片循环、调试、代码评审与安全清单 | MIT |
+| 你要做什么 | Product Dev 先做什么 | 你能用什么验收 |
+| --- | --- | --- |
+| 从零做一个读书会报名工具 | 建立工程底座，梳理用户、问题与范围 | 需求文档、可操作原型、架构和实施交接 |
+| 给现有报名页加候补 | 核对报名流程，找出受影响的行为 | 功能契约、边界用例、方案与验证证据 |
+| 修复取消报名仍占用名额 | 复现问题、定位根因并写失败测试 | 修复与回归测试，可对照修前和修后的结果 |
+| 改按钮文案或补安装说明 | 判断影响范围，走小改动或纯文档路线 | 对应改动和检查结果 |
+| 检查工程套件版本 | 对照安装状态和项目差异 | 漂移清单与可审的升级范围 |
 
-### 外部工具
+询问可行性时，Product Dev 先做只读分析。明确要求实施时，它在授权和项目规则内推进。新项目的工程底座安装会先说明目标目录。生产发布、回滚和破坏性迁移需要对应授权。
 
-各组件单独使用时，会按名称调用或推荐下列外部工具。除上一节列出的已随综合插件收录的部分外，它们不随本仓库分发，需要各自安装，使用时遵守各自的许可；没装时按技能里写的替代做法执行。
+## 流程图
 
-| 工具 | 在这里的用途 | 与本仓库的关系 | 许可 |
-|---|---|---|---|
-| [feature-dev](https://github.com/anthropics/claude-plugins-official)（Anthropic 官方插件） | 代码探索、方案对比、独立复审的子代理 | 组件里只按名称调用；综合插件已收录三个子代理 | Apache-2.0 |
-| [ponytail](https://github.com/DietrichGebert/ponytail) | 约束改动量、作者自查、全仓巡检 | 组件里只按名称推荐；综合插件收录了改写后的方法文档，不含其代码和钩子 | MIT |
-| [archify](https://github.com/tt-a1i/archify) | 架构图与流程图 | 组件里只按名称推荐；综合插件已收录 | Apache-2.0 |
-| [impeccable](https://github.com/pbakaus/impeccable) | 界面设计与界面复查 | 组件里只按名称推荐；综合插件已收录 | Apache-2.0 |
-| [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) | 任务拆解、调试、代码评审等方法的参考来源 | 综合插件收录了改写后的方法文档，不含其原文件 | MIT |
+新项目和加功能各有准备阶段，后续共用同一条交付路线。修 bug 从复现和根因入手，再接到交付后半段。点击任一图可以放大查看。
 
-凡是改写或摘录第三方内容的文件，都在该文件末尾注明出处，并在插件的第三方声明里附上对应的版权声明和许可全文。
+### 新项目 · 从想法到实施就绪
+
+先确认需求，再用原型走查验证体验。综合评审通过后配置检查命令，获准实施才进入交付段。
+
+<a href="docs/images/product-dev/new-project.png"><img src="docs/images/product-dev/new-project.png" width="507" alt="新项目原流程图。恢复现场后安装工程底座，依次推进需求、原型与走查、架构、综合评审和闸门配置。发现需求缺口时返回需求阶段。"></a>
+
+### 加功能 · 从现状到选定方案
+
+先探索现有代码和行为。改变产品行为时回到设计阶段修订受影响的部分，再确认验收标准与实施方案。
+
+<a href="docs/images/product-dev/feature.png"><img src="docs/images/product-dev/feature.png" width="708" alt="加功能原流程图。开工检查、探索和澄清后判断是否改变产品行为。需要时修订设计，再经过功能契约、方案对比，由用户选定方案。"></a>
+
+### 共用交付 · 从任务拆解到发布
+
+图中采用 PR 复审顺序。若项目配置为推送前复审，独立复审在机械闸门通过后、推送前执行。生产发布按任务范围和授权执行。
+
+<a href="docs/images/product-dev/delivery.png"><img src="docs/images/product-dev/delivery.png" width="813" alt="共用交付原流程图。逐片开发后自查并通过机械闸门，再经过 PR 和 CI、独立复审、合并与收工，以及获准的验收与发布。审查发现问题时返回开发。"></a>
+
+### 修 bug · 从复现到回归入库
+
+先判断是实现故障还是需求缺口。确认属于实现故障后，用失败测试固定复现条件，修复并通过相应检查。
+
+<a href="docs/images/product-dev/bug-fix.png"><img src="docs/images/product-dev/bug-fix.png" width="727" alt="修 bug 原流程图。稳定复现并定位根因。需求缺口转加功能路线，实现故障写失败测试，做最小修复，核对同类问题和调用方，再复审合并并保留回归用例。"></a>
+
+## 参考与许可
+
+- **完整流程**见[入口技能](product-dev/skills/product-dev/SKILL.md)和[工程流程说明](product-dev/skills/product-dev/references/process.md)，各阶段的工具、验收证据和复审顺序都在这里。
+- **组件与版本**见[组件清单](COMPONENTS.md)。可用工具随宿主而异，流程文档说明了按路径读取内部技能和派发子代理的替代方式。
+- **测试与许可**见[测试与行为用例](evals/cases.md)、[MIT](LICENSE)和[第三方声明](product-dev/THIRD_PARTY_NOTICES.md)。在仓库根目录运行 `node --test evals/*.test.mjs` 可检查插件入口、装配、链接和版本一致性。

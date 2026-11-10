@@ -198,6 +198,7 @@ test('出处：改写的方法文档文末注明来源，第三方声明、组�
     ponytail: { url: 'https://github.com/DietrichGebert/ponytail', copyright: 'Copyright (c) 2026 DietrichGebert', docs: ['build', 'self-review'] },
     'agent-skills': { url: 'https://github.com/addyosmani/agent-skills', copyright: 'Copyright (c) 2025 Addy Osmani', docs: ['planning', 'build', 'debugging', 'review'] },
   };
+  assert.ok(readme.includes('(COMPONENTS.md)') && readme.includes('(product-dev/THIRD_PARTY_NOTICES.md)'), 'README 应链接组件版本清单与第三方声明');
   for (const [name, s] of Object.entries(sources)) {
     const section = notices.split(/^## /m).find((x) => new RegExp(`^\\d+\\. ${name}$`).test(x.split('\n')[0]));
     assert.ok(section, `第三方声明里没有 ${name} 一节`);
@@ -206,7 +207,6 @@ test('出处：改写的方法文档文末注明来源，第三方声明、组�
     const version = row.split('|')[3].trim().split('（')[0];
     for (const text of [s.url, `版本：${version}`, '原许可：MIT', s.copyright, '我们的改动：']) assert.ok(section.includes(text), `第三方声明的 ${name} 一节缺：${text}`);
     assert.ok(row.includes('已收录（翻译和改写）'), `COMPONENTS.md 里 ${name} 没有标为已收录`);
-    assert.ok(readme.includes(`[${name}](${s.url}) ${version}`), `README 的收录表里没有 ${name} ${version}`);
     for (const doc of s.docs) {
       const tail = read(`${ENTRY_DIR}/references/${doc}.md`).split('\n---\n').pop();
       for (const text of ['出处：', s.url, version, 'MIT 许可', s.copyright, '改动：', 'THIRD_PARTY_NOTICES.md']) assert.ok(tail.includes(text), `${doc}.md 文末的出处缺：${text}`);

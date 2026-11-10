@@ -28,3 +28,9 @@ test('Codex 市场清单：列出 product-dev，版本一致，路径存在', ()
   assert.equal(entry.version, pluginVersion);
   assert.ok(fs.existsSync(path.join(ROOT, entry.source.path, '.codex-plugin', 'plugin.json')), `路径不存在：${entry.source.path}`);
 });
+
+test('Codex 只注册 Product Dev 入口', () => {
+  const manifest = json('product-dev/.codex-plugin/plugin.json');
+  assert.equal(manifest.skills, './skills/product-dev/');
+  assert.ok(fs.existsSync(path.join(ROOT, 'product-dev', manifest.skills, 'SKILL.md')));
+});
