@@ -1,8 +1,8 @@
 # 第三方内容声明
 
-`product-dev` 插件的自有内容（入口技能、插件清单、工程套件、产品设计技能组）以 MIT 许可发布，版权人与许可全文见 [LICENSE](LICENSE)。
+`product-dev` 插件的自有内容（入口技能及其方法文档、插件清单、工程套件、产品设计技能组）以 MIT 许可发布，版权人与许可全文见 [LICENSE](LICENSE)。
 
-插件还收录了下列第三方项目的内容。它们各自保留原许可，不受上面的 MIT 许可覆盖。每项的版本和内容哈希记录在 [BUILD.lock.json](BUILD.lock.json)；这些内容由仓库的 `tools/build-plugin.mjs` 从原版复制，除本文件写明的改动外不做修改。
+插件还收录了下列第三方项目的内容。它们各自保留原许可，不受上面的 MIT 许可覆盖。第 1 到 3 项是原文：由仓库的 `tools/build-plugin.mjs` 从原版复制，除本文件写明的改动外不做修改，版本和内容哈希记录在 [BUILD.lock.json](BUILD.lock.json)。第 4、5 项是翻译和改写：入口技能的方法文档取用这两个项目的方法，译为中文并按本插件的流程调整，部分段落接近原文的直译，没有收录它们的原文件；每份改写文件的末尾注明了出处和改动。
 
 ## 1. impeccable
 
@@ -47,6 +47,32 @@
 - 版权声明：上游的 LICENSE 文件没有填写版权人；插件清单的作者署名是 Anthropic
 - 收录位置与取自：`agents/code-explorer.md`、`agents/code-architect.md`、`agents/code-reviewer.md`，取自上游 `agents/`
 - 我们的改动：无，三个文件原样
+
+## 4. ponytail
+
+- 来源：<https://github.com/DietrichGebert/ponytail>
+- 版本：5.3.3（提交 96608e0）
+- 原许可：MIT
+- 版权声明：Copyright (c) 2026 DietrichGebert
+- 参考的原文件：`skills/ponytail/SKILL.md`（最小改动规则）、`skills/ponytail-review/SKILL.md`（评审检查项）
+- 本插件里的改写文件：
+  - [skills/product-dev/references/build.md](skills/product-dev/references/build.md)：第 1、2、5 节
+  - [skills/product-dev/references/self-review.md](skills/product-dev/references/self-review.md)
+- 我们的改动：译为中文。`build.md` 第 1、2、5 节和 `self-review.md` 第 1 到 3 节接近原文的逐句翻译，只做了少量调整；其余部分按本插件的流程重写。去掉了常驻模式、级别切换、回复结尾格式和评审报告格式；原文“只注释为什么”“琐碎改动不必写测试”两条改为以项目闸门为准；评审清单从“应要求出报告”改为“作者推送前自查”，并加了本项目特有的检查项。没有收录 ponytail 的钩子、命令和其余技能。
+
+## 5. agent-skills
+
+- 来源：<https://github.com/addyosmani/agent-skills>
+- 版本：0.6.15（提交 301b02b）
+- 原许可：MIT
+- 版权声明：Copyright (c) 2025 Addy Osmani
+- 参考的原文件：`skills/planning-and-task-breakdown/SKILL.md`、`skills/incremental-implementation/SKILL.md`、`skills/debugging-and-error-recovery/SKILL.md`、`skills/code-review-and-quality/SKILL.md`、`skills/security-and-hardening/SKILL.md`、`references/security-checklist.md`
+- 本插件里的改写文件：
+  - [skills/product-dev/references/planning.md](skills/product-dev/references/planning.md)
+  - [skills/product-dev/references/build.md](skills/product-dev/references/build.md)：第 4 节
+  - [skills/product-dev/references/debugging.md](skills/product-dev/references/debugging.md)
+  - [skills/product-dev/references/review.md](skills/product-dev/references/review.md)：第 3、4、6 节和任务书里的评审步骤
+- 我们的改动：译为中文。各文件的结构、表格和步骤贴近原文（依赖图、任务大小表、调试六步、五个评审维度等），措辞是翻译加改写；文件位置、任务字段、严重级别、报告格式和登记要求按本插件的工程套件重写；逐片循环从“先实现再测试”改为“先写测试再实现”；没有采用原文的输出路径（`tasks/`）、git 流程、示例代码和评审时限；修 bug 时失败测试排在修复之前；复审者只读，变异实验改由作者执行。没有收录 agent-skills 的其余技能、命令、钩子和子代理。
 
 ## 许可全文
 
@@ -236,7 +262,7 @@
 
 ### MIT License
 
-适用于：platform-design-skills（版权行见上文第 1 项）、modern-screenshot（版权行见上文第 1 项）、archify 的历史 MIT 授权（版权人见 `skills/archify/LICENSE-MIT`）、Pele（版权人见 `skills/archify/explainer/vendor/pele/LICENSE`）。
+适用于：ponytail（版权行见上文第 4 项）、agent-skills（版权行见上文第 5 项）、platform-design-skills（版权行见上文第 1 项）、modern-screenshot（版权行见上文第 1 项）、archify 的历史 MIT 授权（版权人见 `skills/archify/LICENSE-MIT`）、Pele（版权人见 `skills/archify/explainer/vendor/pele/LICENSE`）。
 
 ```text
 MIT License

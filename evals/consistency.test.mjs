@@ -130,7 +130,9 @@ test('已废弃的说法：不再出现在任何文档里', () => {
 });
 
 test('重复：同一句较长的话不出现在两个文件里', () => {
-  // 插件里复制来的目录与组件内容有意相同，不参与；入口技能等手写文件照查。
+  // 插件里复制来的目录与组件内容有意相同，不参与。插件的手写部分（入口技能和它的方法文档）由组件内容重组而来，
+  // 与组件之间不互查；它内部、以及仓库其余文档内部，各自照查。
+  const group = (f) => (f.startsWith('product-dev/') ? '插件' : '仓库');
   const seen = new Map();
   for (const f of DOCS.filter((d) => !isTemplate(d) && !isPluginCopy(d) && d !== 'evals/conflict-matrix.md')) {
     for (const raw of prose(read(f)).split('\n')) {
@@ -140,12 +142,13 @@ test('重复：同一句较长的话不出现在两个文件里', () => {
         const key = sent.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/[\s*`>\-0-9.、，：]/g, '');
         // 至少 16 个字符且含 8 个以上汉字才算一句话（排除只有技能名、路径的单元格）
         if (key.length < 16 || (key.match(/[一-龥]/g) || []).length < 8) continue;
-        const files = seen.get(key) || new Set();
+        const id = `${group(f)} ${key}`;
+        const files = seen.get(id) || new Set();
         files.add(f);
-        seen.set(key, files);
+        seen.set(id, files);
       }
     }
   }
-  const dup = [...seen].filter(([, files]) => files.size > 1).map(([k, files]) => `${[...files].join(' = ')}：${k.slice(0, 40)}`);
+  const dup = [...seen].filter(([, files]) => files.size > 1).map(([k, files]) => `${[...files].join(' = ')}：${k.split(' ')[1].slice(0, 40)}`);
   assert.deepEqual(dup, []);
 });
