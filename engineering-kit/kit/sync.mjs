@@ -115,24 +115,31 @@ if (isMain(import.meta.url)) {
     console.error(`未知技术栈 ${a.profile}，可选：${Object.keys(PRESETS).join('、')}`);
     process.exit(2);
   }
+  // 标签导出的临时目录用完要删；process.exit 会跳过 finally，所以先记退出码，清理后再退出
+  let bundleRoot = BUNDLE_ROOT;
+  let code = 0;
   try {
-    const bundleRoot = a.fromTag ? extractTag(a.fromTag) : BUNDLE_ROOT;
+    if (a.fromTag) bundleRoot = extractTag(a.fromTag);
     if (a.check) {
       const rep = checkBundle({ root: path.resolve(a.target), bundleRoot });
       const bad = rep.items.filter((i) => i.state !== 'ok');
       console.log(`整包 ${rep.bundleVersion}，项目安装的是 ${rep.installedVersion ?? '未安装'}`);
       for (const i of bad) console.log(`  [${i.state}] ${i.component}  ${i.file}${i.detail ? `  (${i.detail})` : ''}`);
       console.log(bad.length === 0 ? '整包与清单一致' : `有 ${bad.length} 项与清单不一致`);
-      process.exit(bad.length === 0 ? 0 : 1);
+      code = bad.length === 0 ? 0 : 1;
+    } else {
+      const r = syncKit({ target: a.target, dryRun: a.dryRun, force: a.force, hooks: a.hooks, bundleRoot, init: a.init, preset: a.profile ? PRESETS[a.profile] : null });
+      console.log(`${r.dryRun ? '[试运行] ' : ''}整包版本 ${r.version}${a.fromTag ? `（来自标签 ${a.fromTag}）` : ''}`);
+      for (const x of r.actions) console.log(`  [${x.type}] ${x.file}`);
+      for (const m of r.messages) console.log(`  ! ${m}`);
+      console.log(r.ok ? '同步完成' : '同步完成，但有冲突未处理（见上）');
+      code = r.ok ? 0 : 1;
     }
-    const r = syncKit({ target: a.target, dryRun: a.dryRun, force: a.force, hooks: a.hooks, bundleRoot, init: a.init, preset: a.profile ? PRESETS[a.profile] : null });
-    console.log(`${r.dryRun ? '[试运行] ' : ''}整包版本 ${r.version}${a.fromTag ? `（来自标签 ${a.fromTag}）` : ''}`);
-    for (const x of r.actions) console.log(`  [${x.type}] ${x.file}`);
-    for (const m of r.messages) console.log(`  ! ${m}`);
-    console.log(r.ok ? '同步完成' : '同步完成，但有冲突未处理（见上）');
-    process.exit(r.ok ? 0 : 1);
   } catch (e) {
     console.error(`同步失败（未留下部分写入）：${e.message}`);
-    process.exit(1);
+    code = 1;
+  } finally {
+    if (a.fromTag && bundleRoot !== BUNDLE_ROOT) fs.rmSync(bundleRoot, { recursive: true, force: true });
   }
+  process.exit(code);
 }

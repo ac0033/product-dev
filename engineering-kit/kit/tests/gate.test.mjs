@@ -6,7 +6,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { checkComments } from '../gate/check-comments.mjs';
 import { checkTestFirst, referencesModule } from '../gate/check-test-first.mjs';
-import { changedFiles, loadConfig, scopeFiles, treeHash } from '../gate/lib.mjs';
+import { acquireLock, changedFiles, loadConfig, readRecord, recordDir, scopeFiles, treeHash, writeRecord } from '../gate/lib.mjs';
 import { runGate } from '../gate/gate.mjs';
 import { recordReview } from '../gate/review.mjs';
 import { newFileProblems, verify } from '../gate/verify.mjs';
@@ -236,4 +236,51 @@ test('推送核对与巡检的顶层目录白名单一致：testGlobs 推出的 
   const config = loadConfig(root);
   const problems = newFileProblems(root, config, {});
   assert.deepEqual(problems.filter((p) => p.includes('顶层目录')), [], problems.join('\n'));
+});
+
+test('复审记录：“结论：**不通过**”“结论：未通过”也识别为不通过', () => {
+  for (const verdictLine of ['结论：**不通过**\n', '结论：未通过\n']) {
+    const root = featureRepo();
+    write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
+    write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'sorted');\n");
+    runGate({ root });
+    const rp = reportFile(`${GOOD_REPORT.replace('结论\n通过\n', '')}${verdictLine}`);
+    const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: rp, summary: 's' });
+    assert.equal(r.ok, false, verdictLine);
+  }
+});
+
+test('测试先行：模块名必须是完整的导入文件名，user-service 不算引用了 user', () => {
+  assert.equal(referencesModule("import { a } from '../src/user-service';", 'user'), false);
+  assert.equal(referencesModule("import { a } from '../src/user';", 'user'), true);
+  assert.equal(referencesModule("import { a } from '../src/user.ts';", 'user'), true);
+  assert.equal(referencesModule("const a = require('./user.js');", 'user'), true);
+});
+
+test('记录目录：各工作树各用自己的 git 目录，记录互不覆盖', () => {
+  const root = featureRepo();
+  const wt = `${root}-wt`;
+  git(root, ['worktree', 'add', '-q', '-b', 'other', wt]);
+  assert.notEqual(recordDir(root), recordDir(wt));
+  writeRecord(root, 'tests.json', { who: 'main' });
+  assert.equal(readRecord(wt, 'tests.json'), null);
+});
+
+test('全局锁：持锁进程已不存在（如 Ctrl+C）时直接清理重取；进程还在时拒绝', () => {
+  const root = featureRepo();
+  const lock = path.join(root, '.git', 'engineering-gate.lock');
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: 2 ** 22 + 12345 }));
+  acquireLock(root)();
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid }));
+  assert.throws(() => acquireLock(root), /闸门锁被占用/);
+  fs.rmSync(lock, { recursive: true });
+});
+
+test('注释：#! 解释器行不算文件头注释', () => {
+  const root = tmpRepo();
+  write(root, 'src/cli.ts', '#!/usr/bin/env node\nexport const a = 1;\n');
+  const problems = checkComments({ root, files: ['src/cli.ts'], config: { ...cfg, commentMode: 'header' }, exempt: {} });
+  assert.equal(problems.length, 1, JSON.stringify(problems));
 });

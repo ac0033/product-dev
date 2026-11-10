@@ -89,7 +89,9 @@ export function runHygiene(root) {
     const st = statusOf(text);
     if (st && !hygiene.statusValues.includes(st)) err(`状态不合法（${st}）：${f}（合法值：${hygiene.statusValues.join('、')}）`);
     if (st === 'draft') {
-      const ageDays = (Date.now() - fs.statSync(path.join(root, f)).mtimeMs) / 86400000;
+      // 以最近一次提交时间为准（重新克隆后文件时间会归零）；未跟踪的文件退回文件时间
+      const ct = Number(git(root, ['log', '-1', '--format=%ct', '--', f]).out.trim());
+      const ageDays = (Date.now() - (ct ? ct * 1000 : fs.statSync(path.join(root, f)).mtimeMs)) / 86400000;
       if (ageDays > hygiene.staleDraftDays) warn(`草稿超过 ${hygiene.staleDraftDays} 天未更新：${f}（请确认保留或删除）`);
     }
   }
@@ -120,17 +122,21 @@ export function runHygiene(root) {
   for (const group of byHash.values()) if (group.length > 1) warn(`内容重复：${group.join('、')}`);
 
   // 6. 记录类文档只追加：已跟踪的记录文件出现修改即报错
+  // 工作区里的修改，加上相对基准分支已提交的修改（提交后也要查得到）；基准解析不了时只查工作区。
+  const base = baseOrNull(root, cfg.base);
+  const isRecord = (f) => hygiene.recordDirs.some((d) => f.startsWith(`${d}/`));
+  const modified = new Set();
   const status = git(root, ['status', '--porcelain', '-uall', '-z']);
-  if (status.ok) {
-    for (const { code, file: f } of parseStatusZ(status.out)) {
-      const isRecord = layoutRecordDirs(hygiene).some((d) => f.startsWith(`${d}/`));
-      if (isRecord && code.includes('M')) err(`记录类文档不得修改旧文件（请追加新文件）：${f}`);
-    }
+  if (status.ok) for (const { code, file: f } of parseStatusZ(status.out)) if (code.includes('M')) modified.add(f);
+  const mb = base ? git(root, ['merge-base', base, 'HEAD']) : null;
+  if (mb?.ok) {
+    const committed = git(root, ['diff', '--name-only', '--diff-filter=M', mb.out.trim(), 'HEAD']);
+    for (const f of committed.out.split('\n').filter(Boolean)) modified.add(f);
   }
+  for (const f of [...modified].sort()) if (isRecord(f)) err(`记录类文档不得修改旧文件（请追加新文件）：${f}`);
 
   // 7. 已合并的分支与残留的工作树
   const branches = git(root, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
-  const base = baseOrNull(root, cfg.base);
   if (branches.ok && base && git(root, ['rev-parse', '--verify', '--quiet', base]).ok) {
     const current = git(root, ['branch', '--show-current']).out.trim();
     for (const b of branches.out.split('\n').filter(Boolean)) {
@@ -149,11 +155,6 @@ export function runHygiene(root) {
     });
   }
   return { root, findings, ok: findings.error.length === 0 };
-}
-
-/** 记录类目录列表（配置里的 hygiene.recordDirs）。 */
-function layoutRecordDirs(hygiene) {
-  return hygiene.recordDirs || [];
 }
 
 if (isMain(import.meta.url)) {

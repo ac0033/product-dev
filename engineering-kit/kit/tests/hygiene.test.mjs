@@ -105,3 +105,26 @@ test('巡检不崩溃：已在工作区删除未暂存的文件、含 % 的链�
   assert.ok(rep.findings.error.some((e) => /死链.*50%\.md/.test(e)), JSON.stringify(rep.findings));
   assert.deepEqual(relativeLinks('[a](50%.md)'), ['50%.md']);
 });
+
+test('记录类文档只追加：修改已提交（相对基准分支）后也能查到', () => {
+  const root = repoWith({ 'docs/acceptance/2026-11-01.md': '原始记录\n' });
+  git(root, ['checkout', '-q', '-b', 'feat']);
+  write(root, 'docs/acceptance/2026-11-01.md', '被改写的记录\n');
+  commitAll(root, 'rewrite record');
+  const rep = runHygiene(root);
+  assert.ok(rep.findings.error.some((e) => /不得修改旧文件.*2026-11-01/.test(e)), JSON.stringify(rep.findings));
+});
+
+test('草稿超期：按最近提交时间算，不按文件时间（重新克隆后文件时间是新的）', () => {
+  const root = tmpRepo();
+  write(root, 'engineering.config.json', JSON.stringify({ profile: 2, modules: { gate: { base: 'main' } }, layout: { sourceGlobs: ['src/**/*.ts'], testGlobs: ['tests/**/*.ts'], topLevelAllowed: ['docs'] } }));
+  write(root, 'docs/d.md', '状态：draft\n');
+  process.env.GIT_COMMITTER_DATE = '2020-01-01T00:00:00Z';
+  try {
+    commitAll(root, 'old draft');
+  } finally {
+    delete process.env.GIT_COMMITTER_DATE;
+  }
+  const rep = runHygiene(root);
+  assert.ok(rep.findings.warn.some((w) => /草稿超过.*d\.md/.test(w)), JSON.stringify(rep.findings));
+});

@@ -1,7 +1,7 @@
 // 工程闸门共享函数：读取配置与豁免、判定改动范围、计算代码树哈希、读写记录、获取全局锁。
 // 业务含义：闸门要回答三件事——这次改动了哪些文件（范围）、这些文件现在的内容是什么（树哈希）、
 // 测试与复审记录是不是针对这份内容做的（绑定）。只读 git 与工作区，写入只发生在 git 目录下的记录目录里，
-// 不污染工作区。记录放在 git 公共目录，所以同一仓库的所有工作树共用一套记录，靠树哈希区分内容。
+// 不污染工作区。记录放在各工作树自己的 git 目录（互不覆盖）；全局锁放在 git 公共目录，同一仓库同时只跑一个闸门。
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -42,7 +42,7 @@ export function repoRoot(cwd = process.cwd()) {
   return r.out.trim();
 }
 
-/** git 公共目录（所有工作树共用）：记录与全局锁放在这里。 */
+/** git 公共目录（所有工作树共用）：全局锁放在这里。 */
 export function gitCommonDir(root) {
   const r = git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   if (!r.ok) throw new Error('无法定位 git 目录');
@@ -230,14 +230,11 @@ export function treeHash(root, files) {
   return h.digest('hex');
 }
 
-/** 文件内容的 sha256（用于同步器的漂移检查）。 */
-export function sha256File(p) {
-  return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
-}
-
-/** 记录目录：git 公共目录下的 engineering-gate/。 */
+/** 记录目录：当前工作树自己的 git 目录下的 engineering-gate/（多个工作树各用各的，不互相覆盖）。 */
 export function recordDir(root) {
-  return path.join(gitCommonDir(root), 'engineering-gate');
+  const r = git(root, ['rev-parse', '--path-format=absolute', '--git-dir']);
+  if (!r.ok) throw new Error('无法定位 git 目录');
+  return path.join(r.out.trim(), 'engineering-gate');
 }
 
 /** 写入一条记录（JSON）。 */
@@ -258,6 +255,16 @@ export function readRecord(root, name) {
   }
 }
 
+/** 锁的持有进程是否确定已不存在（读不到 pid 或无权探测时返回 false，保守视为仍在）。 */
+function ownerGone(ownerJson) {
+  try {
+    process.kill(JSON.parse(ownerJson).pid, 0);
+    return false;
+  } catch (e) {
+    return e.code === 'ESRCH';
+  }
+}
+
 /**
  * 获取全局闸门锁（同一 git 公共目录同时只允许一个闸门运行，避免并行会话把内存耗尽或互相清库）。
  * 超过 maxAgeMinutes 的残留锁视为失效并清掉。返回释放函数，必须在 finally 中调用。
@@ -272,15 +279,16 @@ export function acquireLock(root, maxAgeMinutes = 90) {
       return () => fs.rmSync(dir, { recursive: true, force: true });
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      if (Date.now() - fs.statSync(dir).mtimeMs > maxAgeMs) {
-        fs.rmSync(dir, { recursive: true, force: true });
-        continue;
-      }
       let owner = '';
       try {
         owner = fs.readFileSync(path.join(dir, 'owner.json'), 'utf8');
       } catch {
         owner = '';
+      }
+      // 持锁进程已不在（如闸门被 Ctrl+C）：清锁重试；读不到 pid 时只按时间判断
+      if (Date.now() - fs.statSync(dir).mtimeMs > maxAgeMs || ownerGone(owner)) {
+        fs.rmSync(dir, { recursive: true, force: true });
+        continue;
       }
       throw new Error(`闸门锁被占用（同一仓库同时只能跑一个闸门）：${owner.trim() || dir}`);
     }

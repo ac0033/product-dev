@@ -151,7 +151,7 @@ export function validateBundle(b, bundleRoot) {
 }
 
 /** 把组件展开为具体文件：[{ abs（源文件绝对路径）, rel（项目内相对路径）}]。 */
-export function resolveSources(comp, bundleRoot, root) {
+export function resolveSources(comp, bundleRoot) {
   const src = path.join(bundleRoot, comp.source);
   if (comp.kind === 'docs-stages') return [];
   if (comp.pattern) {
@@ -162,7 +162,6 @@ export function resolveSources(comp, bundleRoot, root) {
       .sort()
       .map((n) => ({ abs: path.join(src, n), rel: `${comp.target}/${n}` }));
   }
-  void root;
   return [{ abs: src, rel: comp.target }];
 }
 
@@ -315,7 +314,7 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
       continue;
     }
 
-    for (const { abs: srcAbs, rel } of resolveSources(comp, bundleRoot, root)) {
+    for (const { abs: srcAbs, rel } of resolveSources(comp, bundleRoot)) {
       const abs = path.join(root, rel);
       const srcBuf = fs.readFileSync(srcAbs);
 
@@ -394,7 +393,7 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
     } else {
       conflicts.push(rel);
       actions.push({ type: 'conflict', file: rel });
-      messages.push();
+      messages.push(`冲突：${rel} 已不在新清单里，且项目里有本地修改，未删除（确认后用 --force 删除）`);
     }
   }
   return { ops, actions, conflicts, messages, newLock };
@@ -526,7 +525,7 @@ export function checkBundle({ root, bundleRoot }) {
       push(comp.id, comp.target, state);
       continue;
     }
-    for (const { abs: srcAbs, rel } of resolveSources(comp, bundleRoot, root)) {
+    for (const { abs: srcAbs, rel } of resolveSources(comp, bundleRoot)) {
       const abs = path.join(root, rel);
       const exists = fs.existsSync(abs);
       if (comp.kind === 'rules') {
@@ -575,9 +574,4 @@ export function checkBundle({ root, bundleRoot }) {
 export function loadTemplateConfig(bundleRoot, bundle) {
   const comp = bundle.components.find((c) => c.kind === 'config');
   return comp ? JSON.parse(fs.readFileSync(path.join(bundleRoot, comp.source), 'utf8')) : {};
-}
-
-/** 把 file URL 形式的模块路径转换为 Windows 友好的绝对路径（测试与冒烟使用）。 */
-export function fileUrl(p) {
-  return new URL(`file:///${path.resolve(p).replace(/\\/g, '/')}`).href;
 }

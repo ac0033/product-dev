@@ -7,8 +7,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isMain, loadConfig, readRecord, recordDir, repoRoot, scopeFiles, treeHash, writeRecord } from './lib.mjs';
 
-/** 报告里写明“结论：不通过”或“结论 不通过”的形式。 */
-const FAIL_IN_REPORT = /结论[\s:：]*不通过/;
+/** 报告里写明“结论：不通过”“结论：**不通过**”“结论：未通过”等形式（允许冒号、星号、井号、引用符、横线夹在中间）。 */
+const FAIL_IN_REPORT = /结论[\s:：*#>-]*[不未]通过/;
 
 /**
  * 登记复审结论。返回 { ok, message, record? }；不通过的登记也会写入（verdict=fail），推送核对时只认 pass。

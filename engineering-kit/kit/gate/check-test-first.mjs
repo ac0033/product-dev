@@ -19,7 +19,7 @@ function escapeRe(s) {
 /** 测试文本里是否有 import/require/from 语句引用了名为 name 的模块（JS/TS 与 Python 两种写法）。 */
 export function referencesModule(text, name) {
   const n = escapeRe(name);
-  const js = new RegExp(`(?:from|import|require\\(|import\\s*\\()\\s*['"\`][^'"\`\\n]*\\b${n}\\b`, 'm');
+  const js = new RegExp(`(?:from|import|require\\(|import\\s*\\()\\s*['"\`][^'"\`\\n]*\\b${n}(?:\\.\\w+)?['"\`]`, 'm');
   // Python：import pkg.name、from pkg.name import x，以及 from pkg import name（模块作为包的成员导入）
   const py = new RegExp(`^\\s*(?:from|import)\\s+[\\w.]*\\b${n}\\b`, 'm');
   const pyMember = new RegExp(`^\\s*from\\s+[\\w.]+\\s+import\\s+[^\\n#]*\\b${n}\\b`, 'm');

@@ -81,8 +81,8 @@ export function listPending(bundleDir = DEFAULT_BUNDLE_DIR) {
     .sort((a, b) => Number(b.recommended) - Number(a.recommended) || (a.source === 'user' ? -1 : 1) - (b.source === 'user' ? -1 : 1) || a.id.localeCompare(b.id));
 }
 
-/** 套件测试命令：列出 kit/tests 下的测试文件（不含 changeset.test.mjs，避免递归）。 */
-function defaultCheck(bundleDir) {
+/** 套件测试（变更集应用与发布共用）：列出 kit/tests 下的测试文件，不含 changeset.test.mjs，避免递归。 */
+export function defaultCheck(bundleDir) {
   const dir = path.join(bundleDir, 'kit', 'tests');
   const files = fs.readdirSync(dir).filter((n) => n.endsWith('.test.mjs') && n !== 'changeset.test.mjs').sort().map((n) => path.join('tests', n));
   const r = spawnSync(process.execPath, ['--test', ...files], { cwd: path.join(bundleDir, 'kit'), encoding: 'utf8', timeout: 900000 });

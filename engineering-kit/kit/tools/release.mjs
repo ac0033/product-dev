@@ -3,20 +3,14 @@
 // 因而任何项目都能回滚到指定版本：node kit/sync.mjs --target <项目> --from-tag engineering-kit-vX.Y.Z
 // 用法：node kit/tools/release.mjs [--check]     只检查，不提交
 //       node kit/tools/release.mjs              检查、提交、打标签
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { git, repoRoot, isMain } from '../gate/lib.mjs';
 import { loadBundle } from './bundle-lib.mjs';
-import { DEFAULT_BUNDLE_DIR } from './changeset.mjs';
+import { DEFAULT_BUNDLE_DIR, defaultCheck } from './changeset.mjs';
 
 /** 套件测试（与变更集应用时相同的检查，不含 changeset 测试以免递归）。 */
-export function runKitTests(bundleDir) {
-  const dir = path.join(bundleDir, 'kit', 'tests');
-  const files = fs.readdirSync(dir).filter((n) => n.endsWith('.test.mjs') && n !== 'changeset.test.mjs').sort().map((n) => path.join('tests', n));
-  const r = spawnSync(process.execPath, ['--test', ...files], { cwd: path.join(bundleDir, 'kit'), encoding: 'utf8', timeout: 900000 });
-  return { ok: r.status === 0, output: `${r.stdout || ''}${r.stderr || ''}` };
-}
+export const runKitTests = defaultCheck;
 
 /**
  * 发布整包版本。返回 { version, tag, commit }（check 模式下只返回检查结果）。

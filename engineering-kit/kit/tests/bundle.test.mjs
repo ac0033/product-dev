@@ -164,3 +164,30 @@ test('换行风格：CRLF 文件里插入的标记块也用 CRLF，不混入 LF�
   assert.equal(applyBlock(once, '0.2.0', '第一行\n第二行'), once);
   assert.equal(findBlock(once).body, '第一行\n第二行');
 });
+
+test('清单外的旧套件文件有本地修改时：提示冲突并说明原因（不是空消息）', () => {
+  const root = targetRepo();
+  syncKit({ target: root });
+  write(root, 'scripts/engineering/gone.mjs', '本地改过\n');
+  const lock = JSON.parse(read(root, LOCK_REL));
+  lock.files['scripts/engineering/gone.mjs'] = 'deadbeef';
+  write(root, LOCK_REL, JSON.stringify(lock));
+  const r = syncKit({ target: root });
+  assert.ok(r.messages.some((m) => m.includes('gone.mjs') && m.includes('已不在新清单')), r.messages.join('\n'));
+});
+
+test('--from-tag：用完删除导出的临时目录', () => {
+  const root = targetRepo();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-tmpdir-'));
+  const r = spawnSync(process.execPath, [path.join(BUNDLE_ROOT, 'kit', 'sync.mjs'), '--target', root, '--check', '--from-tag', 'engineering-kit-v0.2.0'], {
+    encoding: 'utf8',
+    env: { ...process.env, TEMP: tmp, TMP: tmp, TMPDIR: tmp },
+  });
+  assert.ok(r.stdout.includes('整包'), `未执行：${r.stdout}${r.stderr}`);
+  assert.deepEqual(fs.readdirSync(tmp), [], '临时目录应已清理');
+});
+
+test('仓库根的 .gitattributes 与模板一致（同步按字节复制，CRLF 检出会弄坏脚本与哈希）', () => {
+  const top = path.resolve(BUNDLE_ROOT, '..');
+  assert.equal(read(top, '.gitattributes').trim(), read(BUNDLE_ROOT, 'kit/templates/gitattributes').trim());
+});

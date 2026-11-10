@@ -29,6 +29,7 @@ function headerText(lines) {
   const MAX = 30;
   let text = '';
   let i = 0;
+  if (lines[0]?.startsWith('#!')) i = 1; // 解释器行（#!/usr/bin/env node）不是文件头注释
   while (i < lines.length && lines[i].trim() === '') i++;
   let seen = 0;
   while (i < lines.length && seen < MAX) {
