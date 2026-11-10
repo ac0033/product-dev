@@ -6,9 +6,10 @@
 
 | 入口 | 适用任务 | 配套内容 |
 |---|---|---|
+| [product-dev 综合插件](product-dev/skills/product-dev/SKILL.md)（0.1.0 骨架版） | 只说想法，由一个入口判断情况并交给对应部件 | 下面各组件和部分第三方内容的装配结果，供 Claude Code 与 Codex 作为插件安装；入口的完整流程待补 |
 | [产品设计技能组](product-design-orchestrator/README.md) | 从想法推进到 PRD、交互原型、系统架构和实施交接 | 总控（唯一入口）与三个专业技能，共享协议和产物模板 |
 | [engineering-kit](engineering-kit/SKILL.md) | 工程规则与闸门、开发流程和经验整理 | 同步工具、工程模板、流程规范和测试 |
-| [evals](evals/cases.md) | 技能包自身的验证 | 一致性检查（`node --test evals/consistency.test.mjs`）、冲突矩阵、行为用例 |
+| [evals](evals/cases.md) | 技能包自身的验证 | 一致性检查与插件构建检查（`node --test evals/*.test.mjs`）、冲突矩阵、行为用例 |
 | [组件清单](COMPONENTS.md) | 了解仓库由哪些组件构成、各自的来源与许可 | 自有组件与第三方组件两张表 |
 | [语言风格 System Prompt](语言风格%20System%20Prompt.md) | 独立的中文表达约定 | 单文件 |
 
@@ -23,18 +24,28 @@ cd skills
 
 ## 来源与许可
 
-本仓库自有的内容以 MIT 许可发布，见 [LICENSE](LICENSE)。收录或改写的第三方内容保留各自的许可，见对应文件末尾的出处说明。
+本仓库自有的内容以 MIT 许可发布，见 [LICENSE](LICENSE)。收录或改写的第三方内容保留各自的许可，不受该 MIT 许可覆盖。
+
+### 综合插件收录的第三方内容
+
+`product-dev/` 里收录了下列项目的原文。我们只改了两个技能文件头的可见性字段（并加一行改动说明），没有收录 archify 的示例成品页和 impeccable 的会话钩子，其余原样。impeccable 的启动脚本首次运行时会联网下载它的引擎程序，archify 带有联网的更新检查，详见声明。逐项的来源、版本、改动、版权声明和许可全文见 [product-dev/THIRD_PARTY_NOTICES.md](product-dev/THIRD_PARTY_NOTICES.md)。
+
+| 项目 | 收录内容 | 许可 |
+|---|---|---|
+| [impeccable](https://github.com/pbakaus/impeccable) 4.8.2 | 界面设计技能和它的四个子代理 | Apache-2.0 |
+| [archify](https://github.com/tt-a1i/archify) 3.2.0 | 图表技能（含渲染器，不含示例成品页） | Apache-2.0，内含的品牌标识、字体等另有各自条款 |
+| [feature-dev](https://github.com/anthropics/claude-plugins-official) 1.0.1 | 代码探索、方案设计、代码复审三个子代理 | Apache-2.0 |
 
 ### 外部工具
 
-本仓库的技能会按名称调用或推荐下列外部工具。它们不随本仓库分发，需要各自安装，使用时遵守各自的许可；没装时按技能里写的替代做法执行。
+各组件单独使用时，会按名称调用或推荐下列外部工具。除上一节列出的已随综合插件收录的部分外，它们不随本仓库分发，需要各自安装，使用时遵守各自的许可；没装时按技能里写的替代做法执行。
 
 | 工具 | 在这里的用途 | 与本仓库的关系 | 许可 |
 |---|---|---|---|
-| [feature-dev](https://github.com/anthropics/claude-plugins-official)（Anthropic 官方插件） | 代码探索、方案对比、独立复审的子代理 | 只按名称调用 | 所在仓库为 Apache-2.0 |
+| [feature-dev](https://github.com/anthropics/claude-plugins-official)（Anthropic 官方插件） | 代码探索、方案对比、独立复审的子代理 | 组件里只按名称调用；综合插件已收录三个子代理 | Apache-2.0 |
 | [ponytail](https://github.com/DietrichGebert/ponytail) | 约束改动量、作者自查、全仓巡检 | 只按名称推荐 | MIT |
-| [archify](https://github.com/tt-a1i/archify) | 架构图与流程图 | 只按名称推荐 | Apache-2.0 |
-| impeccable | 界面设计与界面复查 | 只按名称推荐 | 以其发布页为准 |
+| [archify](https://github.com/tt-a1i/archify) | 架构图与流程图 | 组件里只按名称推荐；综合插件已收录 | Apache-2.0 |
+| [impeccable](https://github.com/pbakaus/impeccable) | 界面设计与界面复查 | 组件里只按名称推荐；综合插件已收录 | Apache-2.0 |
 | [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) | 任务拆解、调试、代码评审等方法的参考来源 | 目前只在冲突矩阵里提及，未收录其文本 | MIT |
 
-截至当前版本，本仓库没有收录上述项目的代码或原文。以后凡是改写或摘录第三方内容的文件，都在该文件末尾注明出处，并在仓库根目录的 `THIRD_PARTY_NOTICES.md` 里附上对应的版权声明和许可全文。
+ponytail 和 agent-skills 的代码或原文目前没有收录。以后凡是改写或摘录第三方内容的文件，都在该文件末尾注明出处，并在插件的第三方声明里附上对应的版权声明和许可全文。

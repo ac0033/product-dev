@@ -1,0 +1,22 @@
+{
+  "name": "product-dev",
+  "version": "0.1.0",
+  "description": "产品开发综合插件：只说想法，由一个入口判断情况（新项目、加功能、修 bug、小改动、只改文档、装或升级工程套件）并交给插件自带的技能和子代理。当前是骨架版，各路线的完整步骤待补。自有内容 MIT；内含第三方内容，各自保留原许可，见 THIRD_PARTY_NOTICES.md。",
+  "author": {
+    "name": "YuanLumen",
+    "url": "https://github.com/ac0033"
+  },
+  "homepage": "https://github.com/ac0033/skills",
+  "repository": "https://github.com/ac0033/skills",
+  "license": "MIT (own content); bundled third-party content keeps its own licenses, see THIRD_PARTY_NOTICES.md",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Product Dev",
+    "shortDescription": "从想法到交付的产品开发流程：一个入口，自动分流。",
+    "longDescription": "只说想法，入口技能判断是新项目、加功能、修 bug、小改动、只改文档还是装或升级工程套件，并交给插件自带的设计角色、工程套件、界面设计、图表和子代理执行。",
+    "developerName": "YuanLumen",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": ["我有一个产品想法，帮我从需求开始推进", "给现有项目加一个功能"]
+  }
+}

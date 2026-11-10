@@ -12,6 +12,14 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** 不参与检查的目录：本机私有材料、工具目录、第三方组件的本机存档（vendor）；模板里的链接相对安装后的位置，单独处理。 */
 const SKIP_DIRS = new Set(['.git', '.notes', '.agents', '.workbuddy', 'node_modules', 'dist', 'vendor']);
 const TEMPLATE_DIR = 'engineering-kit/kit/templates/';
+/** 综合插件里由构建脚本复制来的自有组件（入口技能 product-dev 是手写的，不算）。 */
+const PLUGIN_SKILLS = 'product-dev/skills/';
+const isPluginCopy = (f) => f.startsWith(PLUGIN_SKILLS) && !f.startsWith(`${PLUGIN_SKILLS}product-dev/`);
+/** 插件里的第三方原文：和 vendor 一样不参与本文件的检查（链接与哈希由 plugin-build.test.mjs 查）。 */
+const PLUGIN_THIRD_PARTY = ['product-dev/skills/impeccable/', 'product-dev/skills/archify/', 'product-dev/agents/'];
+/** 文件在组件里的路径：插件里的副本去掉前缀后与组件同名，受控的值照查。 */
+const inComponent = (f) => (isPluginCopy(f) ? f.slice(PLUGIN_SKILLS.length) : f);
+const isTemplate = (f) => inComponent(f).startsWith(TEMPLATE_DIR);
 
 /** 递归列出仓库里的文件（相对路径，正斜杠）。 */
 function listFiles(dir = ROOT, out = []) {
@@ -26,14 +34,14 @@ function listFiles(dir = ROOT, out = []) {
 
 const FILES = listFiles();
 /** 被检查的文档：全部 Markdown，本机专用记录（*.local.md）除外。 */
-const DOCS = FILES.filter((f) => f.endsWith('.md') && !f.endsWith('.local.md'));
+const DOCS = FILES.filter((f) => f.endsWith('.md') && !f.endsWith('.local.md') && !PLUGIN_THIRD_PARTY.some((p) => f.startsWith(p)));
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
 /** 去掉文件头元数据和代码块，避免把字段、示例命令和目录树当正文。 */
 const prose = (text) => text.replace(/^---\n[\s\S]*?\n---\n/, '').replace(/```[\s\S]*?```/g, '');
 
 test('链接：文档里的相对链接和锚点都能到达', () => {
   const broken = [];
-  for (const f of DOCS.filter((d) => !d.startsWith(TEMPLATE_DIR))) {
+  for (const f of DOCS.filter((d) => !isTemplate(d))) {
     for (const m of prose(read(f)).matchAll(/\]\(([^)\s]+)\)/g)) {
       const link = decodeURIComponent(m[1]);
       if (/^(https?:|mailto:|#)/.test(link)) continue;
@@ -63,7 +71,7 @@ test('文档位置：设计技能约定的文档路径都在阶段目录或记�
   const pathsIn = (f) => [...read(f).matchAll(/`(docs\/[^`\s]+)`/g)].map((m) => m[1]);
   assert.ok(pathsIn('product-design-orchestrator/references/shared-protocol.md').length >= 6, '没有从共享协议里解析到文档路径');
   const bad = [];
-  for (const f of DOCS.filter((d) => /^(product-|prototype-|system-)/.test(d))) {
+  for (const f of DOCS.filter((d) => /^(product-|prototype-|system-)/.test(inComponent(d)) && !d.startsWith('product-dev/THIRD'))) {
     for (const rel of pathsIn(f)) if (!okPrefix.some((pre) => `${rel}/`.startsWith(pre))) bad.push(`${f}：${rel}`);
   }
   assert.deepEqual(bad, []);
@@ -71,7 +79,7 @@ test('文档位置：设计技能约定的文档路径都在阶段目录或记�
 
 test('状态值：模板文件头的状态都在套件默认配置里', () => {
   const bad = [];
-  for (const f of DOCS.filter((d) => d.startsWith(TEMPLATE_DIR))) {
+  for (const f of DOCS.filter(isTemplate)) {
     const m = read(f).match(/^状态：\s*([A-Za-z一-龥]+)/m);
     if (m && !HYGIENE_DEFAULTS.statusValues.includes(m[1])) bad.push(`${f}：${m[1]}`);
   }
@@ -122,8 +130,9 @@ test('已废弃的说法：不再出现在任何文档里', () => {
 });
 
 test('重复：同一句较长的话不出现在两个文件里', () => {
+  // 插件里复制来的目录与组件内容有意相同，不参与；入口技能等手写文件照查。
   const seen = new Map();
-  for (const f of DOCS.filter((d) => !d.startsWith(TEMPLATE_DIR) && d !== 'evals/conflict-matrix.md')) {
+  for (const f of DOCS.filter((d) => !isTemplate(d) && !isPluginCopy(d) && d !== 'evals/conflict-matrix.md')) {
     for (const raw of prose(read(f)).split('\n')) {
       // 标题、命令行不算正文句子；表格按单元格拆开一起查
       if (/^\s*(#|```|- \[)/.test(raw) || raw.includes('`node ')) continue;

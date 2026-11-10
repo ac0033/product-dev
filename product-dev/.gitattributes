@@ -1,0 +1,4 @@
+# 第三方内容按上游原字节保存（含必须是 CRLF 的批处理文件），不做换行转换
+skills/impeccable/** -text
+skills/archify/** -text
+agents/** -text
