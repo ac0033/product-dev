@@ -100,26 +100,23 @@ test('规则编号：文档引用的 R 编号都在规则块里定义，且规�
   assert.deepEqual([...new Set(bad)], []);
 });
 
-test('入口：用户能调用的只有 project-flow 和 engineering-kit，模型能自动触发的入口只有 project-flow', () => {
+test('入口：用户能调用的技能只有 project-flow 一个，其余技能写明被直接加载时先转到入口', () => {
   const hidden = [];
   const invocable = [];
-  const auto = [];
   for (const f of SKILLS) {
     const name = f.split('/')[0];
     const fm = read(f).split('\n---\n')[0];
     assert.match(fm, new RegExp(`^name: ${name}$`, 'm'), `${f} 的 name 与目录不一致`);
+    // 两个字段同时存在会让技能既不能手动也不能自动加载
+    assert.ok(!/^disable-model-invocation: true$/m.test(fm), `${f} 不应禁止模型加载：入口要靠模型按需加载它`);
     if (/^user-invocable: false$/m.test(fm)) {
       hidden.push(name);
       // 隐藏只影响命令菜单，模型仍可能直接加载：正文必须写明先转到上一级入口
       assert.ok(read(f).includes('被直接加载时，先加载'), `${f} 没有写明被直接加载时先转到入口`);
-    } else {
-      invocable.push(name);
-      if (!/^disable-model-invocation: true$/m.test(fm)) auto.push(name);
-    }
+    } else invocable.push(name);
   }
-  assert.deepEqual(invocable.sort(), ['engineering-kit', 'project-flow']);
-  assert.deepEqual(auto, ['project-flow']);
-  assert.deepEqual(hidden.sort(), ['product-design-orchestrator', 'product-discovery-prd', 'prototype-design', 'system-architecture-design']);
+  assert.deepEqual(invocable, ['project-flow']);
+  assert.deepEqual(hidden.sort(), ['engineering-kit', 'product-design-orchestrator', 'product-discovery-prd', 'prototype-design', 'system-architecture-design']);
   // 装了套件的项目不打命令也要分流：规则块里必须有这一句
   assert.ok(read('engineering-kit/kit/rules/AGENTS.block.md').includes('先经 `project-flow` 技能分流'), '规则块没有写明开发相关的请求先经 project-flow 分流');
 });

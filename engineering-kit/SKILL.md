@@ -1,15 +1,14 @@
 ---
 name: engineering-kit
-description: 工程能力包的管理入口：向 Git 项目安装、升级、检查和回滚工程规则、闸门、钩子与模板，并把经验整理成套件变更和发布。日常开发交付不从这里进，走 project-flow。
-argument-hint: "[项目目录] [--init] [--profile ts|python] [--check | --dry-run | --force | --from-tag <标签>]"
-disable-model-invocation: true
+description: 工程能力包：向 Git 项目安装、升级、检查和回滚工程规则、闸门、钩子与模板，并把经验整理成套件变更和发布。由 project-flow 加载，不承担日常开发交付。
+user-invocable: false
 ---
 
-# /engineering-kit：工程能力包
+# engineering-kit：工程能力包
 
-参数：`$ARGUMENTS`
+本技能由 [project-flow](../project-flow/SKILL.md) 在“装或升级套件”路线、新项目第一步装套件、或需要发布套件时加载；被直接加载时，先加载 project-flow 做分流，确认属于套件管理后再往下读。目标项目目录和要做的操作（安装、检查、升级、回滚）从用户的话和 project-flow 的判断里取，不清楚时先问。
 
-本技能只管套件本身：安装、升级与漂移检查、回滚、变更集与发布、维护。开发交付（分流、需求与方案、开发、自查、复审、合并、验收与发布）由 [project-flow](../project-flow/SKILL.md) 负责，流程细则在它的 `references/` 下。推送、合并、部署按用户授权与项目规则执行。
+本技能只管套件本身：安装、升级与漂移检查、回滚、变更集与发布、维护。开发交付（分流、需求与方案、开发、自查、复审、合并、验收与发布）由 project-flow 负责，流程细则在它的 `references/` 下。推送、合并、部署按用户授权与项目规则执行。
 
 - 经验记录：读 [practices.md](references/practices.md)；只在用户确有可复用经验时记录。
 - `references/*.local.md` 是只留本机的记录（项目专用流程、试装与验收记录、实践来源），不进仓库。本机存在 `references/dev-flow.local.md` 且任务涉及对应项目时，开发交付时一并读它；没有该文件时以通用流程和项目实际规则为准，不推断缺失的项目命令。
