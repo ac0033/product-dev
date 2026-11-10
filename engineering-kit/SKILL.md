@@ -88,7 +88,7 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 
 ## 5. 日常闸门与当前适配状态
 
-目标流程和各阶段检查以 `references/process.md` 第 4、5 节为唯一出处，两种流程的命令也写在第 4 节。0.3.0 的闸门按项目配置 `modules.gate.reviewFlow` 走其中一种：
+目标流程和各阶段检查以 `references/process.md` 第 4、5 节为唯一出处，两种流程的命令也写在第 4 节。0.3.1 的闸门按项目配置 `modules.gate.reviewFlow` 走其中一种：
 
 | 流程 | 推送核对（`verify.mjs`） | 复审登记（`review.mjs`） | 合并 |
 |---|---|---|---|
