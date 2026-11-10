@@ -24,6 +24,9 @@ import {
   writeRecord,
 } from './lib.mjs';
 
+/** 判断“这是代码文件”的扩展名（配置文件、文档、脚手架数据不算）。 */
+const CODE_FILE = /\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|rb|php|cs|c|cc|cpp|h|swift|sh)$/;
+
 /**
  * 运行闸门。返回 { ok, messages, record }。
  * 静态检查未通过时直接返回，不运行测试，也不写测试记录。
@@ -50,6 +53,15 @@ export function runGate({ root }) {
     // 尚无源码与测试文件（例如只有脚手架的首次提交）：没有可运行的测试，记录为“无需测试”。
     // 一旦出现源码，上面的测试先行检查就会要求测试，所以跳过这里不会放过未测试的代码。
     if (!repoFiles(root).some((f) => isSourceFile(f, config) || isTestFile(f, config))) {
+      // 配置写错（如 JS 项目沿用默认的 src/**/*.ts）时，也会走到这里：有代码文件却没有任何文件匹配 glob，不能当作“无需测试”。
+      const stray = scopeFiles(root, config).filter((f) => CODE_FILE.test(f) && !f.startsWith('scripts/engineering/'));
+      if (stray.length > 0) {
+        return {
+          ok: false,
+          messages: [`有代码文件但没有任何文件匹配 layout.sourceGlobs / testGlobs，测试不会运行：请检查 engineering.config.json 的 layout.sourceGlobs 与 testGlobs（例：${stray.slice(0, 3).join('、')}）`],
+          record: null,
+        };
+      }
       fs.mkdirSync(recordDir(root), { recursive: true });
       const noTestRecord = {
         passed: true,

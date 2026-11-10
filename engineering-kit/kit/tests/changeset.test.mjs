@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { applyChangeset, listPending, proposeChangeset, validateChangeset } from '../tools/changeset.mjs';
 import { releaseBundle } from '../tools/release.mjs';
@@ -110,4 +111,20 @@ test('发布：提交整包目录并打版本标签；同一版本不能重复�
   const files = git(root, ['show', '--name-only', '--format=', 'HEAD']);
   assert.ok(!files.includes('unrelated.txt'), '发布提交只能包含整包目录');
   assert.throws(() => releaseBundle({ bundleDir: dir, testRunner: passRunner }), /已存在/);
+});
+
+test('命令行入口：list / propose / apply 能运行，未知子命令用法退出码 2，出错退出码 1', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-cli-'));
+  fs.cpSync(path.join(BUNDLE_ROOT, 'kit', 'gate'), path.join(dir, 'kit', 'gate'), { recursive: true });
+  fs.cpSync(path.join(BUNDLE_ROOT, 'kit', 'tools', 'changeset.mjs'), path.join(dir, 'kit', 'tools', 'changeset.mjs'));
+  const run = (...args) => spawnSync(process.execPath, [path.join(dir, 'kit', 'tools', 'changeset.mjs'), ...args], { encoding: 'utf8' });
+  assert.equal(run('bogus').status, 2);
+  assert.equal(run('list').stdout.includes('没有待确认'), true);
+  const f = path.join(dir, 'cs.json');
+  fs.writeFileSync(f, JSON.stringify({ id: 'cli-1', title: '示例', source: 'agent', rationale: '依据', ops: [{ op: 'write', file: 'x.txt', content: 'x' }] }));
+  assert.equal(run('propose', f).status, 0);
+  assert.ok(run('list').stdout.includes('cli-1'));
+  const r = run('apply', 'cli-1');
+  assert.equal(r.status, 1);
+  assert.ok(r.stderr.includes('--approved'), r.stderr);
 });

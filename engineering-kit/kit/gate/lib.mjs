@@ -163,14 +163,40 @@ export function resolveBase(root, base) {
  * 而是读全部状态，再在本地按范围过滤。git 失败时抛错，绝不返回空列表（失败不放行）。
  */
 export function uncommittedInScope(root, scope) {
-  const r = git(root, ['status', '--porcelain', '-uall']);
+  const r = git(root, ['status', '--porcelain', '-uall', '-z']);
   if (!r.ok) throw new Error(`无法读取工作区状态（git status 失败）：${r.err.trim()}`);
   const inScope = new Set(scope);
-  return r.out
-    .split('\n')
-    .filter(Boolean)
-    .map((line) => line.slice(3).split(' -> ').pop().trim().replace(/\\/g, '/'))
-    .filter((f) => inScope.has(f));
+  return parseStatusZ(r.out).filter((e) => inScope.has(e.file)).map((e) => e.file);
+}
+
+/**
+ * 解析 `git status --porcelain -z` 的输出：返回 [{ code, file }]（斜杠路径）。
+ * -z 下路径不加引号（带空格、中文的路径原样输出）；改名条目后面多跟一个字段（旧路径），这里跳过它。
+ */
+export function parseStatusZ(text) {
+  const out = [];
+  const parts = text.split('\0');
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (p.length < 4) continue;
+    const code = p.slice(0, 2);
+    out.push({ code, file: p.slice(3).replace(/\\/g, '/') });
+    if (code.includes('R') || code.includes('C')) i++;
+  }
+  return out;
+}
+
+/** glob 里字面的顶层目录名（例如以 tests 开头的 glob 得到 tests；含通配符的段不算）。 */
+export function literalTopDirs(globs) {
+  return globs.map((g) => g.split('/')[0]).filter((s) => s && !/[*?{[]/.test(s));
+}
+
+/**
+ * 允许的顶层目录：白名单加上源码、测试 glob 推出的字面目录（如以 test/ 开头的测试 glob 得到 test），
+ * 巡检与推送核对共用，避免两处算法不一致。
+ */
+export function allowedTopDirs(layout) {
+  return new Set([...layout.topLevelAllowed, ...literalTopDirs([...layout.sourceGlobs, ...layout.testGlobs])]);
 }
 
 /** 参与闸门记录绑定的文件：本次改动中去掉 reviewIgnore 的部分（纯文档改动不使记录失效）。 */

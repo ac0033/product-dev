@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isMain } from '../gate/lib.mjs';
 
 /** 整包根目录（本文件位于 kit/tools，整包根为上两级）。 */
 export const DEFAULT_BUNDLE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -145,4 +146,29 @@ export function applyChangeset({ bundleDir = DEFAULT_BUNDLE_DIR, id, approved = 
   fs.writeFileSync(path.join(applied, `${id}.json`), `${JSON.stringify(record, null, 2)}\n`);
   fs.rmSync(src);
   return { ok: true, id, bumpTo: c.bumpTo ?? null, files: [...snapshot.keys()] };
+}
+
+// 命令行入口：list 列出待确认；apply <id> [--approved] 应用；propose <变更集.json> 登记为提案。
+if (isMain(import.meta.url)) {
+  const [cmd, arg] = process.argv.slice(2);
+  const usage = '用法：node kit/tools/changeset.mjs list | apply <id> [--approved] | propose <变更集.json>';
+  if (!['list', 'apply', 'propose'].includes(cmd) || (cmd !== 'list' && !arg)) {
+    console.error(usage);
+    process.exit(2);
+  }
+  try {
+    if (cmd === 'list') {
+      const items = listPending();
+      if (items.length === 0) console.log('没有待确认的变更集');
+      for (const i of items) console.log(`${i.recommended ? '[推荐] ' : ''}${i.id}  ${i.title}  来源：${i.source}  涉及：${i.files.join('、')}${i.bumpTo ? `  升版：${i.bumpTo}` : ''}`);
+    } else if (cmd === 'apply') {
+      const r = applyChangeset({ id: arg, approved: process.argv.includes('--approved') });
+      console.log(`已应用 ${r.id}（未提交、未打标签），改动文件：${r.files.join('、')}`);
+    } else {
+      console.log(`已登记提案：${proposeChangeset({ changeset: JSON.parse(fs.readFileSync(arg, 'utf8')) })}`);
+    }
+  } catch (e) {
+    console.error(`失败：${e.message}`);
+    process.exit(1);
+  }
 }

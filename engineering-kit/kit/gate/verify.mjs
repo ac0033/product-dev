@@ -12,6 +12,7 @@ import {
   isSourceFile,
   loadConfig,
   loadExempt,
+  allowedTopDirs,
   matchesAny,
   readRecord,
   repoRoot,
@@ -31,6 +32,7 @@ export function newFileProblems(root, config, exempt) {
     rel.startsWith('docs/_templates/') ||
     config.layout.stages.some((s) => rel.startsWith(`docs/${s}/`)) ||
     config.hygiene.recordDirs.some((d) => rel.startsWith(`${d}/`));
+  const allowedTop = allowedTopDirs(config.layout);
   const ex = exempt.newFiles || {};
   for (const f of newFiles(root, config.base)) {
     if (ex[f]) continue;
@@ -38,8 +40,8 @@ export function newFileProblems(root, config, exempt) {
       out.push(`新文件不在允许的文档位置，且无理由：${f}（请放入阶段目录或记录目录，或在豁免表 newFiles 中写明理由）`);
     }
     const top = f.includes('/') ? f.split('/')[0] : null;
-    if (top && !top.startsWith('.') && !config.layout.topLevelAllowed.includes(top)) {
-      out.push(`新文件所在顶层目录不在白名单：${f}（允许：${config.layout.topLevelAllowed.join('、')}）`);
+    if (top && !top.startsWith('.') && !allowedTop.has(top)) {
+      out.push(`新文件所在顶层目录不在白名单：${f}（允许：${[...allowedTop].join('、')}）`);
     }
   }
   return out;

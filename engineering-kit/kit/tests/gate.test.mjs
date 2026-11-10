@@ -6,10 +6,10 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { checkComments } from '../gate/check-comments.mjs';
 import { checkTestFirst, referencesModule } from '../gate/check-test-first.mjs';
-import { changedFiles, scopeFiles, treeHash } from '../gate/lib.mjs';
+import { changedFiles, loadConfig, scopeFiles, treeHash } from '../gate/lib.mjs';
 import { runGate } from '../gate/gate.mjs';
 import { recordReview } from '../gate/review.mjs';
-import { verify } from '../gate/verify.mjs';
+import { newFileProblems, verify } from '../gate/verify.mjs';
 import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, TEST_CONFIG, tmpRepo, write } from './helpers.mjs';
 
 /** 测试直接使用测试配置对象（不经过 loadConfig 读文件）。 */
@@ -210,4 +210,30 @@ test('测试先行：Python 的 “from 包 import 模块” 写法也算引用'
   assert.equal(referencesModule('from pdf_translation.budget import Budget\n', 'budget'), true);
   assert.equal(referencesModule('from pdf_translation import budget_helpers\n', 'budget'), false);
   assert.equal(referencesModule("import { x } from '../src/dedup.ts';\n", 'dedup'), true);
+});
+
+test('闸门：配置的 glob 一个文件都匹配不上（如 JS 项目用了默认的 .ts）时报错，不当作“尚无源码”放行', () => {
+  const root = tmpRepo();
+  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, base: 'auto', testCommand: 'node -e "process.exit(9)"' }));
+  write(root, 'lib/a.js', '// 示例模块：glob 没有匹配到的 JS 源码。\nexport const a = 1;\n');
+  const res = runGate({ root });
+  assert.equal(res.ok, false, res.messages.join('\n'));
+  assert.ok(res.messages.some((m) => m.includes('layout.sourceGlobs')), res.messages.join('\n'));
+  assert.equal(res.record, null);
+});
+
+test('闸门：只有套件脚本与配置的首次提交仍可通过（不被上一条误伤）', () => {
+  const root = tmpRepo();
+  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, base: 'auto' }));
+  write(root, 'scripts/engineering/gate/gate.mjs', '// 套件脚本\nexport const x = 1;\n');
+  const res = runGate({ root });
+  assert.equal(res.ok, true, res.messages.join('\n'));
+});
+
+test('推送核对与巡检的顶层目录白名单一致：testGlobs 推出的 test/ 目录，新文件不被推送核对拦截', () => {
+  const root = featureRepo();
+  write(root, 'test/other.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup);\n");
+  const config = loadConfig(root);
+  const problems = newFileProblems(root, config, {});
+  assert.deepEqual(problems.filter((p) => p.includes('顶层目录')), [], problems.join('\n'));
 });

@@ -9,7 +9,7 @@ import { checkComments } from '../gate/check-comments.mjs';
 import os from 'node:os';
 import { changedFiles, loadConfig, uncommittedInScope } from '../gate/lib.mjs';
 import { verify } from '../gate/verify.mjs';
-import { featureRepo, tmpRepo, write, TEST_CONFIG } from './helpers.mjs';
+import { featureRepo, git as gitIn, tmpRepo, write, TEST_CONFIG } from './helpers.mjs';
 
 test('未提交检查：git 失败时抛错，绝不返回空列表（失败不放行）', () => {
   const notRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-norepo-'));
@@ -76,3 +76,14 @@ test('配置读取：缺省基准分支是 auto（自动识别，不写死远程
   assert.equal(loadConfig(root).base, 'auto');
 });
 
+
+test('未提交检查：路径含空格或中文时也能查到（git status 不加引号），改名按新路径', () => {
+  const root = featureRepo();
+  write(root, 'src/my file.ts', 'changed\n');
+  write(root, 'src/中文.ts', 'changed\n');
+  assert.deepEqual(uncommittedInScope(root, ['src/my file.ts', 'src/中文.ts']).sort(), ['src/my file.ts', 'src/中文.ts'].sort());
+  gitIn(root, ['mv', 'src/dedup.ts', 'src/new name.ts']);
+  const hit = uncommittedInScope(root, ['src/new name.ts', 'src/dedup.ts']);
+  assert.ok(hit.includes('src/new name.ts'), JSON.stringify(hit));
+  assert.ok(!hit.some((f) => f.includes(' -> ')), JSON.stringify(hit));
+});

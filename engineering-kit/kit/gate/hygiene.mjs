@@ -4,14 +4,14 @@
 // 用法：node scripts/engineering/gate/hygiene.mjs [--json]    有错误时退出码 1
 import fs from 'node:fs';
 import path from 'node:path';
-import { EMPTY_TREE, git, isMain, loadConfig, repoRoot, resolveBase } from './lib.mjs';
+import { EMPTY_TREE, allowedTopDirs, git, isMain, loadConfig, parseStatusZ, repoRoot, resolveBase } from './lib.mjs';
 import crypto from 'node:crypto';
 
-/** 列出仓库中已跟踪和未忽略的文件（相对路径，斜杠分隔）。 */
+/** 列出仓库中已跟踪和未忽略的文件（相对路径，斜杠分隔）；已在工作区删除但未暂存的文件不算。 */
 export function listRepoFiles(root) {
   const r = git(root, ['ls-files', '--cached', '--others', '--exclude-standard']);
   if (!r.ok) throw new Error('无法列出仓库文件（不在 git 仓库中？）');
-  return r.out.split('\n').map((s) => s.trim().replace(/\\/g, '/')).filter(Boolean);
+  return r.out.split('\n').map((s) => s.trim().replace(/\\/g, '/')).filter((f) => f && fs.existsSync(path.join(root, f)));
 }
 
 /** 顶层目录名（只看有子路径的文件，即目录）。 */
@@ -32,7 +32,11 @@ export function relativeLinks(text) {
   for (const m of text.matchAll(/\]\(([^)\s]+)\)/g)) {
     const t = m[1].split('#')[0];
     if (!t || /^[a-z]+:/i.test(t) || t.startsWith('/')) continue;
-    out.push(decodeURI(t));
+    try {
+      out.push(decodeURI(t));
+    } catch {
+      out.push(t); // 含 % 但不是合法转义（如 50%.md）：按原文
+    }
   }
   return out;
 }
@@ -41,11 +45,6 @@ export function relativeLinks(text) {
 export function statusOf(text) {
   const m = text.split('\n').slice(0, 15).join('\n').match(/^(?:状态|status)\s*[:：]\s*([^\s]+)/im);
   return m ? m[1].toLowerCase() : null;
-}
-
-/** glob 里字面的顶层目录名（例如以 tests 开头的 glob 得到 tests；含通配符的段不算）。 */
-export function literalTopDirs(globs) {
-  return globs.map((g) => g.split('/')[0]).filter((s) => s && !/[*?{[]/.test(s));
 }
 
 /** 解析基准分支；无法解析或为空树时返回 null（巡检只跳过已合并分支检查，不报错）。 */
@@ -70,7 +69,7 @@ export function runHygiene(root) {
 
   // 1. 顶层目录白名单
   // 源码与测试目录由 glob 推出（如 tests/**/*.test.ts → tests），不必再在白名单里重复登记，避免两处不一致。
-  const allowed = new Set([...layout.topLevelAllowed, ...literalTopDirs([...layout.sourceGlobs, ...layout.testGlobs])]);
+  const allowed = allowedTopDirs(layout);
   for (const d of dirs) if (!allowed.has(d)) err(`顶层目录不在白名单：${d}/（允许：${[...allowed].join('、')}）`);
 
   // 2. 禁用的文件名片段（copy、final、bak 等）
@@ -121,11 +120,9 @@ export function runHygiene(root) {
   for (const group of byHash.values()) if (group.length > 1) warn(`内容重复：${group.join('、')}`);
 
   // 6. 记录类文档只追加：已跟踪的记录文件出现修改即报错
-  const status = git(root, ['status', '--porcelain']);
+  const status = git(root, ['status', '--porcelain', '-uall', '-z']);
   if (status.ok) {
-    for (const line of status.out.split('\n').filter(Boolean)) {
-      const code = line.slice(0, 2);
-      const f = line.slice(3).trim().replace(/\\/g, '/');
+    for (const { code, file: f } of parseStatusZ(status.out)) {
       const isRecord = layoutRecordDirs(hygiene).some((d) => f.startsWith(`${d}/`));
       if (isRecord && code.includes('M')) err(`记录类文档不得修改旧文件（请追加新文件）：${f}`);
     }

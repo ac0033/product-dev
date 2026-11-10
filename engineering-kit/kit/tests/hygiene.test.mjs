@@ -97,3 +97,11 @@ test('已合并分支与残留工作树：提示（不删除）', () => {
   assert.ok(rep.findings.warn.some((w) => /残留工作树/.test(w)));
   git(root, ['worktree', 'remove', '--force', wtDir]);
 });
+
+test('巡检不崩溃：已在工作区删除未暂存的文件、含 % 的链接', () => {
+  const root = repoWith({ 'docs/a.md': '状态：active\n\n[x](50%.md)\n', 'docs/gone.md': '状态：active\n' });
+  fs.rmSync(path.join(root, 'docs', 'gone.md'));
+  const rep = runHygiene(root);
+  assert.ok(rep.findings.error.some((e) => /死链.*50%\.md/.test(e)), JSON.stringify(rep.findings));
+  assert.deepEqual(relativeLinks('[a](50%.md)'), ['50%.md']);
+});
