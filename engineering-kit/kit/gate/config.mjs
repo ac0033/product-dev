@@ -1,6 +1,6 @@
 // 项目配置（engineering.config.json）的 profile 结构与展开。业务含义：
 //   项目配置是唯一由项目自己维护的文件，结构分四段，便于升级时只改动套件认可的字段：
-//     modules  —— 模块参数：gate（基准分支、测试命令、环境变量、锁时长）、review（复审者名单、字数、结论关键词）
+//     modules  —— 模块参数：gate（基准分支、测试命令、环境变量、锁时长、复审流程 reviewFlow）、review（复审者名单、字数、结论关键词）
 //     layout   —— 目录布局：源文件与测试的 glob、阶段目录、允许的顶层目录
 //     hygiene  —— 巡检参数：禁用文件名片段、草稿超期天数、记录类目录、合法状态值
 //     rules    —— 规则：不计入闸门的文档（reviewIgnore）、注释检查模式（commentMode）
@@ -10,7 +10,7 @@
 /** 闸门使用的扁平字段名（与旧版 engineering.config.json 相同）。 */
 export const FLAT_KEYS = [
   'base', 'sourceGlobs', 'testGlobs', 'reviewIgnore', 'commentMode', 'testCommand', 'testEnv',
-  'reviewers', 'reviewMinChars', 'reviewKeyword', 'lockMaxAgeMinutes',
+  'reviewers', 'reviewMinChars', 'reviewKeyword', 'lockMaxAgeMinutes', 'reviewFlow',
 ];
 
 /** 扁平字段的缺省值。 */
@@ -26,7 +26,11 @@ export const DEFAULTS = {
   reviewMinChars: 200,
   reviewKeyword: '结论',
   lockMaxAgeMinutes: 90,
+  reviewFlow: 'pre-push',
 };
+
+/** 复审流程的合法取值：pre-push（推送前单项复审）或 pr（CI 通过后对 PR 最终提交做代码复审与一致性审，经 merge.mjs 合并）。 */
+export const REVIEW_FLOWS = ['pre-push', 'pr'];
 
 /** 目录布局与巡检的缺省值（profile 的 layout、hygiene 段）。 */
 export const LAYOUT_DEFAULTS = {
@@ -57,6 +61,15 @@ function section(raw, name) {
  * 返回对象包含全部扁平字段，以及 layout、hygiene 两个子对象。
  */
 export function normalizeConfig(raw) {
+  const eff = expand(raw);
+  if (!REVIEW_FLOWS.includes(eff.reviewFlow)) {
+    throw new Error(`engineering.config.json 的 modules.gate.reviewFlow 只能是 ${REVIEW_FLOWS.join(' 或 ')}（当前 ${JSON.stringify(eff.reviewFlow)}）`);
+  }
+  return eff;
+}
+
+/** 展开两种结构（取值校验由 normalizeConfig 统一做）。 */
+function expand(raw) {
   if (!isObject(raw)) throw new Error('engineering.config.json 必须是 JSON 对象');
   if (raw.profile === undefined) {
     // 旧版扁平结构：原样使用，缺省值补齐；_profile 段（回滚时保存的 profile 专有设置）同样生效
@@ -82,6 +95,7 @@ export function normalizeConfig(raw) {
     testCommand: gate.testCommand ?? DEFAULTS.testCommand,
     testEnv: gate.testEnv ?? DEFAULTS.testEnv,
     lockMaxAgeMinutes: gate.lockMaxAgeMinutes ?? DEFAULTS.lockMaxAgeMinutes,
+    reviewFlow: gate.reviewFlow ?? DEFAULTS.reviewFlow,
     reviewers: review.reviewers ?? DEFAULTS.reviewers,
     reviewMinChars: review.reviewMinChars ?? DEFAULTS.reviewMinChars,
     reviewKeyword: review.reviewKeyword ?? DEFAULTS.reviewKeyword,
@@ -103,7 +117,7 @@ export function toProfile(flat) {
   return {
     profile: 2,
     modules: {
-      gate: { base: f.base, testCommand: f.testCommand, testEnv: f.testEnv, lockMaxAgeMinutes: f.lockMaxAgeMinutes },
+      gate: { base: f.base, testCommand: f.testCommand, testEnv: f.testEnv, lockMaxAgeMinutes: f.lockMaxAgeMinutes, reviewFlow: f.reviewFlow },
       review: { reviewers: f.reviewers, reviewMinChars: f.reviewMinChars, reviewKeyword: f.reviewKeyword },
     },
     layout: { sourceGlobs, testGlobs, stages, topLevelAllowed },

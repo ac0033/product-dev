@@ -44,7 +44,7 @@ test('扁平 ⇄ profile 互转：字段不丢失', () => {
   const flat = {
     base: 'origin/main', sourceGlobs: ['src/**/*.ts'], testGlobs: ['tests/**/*.ts'], reviewIgnore: ['**/*.md'],
     commentMode: 'header', testCommand: 'npm test', testEnv: { X: 'y' }, reviewers: ['general-purpose'],
-    reviewMinChars: 200, reviewKeyword: '结论', lockMaxAgeMinutes: 90,
+    reviewMinChars: 200, reviewKeyword: '结论', lockMaxAgeMinutes: 90, reviewFlow: 'pr',
   };
   const prof = toProfile(flat);
   assert.equal(prof.profile, 2);

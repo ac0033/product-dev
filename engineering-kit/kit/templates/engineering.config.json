@@ -1,12 +1,13 @@
 {
-  "_说明": "项目配置（profile 2）：同步时只创建一次，之后由本项目维护，同步不覆盖。modules 是模块参数，layout 是目录布局，hygiene 是巡检参数，rules 是闸门规则。sourceGlobs、testGlobs、testCommand 必须按本项目修改。",
+  "_说明": "项目配置（profile 2）：同步时只创建一次，之后由本项目维护，同步不覆盖。modules 是模块参数，layout 是目录布局，hygiene 是巡检参数，rules 是闸门规则。sourceGlobs、testGlobs、testCommand 必须按本项目修改。modules.gate.reviewFlow 是复审流程：pre-push（默认，推送前单项复审）或 pr（CI 通过后对 PR 做代码复审与一致性审，经 merge.mjs 合并；需要 GitHub 远程与 gh）。",
   "profile": 2,
   "modules": {
     "gate": {
       "base": "auto",
       "testCommand": "npm test",
       "testEnv": {},
-      "lockMaxAgeMinutes": 90
+      "lockMaxAgeMinutes": 90,
+      "reviewFlow": "pre-push"
     },
     "review": {
       "reviewers": ["feature-dev:code-reviewer", "/code-review", "general-purpose"],

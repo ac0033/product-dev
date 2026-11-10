@@ -1,5 +1,6 @@
 // 推送前核对：git pre-push 钩子与 Claude 推送钩子共用。业务含义：本次改动含源文件时，必须同时满足
 //   静态检查通过（测试先行、注释）、测试记录通过、复审记录通过，且两份记录都对应当前代码树。
+//   复审流程为 pr（modules.gate.reviewFlow）时不要求复审记录：复审在 CI 通过后针对 PR 最终提交进行，由 merge.mjs 核对。
 // 闸门范围 = 本次改动中去掉 reviewIgnore（文档）的部分：源文件、闸门脚本、配置都要记录。只改文档的推送直接放行。
 // 范围内有未提交改动、基准分支解析不了时拒绝。失败时列出阻塞原因，退出码 1。
 // 用法：node scripts/engineering/gate/verify.mjs
@@ -75,6 +76,7 @@ export function verify({ root }) {
   else if (!tests.passed) problems.push('最近一次测试未通过（或运行期间代码变化）');
   else if (tests.treeHash !== hash) problems.push('测试记录与当前代码不一致（代码已变化），请重跑闸门');
 
+  if (config.reviewFlow === 'pr') return { ok: problems.length === 0, problems, note: '' };
   const review = readRecord(root, 'review.json');
   if (!review) problems.push('没有复审记录：复审通过后运行 review.mjs pass --reviewer ... --report ...');
   else if (review.verdict !== 'pass') problems.push('最近一次复审结论不是通过');

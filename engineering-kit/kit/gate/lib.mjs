@@ -1,7 +1,8 @@
-// 工程闸门共享函数：读取配置与豁免、判定改动范围、计算代码树哈希、读写记录、获取全局锁。
+// 工程闸门共享函数：读取配置与豁免、判定改动范围、计算代码树哈希、读写记录、获取全局锁、读取 PR 状态（gh）。
 // 业务含义：闸门要回答三件事——这次改动了哪些文件（范围）、这些文件现在的内容是什么（树哈希）、
 // 测试与复审记录是不是针对这份内容做的（绑定）。只读 git 与工作区，写入只发生在 git 目录下的记录目录里，
-// 不污染工作区。记录放在各工作树自己的 git 目录（互不覆盖）；全局锁放在 git 公共目录，同一仓库同时只跑一个闸门。
+// 不污染工作区。测试与推送前复审记录放在各工作树自己的 git 目录（互不覆盖）；全局锁与 PR 审查记录（pr 流程）
+// 放在 git 公共目录：同一仓库同时只跑一个闸门，PR 的复审与合并可以在不同工作树进行。
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -294,4 +295,60 @@ export function acquireLock(root, maxAgeMinutes = 90) {
     }
   }
   throw new Error('无法获取闸门锁');
+}
+
+/** 默认的 gh 调用：在仓库根运行 gh，返回 spawnSync 的结果。登记与合并都接受注入的实现，测试用假的 gh，不访问网络。 */
+export function defaultGh(args, cwd) {
+  return spawnSync('gh', args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+}
+
+/** 运行 gh 并返回标准输出；gh 不存在或返回非 0 时抛错（失败不放行）。 */
+export function runGh(gh, args, root) {
+  const r = gh(args, root);
+  if (!r || r.error || r.status !== 0) {
+    const why = r?.error ? r.error.message : (r?.stderr || '').trim() || `退出码 ${r?.status}`;
+    throw new Error(`gh ${args.slice(0, 2).join(' ')} 失败：${why}`);
+  }
+  return r.stdout || '';
+}
+
+/** 校验 PR 编号：只允许正整数（它会成为记录目录名，不能带路径字符）。返回字符串形式。 */
+export function prNumber(pr) {
+  if (!/^[1-9]\d*$/.test(String(pr ?? ''))) throw new Error(`PR 编号不合法：${pr}（应为正整数）`);
+  return String(pr);
+}
+
+/** 视为通过的检查结论：成功、跳过、中性。 */
+const CI_OK = new Set(['SUCCESS', 'SKIPPED', 'NEUTRAL']);
+
+/**
+ * CI 是否全部通过：每一项检查都是成功、跳过或中性；一项检查都没有视为未通过。返回未通过的原因（空数组表示全过）。
+ * 检查运行（CheckRun）看 conclusion，未完成时为空；提交状态（StatusContext）看 state。
+ */
+export function ciProblems(checks) {
+  if (!Array.isArray(checks) || checks.length === 0) return ['PR 上没有任何 CI 检查（视为未通过；没有 CI 的项目应使用 pre-push 流程）'];
+  return checks
+    .filter((c) => !CI_OK.has(String(c.conclusion || c.state || '').toUpperCase()))
+    .map((c) => `CI 检查未通过：${c.name || c.context || '（未命名）'}（${c.conclusion || c.state || c.status || '运行中'}）`);
+}
+
+/**
+ * 读取 PR 的状态、最终提交与 CI 结果（gh pr view；statusCheckRollup 是最终提交上的检查）。
+ * 返回 { state, head, ciProblems }；gh 失败或输出不合法时抛错。
+ */
+export function readPr(root, pr, gh) {
+  const out = runGh(gh, ['pr', 'view', pr, '--json', 'state,headRefOid,statusCheckRollup'], root);
+  let j;
+  try {
+    j = JSON.parse(out);
+  } catch (e) {
+    throw new Error(`gh pr view 的输出不是合法 JSON：${e.message}`);
+  }
+  if (!j || !j.headRefOid) throw new Error('gh pr view 的输出缺少最终提交（headRefOid）');
+  return { state: j.state, head: j.headRefOid, ciProblems: ciProblems(j.statusCheckRollup) };
+}
+
+/** PR 审查记录文件：git 公共目录下 engineering-gate/pr/<编号>/<kind>.json（复审与合并可能在不同工作树进行，所以不放 recordDir）。 */
+export function prRecordFile(root, pr, kind) {
+  return path.join(gitCommonDir(root), 'engineering-gate', 'pr', pr, `${kind}.json`);
 }
