@@ -1,0 +1,21 @@
+{
+  "name": "engineering-kit",
+  "bundleVersion": "0.3.0",
+  "configFormat": "profile",
+  "description": "工程能力包：规则（标记块）、闸门脚本、钩子、巡检、目录与文档模板，整包安装、整包更新、可回滚。",
+  "components": [
+    { "id": "gate", "kind": "gate", "owner": "kit", "source": "kit/gate", "pattern": "*.mjs", "target": "scripts/engineering/gate" },
+    { "id": "hooks", "kind": "hooks", "owner": "kit", "source": "kit/hooks", "pattern": "*.mjs", "target": "scripts/engineering/hooks" },
+    { "id": "version", "kind": "gate", "owner": "kit", "source": "kit/VERSION", "target": "scripts/engineering/VERSION" },
+    { "id": "git-pre-push", "kind": "git-hook", "owner": "kit", "source": "kit/hooks/pre-push.sh", "target": ".git/hooks/pre-push" },
+    { "id": "claude-hooks", "kind": "claude-settings", "owner": "shared", "target": ".claude/settings.json" },
+    { "id": "rules-agents", "kind": "rules", "owner": "block", "source": "kit/rules/AGENTS.block.md", "target": "AGENTS.md", "createIfMissing": true },
+    { "id": "rules-claude", "kind": "rules", "owner": "block", "source": "kit/rules/CLAUDE.block.md", "target": "CLAUDE.md", "createIfMissing": false },
+    { "id": "config", "kind": "config", "owner": "project", "source": "kit/templates/engineering.config.json", "target": "engineering.config.json" },
+    { "id": "gitattributes", "kind": "project-file", "owner": "project", "source": "kit/templates/gitattributes", "target": ".gitattributes" },
+    { "id": "exempt", "kind": "project-file", "owner": "project", "source": "kit/templates/exempt.json", "target": "scripts/engineering/exempt.json" },
+    { "id": "docs-index", "kind": "docs", "owner": "project", "source": "kit/templates/docs/README.md", "target": "docs/README.md" },
+    { "id": "docs-stages", "kind": "docs-stages", "owner": "project", "source": "kit/templates/docs/stage-README.md", "target": "docs/<stage>/README.md" },
+    { "id": "docs-templates", "kind": "docs", "owner": "project", "source": "kit/templates/docs/templates", "pattern": "*.md", "target": "docs/_templates" }
+  ]
+}
