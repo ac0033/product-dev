@@ -11,3 +11,6 @@
 
 # 只留本机的记录（项目专用流程、试装与验收记录、实践来源：含私有项目名或本机路径）
 engineering-kit/references/*.local.md
+
+# 第三方组件的原版存档：只存本机，不进公开仓库（清单见 COMPONENTS.md）
+/vendor/

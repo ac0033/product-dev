@@ -9,8 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { HYGIENE_DEFAULTS, LAYOUT_DEFAULTS } from '../engineering-kit/kit/gate/config.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-/** 不参与检查的目录：本机私有材料、工具目录；模板里的链接相对安装后的位置，单独处理。 */
-const SKIP_DIRS = new Set(['.git', '.notes', '.agents', '.workbuddy', 'node_modules', 'dist']);
+/** 不参与检查的目录：本机私有材料、工具目录、第三方组件的本机存档（vendor）；模板里的链接相对安装后的位置，单独处理。 */
+const SKIP_DIRS = new Set(['.git', '.notes', '.agents', '.workbuddy', 'node_modules', 'dist', 'vendor']);
 const TEMPLATE_DIR = 'engineering-kit/kit/templates/';
 
 /** 递归列出仓库里的文件（相对路径，正斜杠）。 */

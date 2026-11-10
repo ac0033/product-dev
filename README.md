@@ -9,6 +9,7 @@
 | [产品设计技能组](product-design-orchestrator/README.md) | 从想法推进到 PRD、交互原型、系统架构和实施交接 | 总控（唯一入口）与三个专业技能，共享协议和产物模板 |
 | [engineering-kit](engineering-kit/SKILL.md) | 工程规则与闸门、开发流程和经验整理 | 同步工具、工程模板、流程规范和测试 |
 | [evals](evals/cases.md) | 技能包自身的验证 | 一致性检查（`node --test evals/consistency.test.mjs`）、冲突矩阵、行为用例 |
+| [组件清单](COMPONENTS.md) | 了解仓库由哪些组件构成、各自的来源与许可 | 自有组件与第三方组件两张表 |
 | [语言风格 System Prompt](语言风格%20System%20Prompt.md) | 独立的中文表达约定 | 单文件 |
 
 ## 获取与使用
