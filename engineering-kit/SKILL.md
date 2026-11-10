@@ -1,6 +1,6 @@
 ---
 name: engineering-kit
-description: 工程能力包：向 Git 项目安装、升级和检查工程规则、闸门、钩子与模板；按项目规则编排开发交付，并把项目经验整理成可复用记录或套件变更。
+description: 工程能力包的管理入口：向 Git 项目安装、升级、检查和回滚工程规则、闸门、钩子与模板，并把经验整理成套件变更和发布。日常开发交付不从这里进，走 project-flow。
 argument-hint: "[项目目录] [--init] [--profile ts|python] [--check | --dry-run | --force | --from-tag <标签>]"
 disable-model-invocation: true
 ---
@@ -9,12 +9,12 @@ disable-model-invocation: true
 
 参数：`$ARGUMENTS`
 
-按任务选择：安装或维护工程能力包；编排需求明确后的开发交付；记录用户可复用的经验；或将经验整理为套件变更。推送、合并、部署仍按用户授权与项目规则执行。
+本技能只管套件本身：安装、升级与漂移检查、回滚、变更集与发布、维护。开发交付（分流、需求与方案、开发、自查、复审、合并、验收与发布）由 [project-flow](../project-flow/SKILL.md) 负责，流程细则在它的 `references/` 下。推送、合并、部署按用户授权与项目规则执行。
 
-- 开发交付：先读 `references/process.md`；本机存在 `references/dev-flow.local.md` 且任务涉及对应项目时，再读其中项目专用流程。`references/*.local.md` 是只留本机的记录（项目专用流程、试装与验收记录、实践来源），不进仓库。没有该文件时以通用流程和项目实际规则为准，不推断缺失的项目命令。
-- 经验记录：读 `references/process.md` 的“经验记录”节；只在用户确有可复用经验时记录，按当前用户授权记录，不把普通对话视为持久化授权。
+- 经验记录：读 [practices.md](references/practices.md)；只在用户确有可复用经验时记录。
+- `references/*.local.md` 是只留本机的记录（项目专用流程、试装与验收记录、实践来源），不进仓库。本机存在 `references/dev-flow.local.md` 且任务涉及对应项目时，开发交付时一并读它；没有该文件时以通用流程和项目实际规则为准，不推断缺失的项目命令。
 
-注意：闸门有两种复审流程（`modules.gate.reviewFlow`）：默认 `pre-push` 仍是推送前单项复审；`pr` 提供 CI 后双审与合并入口，但受影响测试选择仍未实现。安装或升级前先看第 5 节，已使用自有闸门的项目不要覆盖。
+安装或升级前先看第 5 节的适配状态与局限，已使用自有闸门的项目不要覆盖。
 
 整包的清单是 `bundle.json`（组件、安装位置、所有权、整包版本）。下文 `<kit>` 指本技能的 `kit/` 目录，`<整包>` 指本技能目录。
 
@@ -86,37 +86,30 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 
 变更集格式见 `kit/tools/changeset.mjs` 顶部注释。应用后不提交，由 `release.mjs` 提交。
 
-## 5. 日常闸门与当前适配状态
+## 5. 维护
 
-目标流程和各阶段检查以 `references/process.md` 第 4、5 节为唯一出处，两种流程的命令也写在第 4 节。0.4.0 的闸门按项目配置 `modules.gate.reviewFlow` 走其中一种：
+- 源目录是源仓库（ac0033/skills）的 `engineering-kit/`；本机若另有生效副本（如 Claude Code 的技能目录），改动后把源目录复制过去，保持一致。
+- 验证：`cd "<kit>" && node --test tests/*.test.mjs`（changeset 测试在临时副本上运行）；技能包的一致性检查在仓库根运行 `node --test evals/consistency.test.mjs`。
+- 版本：`bundle.json` 的 `bundleVersion` 与 `kit/VERSION` 必须一致。发布前运行 `release.mjs --check`。
+- 整包发布只提交套件目录，不推送，不开 PR，除非用户明确要求。
+- 已有自己闸门的项目不要直接运行同步；迁移前先比对两边规则，具体项目的情况记在本机的 `references/*.local.md`。
 
-| 流程 | 推送核对（`verify.mjs`） | 复审登记（`review.mjs`） | 合并 |
-|---|---|---|---|
-| `pre-push`（默认） | 静态检查、测试记录、复审记录，都绑定当前代码树 | 推送前登记单项复审 | 套件不提供入口；钩子拒绝直接 `gh pr merge`，按项目约定的入口合并 |
-| `pr` | 静态检查、测试记录；不要求复审记录 | CI 全部通过后按 PR 登记代码复审与一致性审，绑定 PR 最终提交 | `merge.mjs <PR>` 核对 PR 打开、CI 全过、两项记录与最终提交一致（只改文档的 PR 不要求记录）后执行 `gh pr merge --match-head-commit` |
+### 适配状态
 
-`pr` 流程需要 GitHub 远程、已登录的 `gh`，且 PR 上有 CI 检查（一项都没有视为未通过）；不满足的项目留在 `pre-push`。把 `reviewFlow` 改回 `pre-push` 即恢复旧流程。
+闸门按项目配置 `modules.gate.reviewFlow` 走两种复审流程之一：默认 `pre-push`（推送前单项复审），或 `pr`（CI 后双审与合并入口）。两种流程各步核对什么、用什么命令，以 project-flow 的 [process.md](../project-flow/references/process.md)“测试、审查与合并”节为唯一出处。把 `reviewFlow` 改回 `pre-push` 即恢复旧流程。
 
-尚未实现：受影响测试选择（推送前仍跑配置的 `testCommand` 全量）；同一 PR 三轮审查的自动计数。真实验证：`pr` 流程已由用户在带 CI 的 GitHub 仓库里走通（2026-11-10，用户报告，见 `references/contract-pr-review-merge.md`）。已采用自有闸门的项目优先使用自己的闸门，不要用本版本覆盖。
+尚未实现：受影响测试选择（推送前仍跑配置的 `testCommand` 全量）；同一 PR 三轮审查的自动计数。真实验证：`pr` 流程已由用户在带 CI 的 GitHub 仓库里走通（2026-11-10，用户报告，见 `references/contract-pr-review-merge.md`）。
 
-## 6. 套件的范围与局限
+### 范围与局限
 
 - 必须是 git 仓库：目标不是 git 仓库时拒绝安装，加 `--init` 才会自动 git init。
 - 基准分支默认 `base: "auto"`：依次取 origin/HEAD、origin/main、origin/master、main、master；仓库还没有任何提交时，首次提交前的全部文件都按改动检查。没有远程也能用。
 - 尚无源码与测试文件时，闸门不运行测试命令（记录为“无需测试”）；一旦出现源码，测试先行检查就会要求测试。本次改动里有代码文件、却没有任何文件匹配 `sourceGlobs` 与 `testGlobs` 时，闸门报错（多半是配置没按项目修改），不记为通过。
 - Python 预设的测试命令是 `python -m pytest`：需要 Python 3.12 与 pytest 在 PATH 中。TypeScript 预设用 Node 24 的 `node --test` 直接运行 .test.ts，不做 tsc 类型检查。
 - 源文件判断依赖 `sourceGlobs` 与 `testGlobs`，配置不准，闸门就不准。
-- 测试先行靠“测试文件是否 import 了源文件的模块名”判断。经 index 再导出的间接引用识别不出来，应在豁免表里写理由。
+- 测试先行靠“测试文件是否 import 了源文件的模块名”判断，识别不出的间接引用怎样处理见 project-flow 流程细则的“开发细则”节。
 - 注释检查：文件开头（连续注释行，或 Python 文档字符串含多行）要有至少 8 个字的说明；JS/TS 导出函数、类、常量、枚举前要紧挨注释。Python 只查文件头。
 - Claude 钩子只防误操作，挡不住刻意绕过；终端直接 `git push` 不经过 Claude 钩子，靠 git pre-push 钩子兜底。
 - 复审记录是本机约定，不是密码学证明；复审者名字由登记者填写，套件不验证它确是独立子代理。守住它靠 PR 里公开的复审摘要。
 - 测试记录与 `pre-push` 流程的复审记录放在各工作树自己的 git 目录（`engineering-gate/`），多个工作树互不覆盖，不进工作区；闸门锁与 `pr` 流程的 PR 审查记录（`engineering-gate/pr/<编号>/`）放在 git 公共目录，所有工作树共用：同一仓库同时只跑一个闸门，复审与合并可以在不同工作树进行。
-- `pr` 流程只支持 GitHub（经 `gh`）；`gh` 不存在或调用失败时登记与合并都报错，不放行。只改文档的 PR 和各风险档位怎样审，见 `references/process.md` 第 4 节。
-- 巡检的“已合并分支”判断基于补丁等价（git cherry），squash 合并后的分支需人工复核。
-
-## 7. 维护
-
-- 源目录是源仓库（ac0033/skills）的 `engineering-kit/`；本机若另有生效副本（如 Claude Code 的技能目录），改动后把源目录复制过去，保持一致。
-- 验证：`cd "<kit>" && node --test tests/*.test.mjs`（changeset 测试在临时副本上运行）。
-- 版本：`bundle.json` 的 `bundleVersion` 与 `kit/VERSION` 必须一致。发布前运行 `release.mjs --check`。
-- 已有自己闸门的项目不要直接运行同步；迁移前先比对两边规则，具体项目的情况记在本机的 `references/*.local.md`。
+- `pr` 流程只支持 GitHub（经 `gh`）；`gh` 不存在或调用失败时登记与合并都报错，不放行。只改文档的 PR 和各风险档位怎样审，见适配状态所指的那一节。

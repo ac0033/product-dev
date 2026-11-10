@@ -27,6 +27,8 @@ function listFiles(dir = ROOT, out = []) {
 const FILES = listFiles();
 /** 被检查的文档：全部 Markdown，本机专用记录（*.local.md）除外。 */
 const DOCS = FILES.filter((f) => f.endsWith('.md') && !f.endsWith('.local.md'));
+/** 各技能的入口文件（仓库根下一层目录里的 SKILL.md）。 */
+const SKILLS = FILES.filter((f) => /^[^/]+\/SKILL\.md$/.test(f));
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
 /** 去掉文件头元数据和代码块，避免把字段、示例命令和目录树当正文。 */
 const prose = (text) => text.replace(/^---\n[\s\S]*?\n---\n/, '').replace(/```[\s\S]*?```/g, '');
@@ -98,23 +100,57 @@ test('规则编号：文档引用的 R 编号都在规则块里定义，且规�
   assert.deepEqual([...new Set(bad)], []);
 });
 
-test('命令菜单：三个设计子技能不出现在命令菜单并写明先转总控，名称与目录一致', () => {
-  const skills = FILES.filter((f) => /^[^/]+\/SKILL\.md$/.test(f));
+test('入口：用户能调用的只有 project-flow 和 engineering-kit，模型能自动触发的入口只有 project-flow', () => {
   const hidden = [];
-  for (const f of skills) {
+  const invocable = [];
+  const auto = [];
+  for (const f of SKILLS) {
+    const name = f.split('/')[0];
     const fm = read(f).split('\n---\n')[0];
-    assert.match(fm, new RegExp(`^name: ${f.split('/')[0]}$`, 'm'), `${f} 的 name 与目录不一致`);
+    assert.match(fm, new RegExp(`^name: ${name}$`, 'm'), `${f} 的 name 与目录不一致`);
     if (/^user-invocable: false$/m.test(fm)) {
-      hidden.push(f.split('/')[0]);
-      assert.ok(read(f).includes('被直接加载时，先加载总控'), `${f} 没有写明被直接加载时先转总控`);
+      hidden.push(name);
+      // 隐藏只影响命令菜单，模型仍可能直接加载：正文必须写明先转到上一级入口
+      assert.ok(read(f).includes('被直接加载时，先加载'), `${f} 没有写明被直接加载时先转到入口`);
+    } else {
+      invocable.push(name);
+      if (!/^disable-model-invocation: true$/m.test(fm)) auto.push(name);
     }
   }
-  assert.deepEqual(hidden.sort(), ['product-discovery-prd', 'prototype-design', 'system-architecture-design']);
+  assert.deepEqual(invocable.sort(), ['engineering-kit', 'project-flow']);
+  assert.deepEqual(auto, ['project-flow']);
+  assert.deepEqual(hidden.sort(), ['product-design-orchestrator', 'product-discovery-prd', 'prototype-design', 'system-architecture-design']);
+  // 装了套件的项目不打命令也要分流：规则块里必须有这一句
+  assert.ok(read('engineering-kit/kit/rules/AGENTS.block.md').includes('先经 `project-flow` 技能分流'), '规则块没有写明开发相关的请求先经 project-flow 分流');
+});
+
+test('外部工具：文档提到的外部工具都在根 README 的工具表里', () => {
+  const readme = read('README.md');
+  const table = readme.slice(readme.indexOf('### 外部工具'));
+  assert.ok(table.includes('没装时的替代'), '根 README 的外部工具表缺少“没装时的替代”一栏');
+  const own = new Set(SKILLS.map((f) => f.split('/')[0]));
+  // 三类写法：反引号里的斜杠命令、反引号里的“插件:子代理”、已知外部工具的名字（新工具要加进这个名单）
+  const patterns = [/`\/([a-z][a-z-]+)`/g, /`([a-z][a-z-]+:[a-z][a-z-]+)`/g, /(?<![\w/-])(ponytail(?:-[a-z]+)?|archify|impeccable|feature-dev|addyosmani\/agent-skills)(?![\w-])/g];
+  const found = new Map();
+  for (const f of DOCS.filter((d) => d !== 'README.md')) {
+    const text = read(f);
+    patterns.forEach((re, i) => {
+      for (const m of text.matchAll(re)) {
+        if (i === 0 && own.has(m[1])) continue;
+        const token = i === 0 ? `/${m[1]}` : m[1];
+        if (!found.has(token)) found.set(token, f);
+      }
+    });
+  }
+  assert.ok(found.size >= 10, `只解析到 ${found.size} 个外部工具名，解析可能失效`);
+  const missing = [...found].filter(([token]) => !table.includes(token)).map(([token, f]) => `${f}：${token}`);
+  assert.deepEqual(missing, []);
 });
 
 test('已废弃的说法：不再出现在任何文档里', () => {
   // 每条对应 conflict-matrix.md 的一项裁决；该文件本身要引用旧说法，不检查。
-  const banned = ['docs/design/', '单阶段任务可直接使用对应技能', '使用对应子技能', '单独调用子技能', '草稿、评审中、基线、已取代', '删除文件须先列清单'];
+  const banned = ['docs/design/', '单阶段任务可直接使用对应技能', '使用对应子技能', '单独调用子技能', '草稿、评审中、基线、已取代', '删除文件须先列清单',
+    'engineering-kit/references/process.md', 'engineering-kit 技能的 `references/process.md`', '`references/process.md` 第', '交互入口只有总控一个', '使用 $product-design-orchestrator'];
   const bad = [];
   const scripts = FILES.filter((f) => /^engineering-kit\/kit\/(gate|hooks|tools)\/.*\.(mjs|sh)$/.test(f));
   for (const f of [...DOCS.filter((d) => d !== 'evals/conflict-matrix.md'), ...scripts]) for (const b of banned) if (read(f).includes(b)) bad.push(`${f}：${b}`);
