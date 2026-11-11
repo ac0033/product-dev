@@ -1,5 +1,6 @@
 // 测试闸门：推送前运行。先做静态检查（测试先行、注释），通过后运行配置的测试命令，
-// 把结果连同当前代码树哈希写入记录。业务含义：测试记录只对“跑测试时”的那份代码有效；
+// 把结果连同当前代码树哈希写入记录。通过时逐项列出两项静态检查各查了几个文件，再列测试结果：
+// 只打印测试一行，看的人分不清静态检查是通过了还是没有执行。业务含义：测试记录只对“跑测试时”的那份代码有效；
 // 跑测试期间代码变了，记录作废（树哈希前后不一致）。
 // 用法：node scripts/engineering/gate/gate.mjs
 import { spawnSync } from 'node:child_process';
@@ -28,7 +29,18 @@ import {
 const CODE_FILE = /\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|rb|php|cs|c|cc|cpp|h|swift|sh)$/;
 
 /**
- * 运行闸门。返回 { ok, messages, record }。
+ * 两项静态检查通过后的结果行：各检查了几个本次改动的源文件、豁免了几个。两项的范围不同，各自写明：
+ * 测试先行看全部改动的源文件，已删除的和没有可测导出的计入“无需测试”；注释检查不看 reviewIgnore 之内的和已删除的。
+ */
+function staticMessages({ testFirst, comments }) {
+  return [
+    `测试先行检查通过（本次改动的源文件：检查 ${testFirst.checked} 个，豁免 ${testFirst.exempt} 个，无需测试 ${testFirst.skipped} 个，含已删除的）`,
+    `注释检查通过（本次改动的源文件，不含 reviewIgnore 之内的和已删除的：检查 ${comments.checked} 个，豁免 ${comments.exempt} 个）`,
+  ];
+}
+
+/**
+ * 运行闸门。返回 { ok, messages, record }。通过时 messages 先列两项静态检查，再列测试结果。
  * 静态检查未通过时直接返回，不运行测试，也不写测试记录。
  */
 export function runGate({ root }) {
@@ -38,9 +50,10 @@ export function runGate({ root }) {
   try {
     const changed = changedFiles(root, config.base);
     const sources = changed.filter((f) => isSourceFile(f, config) && !matchesAny(f, config.reviewIgnore));
+    const staticChecks = { testFirst: {}, comments: {} };
     const problems = [
-      ...checkTestFirst({ root, changed, config, exempt: exempt.testFirst }),
-      ...checkComments({ root, files: sources, config, exempt: exempt.comments }),
+      ...checkTestFirst({ root, changed, config, exempt: exempt.testFirst, stats: staticChecks.testFirst }),
+      ...checkComments({ root, files: sources, config, exempt: exempt.comments, stats: staticChecks.comments }),
     ];
     if (problems.length > 0) {
       return {
@@ -72,10 +85,11 @@ export function runGate({ root }) {
         changedDuringRun: false,
         log: null,
         sourcesChecked: 0,
+        staticChecks,
         at: new Date().toISOString(),
       };
       writeRecord(root, 'tests.json', noTestRecord);
-      return { ok: true, messages: ['尚无源码与测试文件，未运行测试命令（写第一份源码时，测试先行检查会要求先写测试）'], record: noTestRecord };
+      return { ok: true, messages: [...staticMessages(staticChecks), '尚无源码与测试文件，未运行测试命令（写第一份源码时，测试先行检查会要求先写测试）'], record: noTestRecord };
     }
 
     const before = treeHash(root, scopeFiles(root, config));
@@ -96,11 +110,12 @@ export function runGate({ root }) {
       changedDuringRun,
       log: logFile,
       sourcesChecked: sources.length,
+      staticChecks,
       at: new Date().toISOString(),
     };
     writeRecord(root, 'tests.json', record);
 
-    const messages = [];
+    const messages = staticMessages(staticChecks);
     if (changedDuringRun) messages.push('测试运行期间代码发生了变化，记录作废：请在闸门运行时不要修改代码，然后重跑。');
     messages.push(
       passed

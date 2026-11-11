@@ -41,7 +41,6 @@ function jsConfig(root) {
   const p = path.join(root, 'engineering.config.json');
   const c = JSON.parse(fs.readFileSync(p, 'utf8'));
   c.modules.gate.testCommand = 'node --test';
-  c.modules.review.reviewers = ['product-dev:code-reviewer', ...c.modules.review.reviewers];
   c.layout.sourceGlobs = ['src/**/*.js'];
   c.layout.testGlobs = ['tests/**/*.test.js'];
   fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');

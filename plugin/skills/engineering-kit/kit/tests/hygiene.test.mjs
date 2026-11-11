@@ -128,3 +128,97 @@ test('草稿超期：按最近提交时间算，不按文件时间（重新克�
   const rep = runHygiene(root);
   assert.ok(rep.findings.warn.some((w) => /草稿超过.*d\.md/.test(w)), JSON.stringify(rep.findings));
 });
+
+/** 只取“阶段内登记”一项检查报出的错误。 */
+const unregistered = (root) => runHygiene(root).findings.error.filter((e) => /该阶段的 README/.test(e));
+
+test('阶段内登记（R6）：阶段目录里的文件没登记到该阶段的 README 时报错，登记后不报', () => {
+  const root = repoWith({
+    'docs/README.md': '状态：active\n\n01-原型 04-开发\n',
+    'docs/04-开发/README.md': '状态：active\n\n| 文件 | 说明 |\n|---|---|\n| plan.md | 计划 |\n| [契约](contract.md) | 链接写法 |\n| `notes.md` | 反引号写法 |\n',
+    'docs/04-开发/plan.md': '状态：active\n计划\n',
+    'docs/04-开发/contract.md': '状态：active\n契约\n',
+    'docs/04-开发/notes.md': '状态：active\n笔记\n',
+    'docs/04-开发/PRD.md': '状态：active\n没登记\n',
+  });
+  const hits = unregistered(root);
+  assert.equal(hits.length, 1, JSON.stringify(hits));
+  assert.match(hits[0], /docs\/04-开发\/PRD\.md/);
+  assert.equal(runHygiene(root).ok, false);
+  fs.appendFileSync(path.join(root, 'docs/04-开发/README.md'), '| PRD.md | 补登记 |\n');
+  assert.deepEqual(unregistered(root), []);
+});
+
+test('阶段内登记（R6）：文件名只是别的登记名的一部分不算登记；子目录登记目录名即可', () => {
+  const root = repoWith({
+    'docs/README.md': '状态：active\n\n01-原型 04-开发\n',
+    'docs/01-原型/README.md': '状态：active\n\n| 文件 | 说明 |\n|---|---|\n| my-spec.md | 规格 |\n| prototype/ | 原型文件 |\n',
+    'docs/01-原型/my-spec.md': '状态：active\n规格\n',
+    'docs/01-原型/spec.md': '状态：active\n名字是 my-spec.md 的一部分\n',
+    'docs/01-原型/prototype/index.html': '<!doctype html>\n',
+    'docs/01-原型/prototype/js/app.js': '// x\n',
+    'docs/01-原型/assets/logo.svg': '<svg/>\n',
+  });
+  const hits = unregistered(root);
+  assert.deepEqual(hits.map((e) => e.match(/docs\/[^\s（]+/)[0]).sort(), ['docs/01-原型/assets/logo.svg', 'docs/01-原型/spec.md'], JSON.stringify(hits));
+});
+
+test('阶段内登记（R6）：子目录里的同名文件不靠裸文件名算登记；说明列里的词不算登记', () => {
+  const root = repoWith({
+    'docs/README.md': '状态：active\n\n01-原型 04-开发\n',
+    'docs/04-开发/README.md': '状态：active\n\n| 文件 | 说明 |\n|---|---|\n| plan.md | 图片放在 assets 目录 |\n| sub/ok.md | 按相对路径登记 |\n',
+    'docs/04-开发/plan.md': '状态：active\n计划\n',
+    'docs/04-开发/sub/plan.md': '状态：active\n另一份同名文件\n',
+    'docs/04-开发/sub/ok.md': '状态：active\n已登记\n',
+    'docs/04-开发/assets/a.png': 'png\n',
+  });
+  const hits = unregistered(root);
+  assert.deepEqual(hits.map((e) => e.match(/docs\/[^\s（]+/)[0]).sort(), ['docs/04-开发/assets/a.png', 'docs/04-开发/sub/plan.md'], JSON.stringify(hits));
+});
+
+test('阶段内登记（R6）：带标题和尖括号的链接算登记；点开头的文件不查；README 文件名不分大小写；记录目录写了结尾斜杠也排除', () => {
+  const root = tmpRepo();
+  write(root, 'engineering.config.json', JSON.stringify({
+    profile: 2,
+    modules: { gate: { base: 'main' } },
+    layout: { sourceGlobs: ['src/**/*.ts'], testGlobs: ['tests/**/*.ts'], topLevelAllowed: ['docs'], stages: ['04-开发'] },
+    hygiene: { recordDirs: ['docs/04-开发/records/'] },
+  }));
+  write(root, 'docs/README.md', '状态：active\n\n04-开发\n');
+  write(root, 'docs/04-开发/readme.md', '状态：active\n\n- [计划](plan.md "开发计划")\n- [说明](<my notes.md>)\n');
+  write(root, 'docs/04-开发/plan.md', '状态：active\n计划\n');
+  write(root, 'docs/04-开发/my notes.md', '状态：active\n说明\n');
+  write(root, 'docs/04-开发/.gitkeep', '');
+  write(root, 'docs/04-开发/records/2026-11-01.md', '记录\n');
+  commitAll(root, 'base');
+  assert.deepEqual(unregistered(root), []);
+  write(root, 'docs/04-开发/extra.md', '状态：active\n没登记\n');
+  assert.equal(unregistered(root).length, 1);
+});
+
+test('阶段内登记（R6）：阶段目录有文件却没有 README 时报错；记录目录和模板目录不查', () => {
+  const root = repoWith({
+    'docs/README.md': '状态：active\n\n01-原型 04-开发\n',
+    'docs/04-开发/plan.md': '状态：active\n计划\n',
+    'docs/acceptance/2026-11-01.md': '验收记录\n',
+    'docs/_templates/plan.md': '模板\n',
+  });
+  const hits = unregistered(root);
+  assert.equal(hits.length, 1, JSON.stringify(hits));
+  assert.match(hits[0], /docs\/04-开发\/.*没有该阶段的 README/);
+});
+
+test('阶段内登记（R6）：记录目录设在阶段目录之内时，其中的文件也不查', () => {
+  const root = tmpRepo();
+  write(root, 'engineering.config.json', JSON.stringify({
+    profile: 2,
+    modules: { gate: { base: 'main' } },
+    layout: { sourceGlobs: ['src/**/*.ts'], testGlobs: ['tests/**/*.ts'], topLevelAllowed: ['docs'], stages: ['06-发布'] },
+    hygiene: { recordDirs: ['docs/06-发布/records'] },
+  }));
+  write(root, 'docs/README.md', '状态：active\n\n06-发布\n');
+  write(root, 'docs/06-发布/README.md', '状态：active\n\n| 文件 | 说明 |\n|---|---|\n');
+  write(root, 'docs/06-发布/records/2026-11-01.md', '发布记录\n');
+  commitAll(root, 'base');
+  assert.deepEqual(runHygiene(root).findings.error, []);
+});

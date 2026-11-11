@@ -22,7 +22,7 @@ export const DEFAULTS = {
   commentMode: 'header+exports',
   testCommand: 'npm test',
   testEnv: {},
-  reviewers: ['feature-dev:code-reviewer', '/code-review', 'general-purpose'],
+  reviewers: ['product-dev:code-reviewer', 'feature-dev:code-reviewer', '/code-review', 'general-purpose'],
   reviewMinChars: 200,
   reviewKeyword: '结论',
   lockMaxAgeMinutes: 90,

@@ -2,7 +2,7 @@
 // 业务含义：项目配置是唯一由项目维护的文件，结构要稳定、可升级；旧版扁平配置必须仍能读取（回滚与迁移都依赖它）。
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { normalizeConfig, toFlat, toProfile, FLAT_KEYS } from '../gate/config.mjs';
+import { DEFAULTS, normalizeConfig, toFlat, toProfile, FLAT_KEYS } from '../gate/config.mjs';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -76,4 +76,13 @@ test('模板文件本身是合法的 profile，并能展开', () => {
   const eff = normalizeConfig(raw);
   assert.equal(eff.base, 'auto');
   assert.ok(eff.sourceGlobs.length > 0);
+});
+
+test('默认复审者名单含插件自带的复审子代理 product-dev:code-reviewer，配置模板与默认值一致', () => {
+  assert.ok(DEFAULTS.reviewers.includes('product-dev:code-reviewer'), JSON.stringify(DEFAULTS.reviewers));
+  assert.ok(normalizeConfig({ profile: 2 }).reviewers.includes('product-dev:code-reviewer'));
+  const template = JSON.parse(readFileSync(TEMPLATE, 'utf8'));
+  assert.deepEqual(template.modules.review.reviewers, DEFAULTS.reviewers);
+  // 项目自己写了名单的不受默认值影响（老项目的配置不会被悄悄改掉）
+  assert.deepEqual(normalizeConfig({ profile: 2, modules: { review: { reviewers: ['general-purpose'] } } }).reviewers, ['general-purpose']);
 });

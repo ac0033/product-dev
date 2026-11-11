@@ -1,4 +1,4 @@
-// 巡检（熵管理）：机械检查项目的目录、文件命名、索引、链接、状态、重复内容、超期草稿、已合并分支与残留工作树。
+// 巡检（熵管理）：机械检查项目的目录、文件命名、索引、阶段内登记、链接、状态、重复内容、超期草稿、已合并分支与残留工作树。
 // 业务含义：项目越做越大，过时、重复、临时文件会悄悄积累。巡检只报告，不删除；删除按项目规则 R8。
 // 语义一致性（规则与文档是否矛盾、重复、过时）由子代理复审完成，本脚本只做可机械判断的部分。
 // 用法：node scripts/engineering/gate/hygiene.mjs [--json]    有错误时退出码 1
@@ -45,6 +45,70 @@ export function relativeLinks(text) {
 export function statusOf(text) {
   const m = text.split('\n').slice(0, 15).join('\n').match(/^(?:状态|status)\s*[:：]\s*([^\s]+)/im);
   return m ? m[1].toLowerCase() : null;
+}
+
+/** 登记名的规范写法：去掉首尾空白、开头的 ./ 和结尾的斜杠，反斜杠换成斜杠。 */
+function entryName(s) {
+  return s.trim().replace(/\\/g, '/').replace(/^(\.\/)+/, '').replace(/\/+$/, '');
+}
+
+/** 链接目标：普通写法、带标题的写法（a.md "标题"）和尖括号写法（<a b.md>，目标里可以有空格）。 */
+const LINK_TARGET = /\]\(\s*(?:<([^>\n]+)>|([^)\s]+))(?:\s+["'][^"'\n]*["'])?\s*\)/g;
+
+/**
+ * 阶段 README 里登记的名字，只认三种写法并要求整名相同：表格每行第一列的整格文字、反引号里的文字、链接目标。
+ * 不按子串找：那样会把 spec.md 误当成已登记（README 里只有 my-spec.md）。表格只取第一列：说明列里的词不是登记。
+ */
+export function registeredNames(text) {
+  const names = new Set();
+  for (const m of text.matchAll(LINK_TARGET)) {
+    const target = (m[1] ?? m[2]).split('#')[0];
+    if (!target || /^[a-z]+:/i.test(target) || target.startsWith('/')) continue;
+    try {
+      names.add(entryName(decodeURI(target)));
+    } catch {
+      names.add(entryName(target)); // 含 % 但不是合法转义：按原文
+    }
+  }
+  for (const m of text.matchAll(/`([^`\n]+)`/g)) names.add(entryName(m[1]));
+  for (const line of text.split('\n')) {
+    const row = line.trim();
+    if (row.startsWith('|')) names.add(entryName(row.split('|')[1] ?? ''));
+  }
+  names.delete('');
+  return names;
+}
+
+/**
+ * 阶段内登记检查（规则 R6）：阶段目录里的文件要登记到该阶段的 README。返回错误信息数组。
+ * 直接放在阶段目录下的文件登记文件名；子目录里的文件登记相对该阶段目录的路径，或它所在的任一层目录名（如原型目录 prototype/）。
+ * 子目录里的文件不认裸文件名：README 登记了 plan.md，不等于 sub/plan.md 也登记了。
+ * 不查的：记录目录（即使设在阶段目录之内，按 R6 不登记）、README 自己（文件名不分大小写）、以点开头的文件（如 .gitkeep）。
+ * 阶段目录有文件却没有 README 时报一条。
+ */
+export function unregisteredStageFiles(root, files, stages, recordDirs) {
+  const out = [];
+  const records = recordDirs.map((d) => `${d.replace(/\/+$/, '')}/`);
+  for (const stage of stages) {
+    const prefix = `docs/${stage}/`;
+    const all = files.filter((f) => f.startsWith(prefix));
+    const readme = all.find((f) => /^readme\.md$/i.test(f.slice(prefix.length)));
+    const inStage = all.filter((f) => f !== readme && !path.posix.basename(f).startsWith('.') && !records.some((d) => f.startsWith(d)));
+    if (inStage.length === 0) continue;
+    if (!readme) {
+      out.push(`阶段目录 ${prefix} 里有 ${inStage.length} 个文件，但没有该阶段的 README.md，文件无处登记（规则 R6）`);
+      continue;
+    }
+    const names = registeredNames(fs.readFileSync(path.join(root, readme), 'utf8'));
+    for (const f of inStage) {
+      const parts = f.slice(prefix.length).split('/');
+      const candidates = parts.map((_, i) => parts.slice(0, i + 1).join('/'));
+      if (!candidates.some((c) => names.has(c))) {
+        out.push(`文件未登记到该阶段的 README：${f}（规则 R6；在 ${readme} 表格的第一列登记文件名，子目录里的文件登记相对路径或所在目录名）`);
+      }
+    }
+  }
+  return out;
 }
 
 /** 解析基准分支；无法解析或为空树时返回 null（巡检只跳过已合并分支检查，不报错）。 */
@@ -102,6 +166,7 @@ export function runHygiene(root) {
       if (fs.existsSync(path.join(root, 'docs', stage)) && !idx.includes(stage)) warn(`阶段目录未登记到索引 docs/README.md：docs/${stage}/`);
     }
   } else warn('缺少文档索引 docs/README.md');
+  for (const msg of unregisteredStageFiles(root, files, layout.stages, hygiene.recordDirs)) err(msg);
 
   // 4. 空目录（docs 与 src 下）
   const walkEmpty = (dir) => {

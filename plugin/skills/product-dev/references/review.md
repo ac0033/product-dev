@@ -4,14 +4,14 @@
 
 ## 1. 派发
 
-复审者必须是独立上下文的子代理，不是写代码的主对话自己。登记时 `--reviewer` 填实际派发的子代理名，它要在项目配置 `modules.review.reviewers` 的名单内（套件默认名单是 `feature-dev:code-reviewer`、`/code-review`、`general-purpose`）。
+复审者必须是独立上下文的子代理，不是写代码的主对话自己。登记时 `--reviewer` 填实际派发的子代理名，它要在项目配置 `modules.review.reviewers` 的名单内（套件 0.5.0 起的默认名单是 `product-dev:code-reviewer`、`feature-dev:code-reviewer`、`/code-review`、`general-purpose`；项目配置里写了名单的以项目的为准）。
 
 | 复审者（登记名） | 用在哪里 | 注意 |
 |---|---|---|
-| `product-dev:code-reviewer` | 首选的代码复审，定义在插件的 [agents/code-reviewer.md](../../../agents/code-reviewer.md) | 新项目在“配置闸门”一步已把它加进名单；老项目没加时见下一段。它只有只读工具，不能写文件、不能运行命令，见第 2 节的“复审者不能写文件时” |
+| `product-dev:code-reviewer` | 首选的代码复审，定义在插件的 [agents/code-reviewer.md](../../../agents/code-reviewer.md) | 套件 0.5.0 起新装的项目默认名单里已有它；用更早版本安装的项目没有，见下一段。它只有只读工具，不能写文件、不能运行命令，见第 2 节的“复审者不能写文件时” |
 | `general-purpose` | 宿主的通用子代理：一致性审用它；首选不可用时代码复审也用它 | 必须带第 2 节的任务书；代码复审时把上面那份定义文件的正文一并交给它 |
 
-`product-dev:code-reviewer` 不在名单里时：把它加进项目配置是改闸门的行为，先得到用户同意（R2）；没有同意就改派 `general-purpose` 并按实际登记，不借用名单里别的名字。
+`product-dev:code-reviewer` 不在名单里时（用 0.5.0 之前的套件安装的项目会这样：升级套件不改项目配置）：把它加进项目配置是改闸门的行为，先得到用户同意（R2）；没有同意就改派 `general-purpose` 并按实际登记，不借用名单里别的名字。
 
 安全专项（中高风险必做）：另派一个子代理，任务书里只留“安全”一个维度并附第 4 节的安全清单，它的发现并入代码复审报告的“发现”一节；改动很小时可以由同一个复审者一并做，报告里写明。
 

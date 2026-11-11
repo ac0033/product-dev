@@ -1,21 +1,51 @@
 // 复审记录：子代理复审通过（或不通过）后在这里登记。业务含义：复审必须由独立于写代码者的子代理完成（允许名单内）；
 // 报告要有实质内容并给出“结论”一节；报告结论写“不通过”不能记为 pass。按项目的复审流程（modules.gate.reviewFlow）分两种：
 //   pre-push：推送前单项复审，绑定当前代码树哈希；复审前必须已有与当前代码一致的通过测试记录。
+//       代码树哈希不含文档（reviewIgnore），只改规则文本这类改动每一轮的树哈希都相同，所以登记另外写明分支、HEAD 提交号、
+//       文档内容哈希和登记时未提交的文件数，用来把每次登记对应到具体的分支和提交；推送核对（verify.mjs）的规则不变，仍只认树哈希。
+//       最新一条写 review.json（推送核对读它）；每次登记另追加到 reviews/log.jsonl，报告副本放在 reviews/branches/<分支>/ 下。
 //   pr：CI 通过后针对 PR 的最终提交登记代码复审（code）或一致性审（consistency）；登记时用 gh 读取 PR，
 //       PR 未打开或 CI 未全部通过时拒绝。记录放 git 公共目录，供 merge.mjs 核对。一致性审可延期（defer），须写理由。
 // 用法：node scripts/engineering/gate/review.mjs pass|fail --reviewer <名> --report <报告文件> --summary "<一句话>"
 //       node scripts/engineering/gate/review.mjs pass|fail --pr <编号> --kind code|consistency --reviewer <名> --report <报告文件> --summary "<一句话>"
 //       node scripts/engineering/gate/review.mjs defer --pr <编号> --kind consistency --reason "<理由>"
 // 报告文件放在仓库之外（例如系统临时目录），它不属于被审代码。
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { defaultGh, isMain, loadConfig, prNumber, prRecordFile, readPr, readRecord, recordDir, repoRoot, scopeFiles, treeHash, writeRecord } from './lib.mjs';
+import {
+  changedFiles,
+  defaultGh,
+  headInfo,
+  isMain,
+  loadConfig,
+  matchesAny,
+  prNumber,
+  prRecordFile,
+  readPr,
+  readRecord,
+  recordDir,
+  repoRoot,
+  treeHash,
+  uncommittedInScope,
+  writeRecord,
+} from './lib.mjs';
 
 /** 报告里写明“结论：不通过”“结论：**不通过**”“结论：未通过”等形式（允许冒号、星号、井号、引用符、横线夹在中间）。 */
 const FAIL_IN_REPORT = /结论[\s:：*#>-]*[不未]通过/;
 
 /** pr 流程的审查种类及中文名。 */
 const KINDS = { code: '代码复审', consistency: '一致性审' };
+
+/**
+ * 分支名变成一层目录名：保留各种文字的字母和数字（中文分支名照常可读），斜杠等其余字符换成连字符，不以点开头；游离 HEAD 用 _detached。
+ * 换过字符的名字后面加分支名的短哈希：否则 x/a 与 x-a 这样的两个分支会落到同一个目录。
+ */
+export function branchDirName(branch) {
+  if (!branch) return '_detached';
+  const safe = branch.replace(/[^\p{L}\p{N}._-]+/gu, '-').replace(/^\.+/, '_');
+  return safe === branch ? safe : `${safe}-${crypto.createHash('sha256').update(branch).digest('hex').slice(0, 8)}`;
+}
 
 /** 报告与复审者检查（两种流程的 pass、fail 共用）。返回 { ok, message } 或 { ok: true, text }。 */
 function checkReport(config, verdict, reviewer, reportPath) {
@@ -48,20 +78,38 @@ export function recordReview({ root, verdict, reviewer, reportPath, summary = ''
   const checked = checkReport(config, verdict, reviewer, reportPath);
   if (!checked.ok) return checked;
 
-  const hash = treeHash(root, scopeFiles(root, config));
+  // 本次改动只取一次，再分成闸门范围（scope，与 scopeFiles 同口径）和文档（reviewIgnore 之内）两部分
+  const changed = changedFiles(root, config.base);
+  const scope = changed.filter((f) => !matchesAny(f, config.reviewIgnore));
+  const hash = treeHash(root, scope);
   const tests = readRecord(root, 'tests.json');
   if (!tests || !tests.passed || tests.treeHash !== hash) {
     return { ok: false, message: '没有与当前代码一致的通过测试记录，请先运行闸门（gate.mjs）' };
   }
 
-  const dir = path.join(recordDir(root), 'reviews');
+  // 登记对应的位置：分支、HEAD 提交号、文档内容哈希、未提交的文件数（复审看的是工作区，未提交时 HEAD 不含这些改动，如实记下）
+  const { branch, headSha } = headInfo(root);
+  const docs = changed.filter((f) => matchesAny(f, config.reviewIgnore));
+  const docHash = treeHash(root, docs);
+  const docsOnly = scope.length === 0;
+  const uncommitted = uncommittedInScope(root, changed).length;
+
+  const reviews = path.join(recordDir(root), 'reviews');
+  const dir = path.join(reviews, 'branches', branchDirName(branch));
   fs.mkdirSync(dir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const copy = path.join(dir, `${stamp}-${verdict}.md`);
+  const at = new Date().toISOString();
+  const copy = path.join(dir, `${at.replace(/[:.]/g, '-')}-${verdict}.md`);
   fs.writeFileSync(copy, checked.text);
-  const record = { verdict, reviewer, treeHash: hash, summary, report: copy, at: new Date().toISOString() };
+  const record = { verdict, reviewer, treeHash: hash, branch, headSha, docHash, docFiles: docs.length, docsOnly, uncommitted, summary, report: copy, at };
+  // 先追加历史，再写最新记录：历史写不进去时这次登记整个不生效，不留下“命令报错但记录已生效”的状态
+  fs.appendFileSync(path.join(reviews, 'log.jsonl'), `${JSON.stringify(record)}\n`);
   writeRecord(root, 'review.json', record);
-  return { ok: true, message: `复审记录已写入（${verdict}，树哈希 ${hash.slice(0, 12)}）`, record };
+
+  const where = `${branch ? `分支 ${branch}` : '游离 HEAD（不在任何分支上）'}，提交 ${headSha ? headSha.slice(0, 12) : '（尚无提交）'}`;
+  const lines = [`复审记录已写入（${verdict}，${where}，树哈希 ${hash.slice(0, 12)}，文档 ${docs.length} 个、内容哈希 ${docHash.slice(0, 12)}）`];
+  if (docsOnly) lines.push('本次只有文档类改动（reviewIgnore 之内）：闸门范围为空，树哈希每一轮都相同，这次登记以上面的提交号和文档内容哈希为准；推送核对不要求这份记录');
+  if (uncommitted > 0) lines.push(`登记时有 ${uncommitted} 个改动文件未提交：上面的提交不含这些改动，复审对应的是当时的工作区内容`);
+  return { ok: true, message: lines.join('\n'), record };
 }
 
 /** pr 流程的登记：校验参数与报告，读取 PR（须打开、CI 全过），把结论绑定到 PR 的最终提交。 */

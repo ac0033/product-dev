@@ -15,13 +15,13 @@
 在 DSH 网页版或桌面版打开 **Plugins → Add plugin**，输入包名加版本号，然后点 **Install** 并启用。
 
 ```text
-dsh-product-dev@0.2.5
+dsh-product-dev@0.2.6
 ```
 
 使用 `dsh` 命令行时运行下面的命令。
 
 ```bash
-dsh plugin --profile web add dsh-product-dev@0.2.5
+dsh plugin --profile web add dsh-product-dev@0.2.6
 ```
 
 ## 使用

@@ -78,13 +78,19 @@ function exportHasComment(lines, i) {
 /**
  * 检查文件列表（只应传入源文件）。返回 [{ file, message }]，空数组表示通过。
  * exempt 为豁免表中 comments 部分（路径 -> 理由）。
+ * stats 是可选的计数输出（闸门用它报告“查了几个文件”）：checked 实际检查了注释的文件数，exempt 豁免表放行的；已删除的文件两边都不计。
  */
-export function checkComments({ root, files, config, exempt = {} }) {
+export function checkComments({ root, files, config, exempt = {}, stats = {} }) {
   const problems = [];
+  Object.assign(stats, { checked: 0, exempt: 0 });
   for (const file of files) {
-    if (exempt[file]) continue;
+    if (exempt[file]) {
+      stats.exempt++;
+      continue;
+    }
     const abs = path.join(root, file);
     if (!fs.existsSync(abs)) continue;
+    stats.checked++;
     const lines = fs.readFileSync(abs, 'utf8').split('\n');
     if (!hasHeader(lines)) {
       problems.push({ file, message: `${file}：缺少文件头注释（文件开头的注释说明模块的业务职责，至少 ${MIN_HEADER_CHARS} 个字）` });
