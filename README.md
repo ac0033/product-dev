@@ -131,4 +131,4 @@ codex plugin add product-dev@ac0033-skills
 
 - **完整流程**见[入口技能](plugin/skills/product-dev/SKILL.md)和[工程流程说明](plugin/skills/product-dev/references/process.md)，各阶段的工具、验收证据和复审顺序都在这里。
 - **组件与版本**见[组件清单](COMPONENTS.md)。可用工具随宿主而异，流程文档说明了按路径读取内部技能和派发子代理的替代方式。
-- **测试与许可**见[测试与行为用例](evals/cases.md)、[MIT](LICENSE)和[第三方声明](plugin/THIRD_PARTY_NOTICES.md)。在仓库根目录运行 `node --test evals/*.test.mjs` 可检查插件入口、装配、链接和版本一致性。
+- **测试与许可**见[测试与行为用例](evals/cases.md)、[MIT](LICENSE)和[第三方声明](plugin/THIRD_PARTY_NOTICES.md)。
