@@ -14,9 +14,6 @@ jobs:
   test:
     name: Plugin tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    env:
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
     strategy:
       fail-fast: false
       matrix:
@@ -32,4 +29,7 @@ jobs:
       - run: node --test evals/*.test.mjs
       - run: node --test tests/*.test.mjs
         working-directory: components/engineering-kit/kit
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
       - run: node tools/package-release.mjs dist
