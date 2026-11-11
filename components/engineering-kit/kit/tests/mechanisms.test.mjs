@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import { DEFAULTS, normalizeConfig, toFlat, toProfile } from '../gate/config.mjs';
 import { ASSERTION_PATTERNS, checkAssertions, countTestCases, hasAssertion } from '../gate/check-assertions.mjs';
 import { runGate } from '../gate/gate.mjs';
-import { DEPENDENCY_FILES, POLICY_KEYS, loadConfig, readRecord, writeRecord } from '../gate/lib.mjs';
+import { DEPENDENCY_FILES, POLICY_KEYS, loadConfig, parseStatusZ, readRecord, writeRecord } from '../gate/lib.mjs';
 import { mergePr } from '../gate/merge.mjs';
 import { recordReview, reportVerdict } from '../gate/review.mjs';
 import { verify } from '../gate/verify.mjs';
@@ -634,4 +634,37 @@ test('L4、L5：断言痕迹补更多写法并排除 require.resolve 等；用�
   }
   for (const t of ["const p = require.resolve('x');", 'delete require.cache[k];', 'if (require.main === module) run();']) assert.ok(!hasAssertion(t), t);
   assert.equal(countTestCases("if (/x/.test(s)) {}\nre.test(y);\ntest('a', () => {});\n"), 1);
+});
+
+// ---------- 0.6.0 第二轮复核：git status 的改名条目（中级）与 N3 ----------
+
+test('parseStatusZ：暂存的改名与复制，旧路径也作为一项返回（标 from）', () => {
+  const entries = parseStatusZ('R  docs/04-开发/evil.md\0src/evil.ts\0C  src/copy.ts\0src/orig.ts\0 M src/a.ts\0?? new.txt\0');
+  assert.deepEqual(entries.map((e) => [e.code, e.file, Boolean(e.from)]), [
+    ['R ', 'docs/04-开发/evil.md', false],
+    ['R ', 'src/evil.ts', true],
+    ['C ', 'src/copy.ts', false],
+    ['C ', 'src/orig.ts', true],
+    [' M', 'src/a.ts', false],
+    ['??', 'new.txt', false],
+  ]);
+});
+
+test('改名（status）：已提交的源文件改动之后只暂存 git mv 进 docs/，推送核对报范围内有未提交的改动', () => {
+  const root = featureRepo();
+  changeDedup(root);
+  commitAll(root, 'feat');
+  gitMv(root, 'src/dedup.ts', 'docs/04-开发/dedup.md');
+  assert.equal(runGate({ root }).ok, true);
+  assert.equal(recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(PASS_REPORT) }).ok, true);
+  const res = verify({ root });
+  assert.equal(res.ok, false, JSON.stringify(res));
+  assert.ok(res.problems.some((p) => /范围内有未提交的改动[\s\S]*src\/dedup\.ts/.test(p)), res.problems.join('\n'));
+});
+
+test('N3：本地没有 PR 最终提交而按含代码处理时，输出说明原因并提示先 git fetch', () => {
+  const root = featureRepo({ reviewFlow: 'pr' });
+  const res = mergePr({ root, pr: '7', gh: ghFor({ head: 'd'.repeat(40) }) });
+  assert.equal(res.ok, false);
+  assert.ok(res.notes.some((n) => n.includes('本地没有') && n.includes('git fetch')), JSON.stringify(res.notes));
 });

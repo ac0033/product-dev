@@ -7,7 +7,7 @@
 //   全量（默认）     运行配置的 testCommand。通过的全量记录另存 tests-full.json，记下当时范围内每个文件的内容哈希。
 //   按影响范围（--affected）以最近一次通过的全量记录为起点，算出此后改动的文件，只运行命中的测试分组（modules.gate.testGroups）；
 //                    没有分组、没有可用的全量记录、基线或测试配置变了、改动不属于任何分组、涉及配置与套件脚本或依赖清单时，
-//                    自动改跑全量并写明原因；这份代码上次全量未通过、或带 --force 而此后没有改动时也改跑全量。改动文件按 diffNames 取（改名算删除加新增）。
+//                    自动改跑全量并写明原因；这份代码上次全量未通过、或全量记录之后没有改动（不带 --force 时已直接沿用全量记录）时也改跑全量。改动文件按 diffNames 取（改名算删除加新增）。
 // 结果复用：已有通过的记录且代码树、基线、测试配置摘要（testCommand、testEnv、testGroups）都一致、模式满足要求
 //   （要全量时须是全量记录）时不重跑，输出“沿用已有通过记录”；--force 强制重跑。静态检查两种模式、复用与否都照常做。
 // 闸门范围的口径见 lib.mjs 的 gateScope；基准分支设置取默认主干上的配置，判定策略（reviewIgnore 等）取基准提交上的配置，
@@ -52,13 +52,13 @@ const FULL_RECORD = 'tests-full.json';
 /**
  * 静态检查通过后的结果行：各检查了几个本次改动的文件、豁免了几个。三项的范围不同，各自写明：
  * 测试先行看全部改动的源文件，已删除的和没有可测导出的计入“无需测试”；注释检查不看 reviewIgnore 之内的和已删除的；
- * 断言检查看本次改动的测试文件（不含已删除的）。
+ * 断言检查看本次改动的测试文件（不含已删除的、reviewIgnore 之内的和 __init__.py、conftest.py）。
  */
 function staticMessages({ testFirst, comments }, assertions) {
   return [
     `测试先行检查通过（本次改动的源文件：检查 ${testFirst.checked} 个，豁免 ${testFirst.exempt} 个，无需测试 ${testFirst.skipped} 个，含已删除的）`,
     `注释检查通过（本次改动的源文件，不含 reviewIgnore 之内的和已删除的：检查 ${comments.checked} 个，豁免 ${comments.exempt} 个）`,
-    `断言检查通过（本次改动的测试文件，不含已删除的：检查 ${assertions.checked} 个，豁免 ${assertions.exempt} 个）`,
+    `断言检查通过（本次改动的测试文件，不含已删除的、reviewIgnore 之内的和 __init__.py、conftest.py：检查 ${assertions.checked} 个，豁免 ${assertions.exempt} 个）`,
   ];
 }
 
@@ -103,7 +103,8 @@ function reusable(root, { hash, baseRev, digest, affected }) {
  * 按影响范围测试的计划：返回 { mode: 'full', reason } 或 { mode: 'affected', full, changed, groups }。
  * 改动文件 = 当前范围内文件的内容哈希与全量记录里的不同（新增、修改、删除，以及回到与基准相同而离开范围的）。
  * 另两种改跑全量：tests.json 是这份代码（同一树哈希、同一基线）的全量运行且未通过——手里已有全量失败的反证，
- * 只跑分组会得到与之矛盾的通过记录；带了 --force 而此后没有任何改动——force 的含义是重跑，不能什么都不跑就写通过。
+ * 只跑分组会得到与之矛盾的通过记录；全量记录之后没有任何改动——不带 --force 时复用已经沿用了全量记录（走不到这里），
+ * 带了 --force 时它的含义是重跑，不能什么都不跑就写通过。
  */
 function planAffected(root, config, { files, hash, baseRev, digest, force }) {
   if (!config.testGroups || config.testGroups.length === 0) return { mode: 'full', reason: '没有配置测试分组（modules.gate.testGroups）' };
@@ -117,7 +118,7 @@ function planAffected(root, config, { files, hash, baseRev, digest, force }) {
   if (full.configDigest !== digest) return { mode: 'full', reason: '测试命令、环境变量或测试分组与全量记录不同' };
   const keys = [...new Set([...Object.keys(full.files), ...Object.keys(files)])].sort();
   const changed = keys.filter((f) => (full.files[f] ?? 'absent') !== (files[f] ?? 'absent'));
-  if (changed.length === 0 && force) return { mode: 'full', reason: '带了 --force，而全量记录之后没有改动：按要求重跑全量' };
+  if (changed.length === 0) return { mode: 'full', reason: force ? '带了 --force，而全量记录之后没有改动：按要求重跑全量' : '全量记录之后没有改动，但没能沿用它：重跑全量' };
   const always = changed.filter((f) => matchesAny(f, ALWAYS_IN_SCOPE));
   if (always.length > 0) return { mode: 'full', reason: `改动涉及配置、豁免表或套件脚本：${listSome(always)}` };
   const deps = changed.filter((f) => matchesAny(f, DEPENDENCY_FILES));
@@ -230,15 +231,6 @@ function runChecks({ root, config, affected = false, force = false }) {
     fs.mkdirSync(recordDir(root), { recursive: true });
     const logFile = path.join(recordDir(root), 'tests.log');
     const base = { treeHash: beforeHash, base: baseRev, mode: plan.mode, files, configDigest: digest, log: logFile, sourcesChecked: sources.length, staticChecks };
-
-    if (plan.mode === 'affected' && plan.groups.length === 0) {
-      // 全量记录之后范围内没有任何改动（树哈希多半也相同，但测试配置或模式要求让复用没有命中，例如带了 --force）
-      fs.writeFileSync(logFile, '');
-      const record = { passed: true, ...base, groups: [], fullAt: plan.full.treeHash, command: null, exitCode: null, changedDuringRun: false, at: new Date().toISOString() };
-      writeRecord(root, 'tests.json', record);
-      messages.push(`全量记录（${plan.full.at}）之后范围内没有改动，未运行测试，写入沿用全量结果的记录`);
-      return { ok: true, messages, record };
-    }
 
     const commands = plan.mode === 'full' ? [{ name: null, command: config.testCommand }] : plan.groups.map((g) => ({ name: g.name, command: g.command }));
     if (plan.mode === 'affected') {

@@ -132,12 +132,14 @@ test('漏洞 1c：merge.mjs 判断“只改文档”用基准上的 reviewIgnore
     commitAll(root, branch);
     return git(root, ['rev-parse', 'HEAD']).trim();
   };
-  // PR 分支把 reviewIgnore 改成 **：合并入口不能因此跳过审查
+  // 工作区把 reviewIgnore 改成 **（不提交），PR 提交里只改一个源文件：合并入口不能因工作区的配置跳过审查
   const selfIgnore = JSON.stringify({ ...TEST_CONFIG, reviewFlow: 'pr', reviewIgnore: ['**'] }, null, 2);
-  const h1 = prCommit('p1', { 'engineering.config.json': selfIgnore, 'src/dedup.ts': `${SRC_HEADER}export const x = 1;\n` });
+  const h1 = prCommit('p1', { 'src/dedup.ts': `${SRC_HEADER}export const x = 1;\n` });
+  write(root, 'engineering.config.json', selfIgnore);
   const res = mergePr({ root, pr: '7', gh: fakeGh(['src/dedup.ts'], h1) });
   assert.equal(res.ok, false, JSON.stringify(res));
   assert.ok(res.problems.some((p) => p.includes('缺少代码复审记录')), res.problems.join('\n'));
+  git(root, ['checkout', '-q', '--', 'engineering.config.json']);
 
   const h2 = prCommit('p2', { 'README.md': '# 说明\n', 'engineering.config.json': selfIgnore });
   const res2 = mergePr({ root, pr: '7', gh: fakeGh(['README.md', 'engineering.config.json'], h2) });

@@ -265,17 +265,22 @@ export function resolveBase(root, base) {
  * 范围内未提交（已修改、已暂存、未跟踪或已删除）的文件。
  * 不把范围作为 pathspec 传给 git（文件多时会超过命令行长度，路径里的 [ * 等会被当作通配符）；
  * 而是读全部状态，再在本地按范围过滤。git 失败时抛错，绝不返回空列表（失败不放行）。
+ * 暂存的改名（R）旧路径也算：提交里的旧路径还是改名前的内容，工作区里它已“删除”，不算上它，
+ * 把源文件只暂存 git mv 进 docs/ 就能让推送核对看不出 HEAD 里有未经测试和复审的代码。复制（C）的来源文件没有变，不算。
  */
 export function uncommittedInScope(root, scope) {
   const r = git(root, ['status', '--porcelain', '-uall', '-z']);
   if (!r.ok) throw new Error(`无法读取工作区状态（git status 失败）：${r.err.trim()}`);
   const inScope = new Set(scope);
-  return parseStatusZ(r.out).filter((e) => inScope.has(e.file)).map((e) => e.file);
+  const files = parseStatusZ(r.out).filter((e) => !(e.from && e.code.includes('C') && !e.code.includes('R'))).map((e) => e.file);
+  return [...new Set(files.filter((f) => inScope.has(f)))];
 }
 
 /**
- * 解析 `git status --porcelain -z` 的输出：返回 [{ code, file }]（斜杠路径）。
- * -z 下路径不加引号（带空格、中文的路径原样输出）；改名条目后面多跟一个字段（旧路径），这里跳过它。
+ * 解析 `git status --porcelain -z` 的输出：返回 [{ code, file, from? }]（斜杠路径）。
+ * -z 下路径不加引号（带空格、中文的路径原样输出）。改名（R）、复制（C）条目后面多跟一个字段（旧路径或来源），
+ * 它也作为一项返回，带 from: true、code 与新路径相同：调用方据此决定是否计入（改名的旧路径是一处改动，不能丢）。
+ * 不靠 git status --no-renames：解析两种输出都对，不依赖 git 的版本和 status.renames 配置。
  */
 export function parseStatusZ(text) {
   const out = [];
@@ -285,7 +290,10 @@ export function parseStatusZ(text) {
     if (p.length < 4) continue;
     const code = p.slice(0, 2);
     out.push({ code, file: p.slice(3).replace(/\\/g, '/') });
-    if (code.includes('R') || code.includes('C')) i++;
+    if ((code.includes('R') || code.includes('C')) && parts[i + 1]) {
+      i++;
+      out.push({ code, file: parts[i].replace(/\\/g, '/'), from: true });
+    }
   }
   return out;
 }
@@ -538,10 +546,10 @@ export function ciProblems(checks) {
 
 /**
  * 读取 PR 的状态、最终提交与 CI 结果（gh pr view；statusCheckRollup 是最终提交上的检查）。
- * 返回 { state, head, ciProblems, files }（files 是 PR 改动的文件路径，gh 最多返回 100 个）；gh 失败或输出不合法时抛错。
+ * 返回 { state, head, ciProblems }；gh 失败或输出不合法时抛错。不取 PR 的文件列表：改名时它可能只给新路径，且最多 100 个，“只改文档”由 merge.mjs 按本地差异判定。
  */
 export function readPr(root, pr, gh) {
-  const out = runGh(gh, ['pr', 'view', pr, '--json', 'state,headRefOid,statusCheckRollup,files'], root);
+  const out = runGh(gh, ['pr', 'view', pr, '--json', 'state,headRefOid,statusCheckRollup'], root);
   let j;
   try {
     j = JSON.parse(out);
@@ -549,8 +557,7 @@ export function readPr(root, pr, gh) {
     throw new Error(`gh pr view 的输出不是合法 JSON：${e.message}`);
   }
   if (!j || !j.headRefOid) throw new Error('gh pr view 的输出缺少最终提交（headRefOid）');
-  const files = Array.isArray(j.files) ? j.files.map((f) => f.path) : [];
-  return { state: j.state, head: j.headRefOid, ciProblems: ciProblems(j.statusCheckRollup), files };
+  return { state: j.state, head: j.headRefOid, ciProblems: ciProblems(j.statusCheckRollup) };
 }
 
 /** PR 审查历史：git 公共目录下 engineering-gate/pr/<编号>/log.jsonl，每次登记（pass、fail、defer、accept）追加一行，复审轮次按它计数。 */

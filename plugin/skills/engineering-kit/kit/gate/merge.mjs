@@ -41,19 +41,21 @@ function onlyDocsBetween(root, from, to, reviewIgnore) {
  * reviewIgnore 是基准提交上的配置版本（loadConfig 得出的生效值），PR 分支自己改的 reviewIgnore 不算数；
  * 含项目配置、豁免表或 scripts/engineering/** 的 PR 不算只改文档。
  * 保守处理：本地没有最终提交、基准解析不了、差异算不出或为空时，不算只改文档（要求审查记录）。
+ * 返回 { docs, why }：因为本地算不出而按含代码处理时，why 写明原因（合并入口放进 notes，提示先 git fetch；不改变判定）。
  */
 function docsOnly(root, config, head) {
-  if (!git(root, ['cat-file', '-e', `${head}^{commit}`]).ok) return false;
+  const fetchHint = '：按含代码的 PR 处理（要求审查记录）；PR 若确实只改文档，先 git fetch 再运行合并入口';
+  if (!git(root, ['cat-file', '-e', `${head}^{commit}`]).ok) return { docs: false, why: `本地没有 PR 最终提交 ${String(head).slice(0, 12)}，判断不了是否只改文档${fetchHint}` };
   let base;
   try {
     base = resolveBase(root, config.base);
-  } catch {
-    return false;
+  } catch (e) {
+    return { docs: false, why: `基准分支解析不了（${e.message}），判断不了是否只改文档${fetchHint}` };
   }
   const mb = git(root, ['merge-base', base, head]);
-  if (!mb.ok) return false;
+  if (!mb.ok) return { docs: false, why: `本地算不出基准分支 ${base} 与最终提交的共同提交，判断不了是否只改文档${fetchHint}` };
   const r = diffNames(root, [mb.out.trim(), head]);
-  return r.ok && r.files.length > 0 && r.files.every((f) => isIgnoredDoc(f, config.reviewIgnore));
+  return { docs: r.ok && r.files.length > 0 && r.files.every((f) => isIgnoredDoc(f, config.reviewIgnore)), why: null };
 }
 
 /** 读取一条 PR 审查记录；不存在或损坏返回 null（视为未登记）。 */
@@ -67,7 +69,7 @@ function readPrRecord(root, pr, kind) {
 
 /**
  * 核对并合并 PR。返回 { ok, problems, notes, head }：ok 为 true 表示已执行合并；notes 是放行时要写明的说明
- * （按用户决定接受风险放行、沿用只改文档之前的代码复审记录）。
+ * （按用户决定接受风险放行、沿用只改文档之前的代码复审记录、本地判断不了是否只改文档的原因）。
  * 项目未启用 pr 流程、参数不合法、gh 失败时抛错；gh 可注入，测试用假的实现。
  */
 export function mergePr({ root, pr, method = 'squash', gh = defaultGh }) {
@@ -84,7 +86,9 @@ export function mergePr({ root, pr, method = 'squash', gh = defaultGh }) {
   const notes = [];
   if (st.state !== 'OPEN') problems.push(`PR #${no} 不是打开状态（${st.state}）`);
   for (const p of st.ciProblems) problems.push(`${p}（最终提交 ${short(st.head)}）`);
-  for (const r of docsOnly(root, config, st.head) ? [] : REQUIRED) {
+  const scope = docsOnly(root, config, st.head);
+  if (scope.why) notes.push(scope.why);
+  for (const r of scope.docs ? [] : REQUIRED) {
     const rec = readPrRecord(root, no, r.kind);
     if (!rec) problems.push(`缺少${r.name}记录：先运行 review.mjs … --pr ${no} --kind ${r.kind}`);
     else if (!r.accept.includes(rec.verdict)) problems.push(`${r.name}结论是 ${rec.verdict}，不是 ${r.accept.join(' 或 ')}`);
