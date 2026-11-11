@@ -52,6 +52,17 @@ test('死链：文档里指向不存在的文件报错', () => {
   assert.ok(rep.findings.error.some((e) => /死链.*missing\.md/.test(e)), JSON.stringify(rep.findings));
 });
 
+test('死链：带标题的链接和尖括号链接也查（与阶段内登记认的写法一致）', () => {
+  assert.deepEqual(relativeLinks('[a](a.md "标题") [b](<my notes.md>) [c](<c.md> \'t\') [外](<https://x.y/z>)'), ['a.md', 'my notes.md', 'c.md']);
+  const root = repoWith({
+    'docs/a.md': '状态：active\n\n[有](b.md "在") [缺](gone.md "标题") [缺二](<no such.md>)\n',
+    'docs/b.md': '状态：active\n另一份\n',
+  });
+  const dead = runHygiene(root).findings.error.filter((e) => /死链/.test(e));
+  assert.equal(dead.length, 2, JSON.stringify(dead));
+  assert.ok(dead.some((e) => /gone\.md/.test(e)) && dead.some((e) => /no such\.md/.test(e)), JSON.stringify(dead));
+});
+
 test('状态：不合法的状态值报错；合法值通过', () => {
   const root = repoWith({ 'docs/a.md': '状态：unknown\n', 'docs/b.md': '状态：active\n' });
   const rep = runHygiene(root);

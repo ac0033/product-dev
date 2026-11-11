@@ -26,11 +26,17 @@ export function bannedTokensIn(name, tokens) {
   return tokens.filter((t) => parts.includes(String(t).toLowerCase()));
 }
 
-/** 取 Markdown 中的相对链接目标（忽略外链、锚点、绝对路径）。 */
+/** 链接目标：普通写法、带标题的写法（a.md "标题"）和尖括号写法（<a b.md>，目标里可以有空格）。 */
+const LINK_TARGET = /\]\(\s*(?:<([^>\n]+)>|([^)\s]+))(?:\s+["'][^"'\n]*["'])?\s*\)/g;
+
+/**
+ * 取 Markdown 中的相对链接目标（忽略外链、锚点、绝对路径），含 % 转义的按解码后的路径。
+ * 死链检查和阶段内登记共用：两处认的链接写法必须一致，否则会出现“算登记、却不查死链”的链接。
+ */
 export function relativeLinks(text) {
   const out = [];
-  for (const m of text.matchAll(/\]\(([^)\s]+)\)/g)) {
-    const t = m[1].split('#')[0];
+  for (const m of text.matchAll(LINK_TARGET)) {
+    const t = (m[1] ?? m[2]).split('#')[0];
     if (!t || /^[a-z]+:/i.test(t) || t.startsWith('/')) continue;
     try {
       out.push(decodeURI(t));
@@ -52,24 +58,12 @@ function entryName(s) {
   return s.trim().replace(/\\/g, '/').replace(/^(\.\/)+/, '').replace(/\/+$/, '');
 }
 
-/** 链接目标：普通写法、带标题的写法（a.md "标题"）和尖括号写法（<a b.md>，目标里可以有空格）。 */
-const LINK_TARGET = /\]\(\s*(?:<([^>\n]+)>|([^)\s]+))(?:\s+["'][^"'\n]*["'])?\s*\)/g;
-
 /**
  * 阶段 README 里登记的名字，只认三种写法并要求整名相同：表格每行第一列的整格文字、反引号里的文字、链接目标。
  * 不按子串找：那样会把 spec.md 误当成已登记（README 里只有 my-spec.md）。表格只取第一列：说明列里的词不是登记。
  */
 export function registeredNames(text) {
-  const names = new Set();
-  for (const m of text.matchAll(LINK_TARGET)) {
-    const target = (m[1] ?? m[2]).split('#')[0];
-    if (!target || /^[a-z]+:/i.test(target) || target.startsWith('/')) continue;
-    try {
-      names.add(entryName(decodeURI(target)));
-    } catch {
-      names.add(entryName(target)); // 含 % 但不是合法转义：按原文
-    }
-  }
+  const names = new Set(relativeLinks(text).map(entryName));
   for (const m of text.matchAll(/`([^`\n]+)`/g)) names.add(entryName(m[1]));
   for (const line of text.split('\n')) {
     const row = line.trim();
