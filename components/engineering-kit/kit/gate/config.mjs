@@ -3,7 +3,9 @@
 //     modules  —— 模块参数：gate（基准分支、测试命令、环境变量、锁时长、复审流程 reviewFlow）、review（复审者名单、字数、结论关键词）
 //     layout   —— 目录布局：源文件与测试的 glob、阶段目录、允许的顶层目录
 //     hygiene  —— 巡检参数：禁用文件名片段、草稿超期天数、记录类目录、合法状态值
-//     rules    —— 规则：不计入闸门的文档（reviewIgnore）、注释检查模式（commentMode）
+//     rules    —— 规则：不计入闸门的文档（reviewIgnore；项目配置、豁免表、套件脚本除外，永远计入）、注释检查模式（commentMode）
+//   这里只做结构展开。闸门运行时 base 与判定策略字段（reviewIgnore、reviewFlow、reviewers、reviewMinChars、reviewKeyword）
+//   的生效值不取工作区，而取主干或基准提交上的配置，见 lib.mjs 的 loadConfig。
 //   闸门内部只使用“扁平”字段（FLAT_KEYS），由 normalizeConfig 展开；旧版扁平配置仍可读取，便于回滚。
 // 同步器通过 toProfile / toFlat 在两种结构之间转换，保证回滚到旧版本时配置格式也随之回退。
 

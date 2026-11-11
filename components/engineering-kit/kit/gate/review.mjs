@@ -1,4 +1,5 @@
 // 复审记录：子代理复审通过（或不通过）后在这里登记。业务含义：复审必须由独立于写代码者的子代理完成（允许名单内）；
+// 判定策略（复审流程、复审者名单、最少字数、结论关键词）取基准提交上的配置，被审分支改了不算数（lib.mjs 的 loadConfig）。
 // 报告要有实质内容，并且有一处明确的结论（写法见 reportVerdict）：登记 pass 要求结论是通过，登记 fail 要求结论是不通过，
 // 找不到明确结论、前后矛盾或与登记不符时拒绝。按项目的复审流程（modules.gate.reviewFlow）分两种：
 //   pre-push：推送前单项复审，绑定当前代码树哈希和基准提交（基线）；复审前必须已有与当前代码、当前基线一致的通过测试记录。
@@ -16,6 +17,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  assertPolicy,
   defaultGh,
   gateScope,
   headInfo,
@@ -42,7 +44,7 @@ function plain(s) {
   return s.replace(/[*_`]/g, '').trim();
 }
 
-/** 一段文字是不是单独的结论词：通过 / 不通过 / 未通过（允许后面跟括号说明和句末标点）。返回 pass、fail 或 null。 */
+/** 一段文字是不是单独的结论词：通过 / 不通过 / 未通过（只认这三个中文词；允许后面跟括号说明和句末标点）。返回 pass、fail 或 null。 */
 function verdictWord(s) {
   const t = plain(s).replace(/[（(][^）)]*[）)]/g, '').replace(/[。.！!]+$/, '').trim();
   if (t === '通过') return 'pass';
@@ -50,19 +52,21 @@ function verdictWord(s) {
   return null;
 }
 
-/** 一行以哪个结论词开头（先认“不通过”“未通过”，再认“通过”）。返回 pass、fail 或 null。 */
-function leadingVerdict(s) {
-  const t = plain(s);
-  if (/^[不未]通过/.test(t)) return 'fail';
-  if (/^通过/.test(t)) return 'pass';
-  return null;
+/**
+ * 两种写法共用的判定规则：把结论文字按 `，,；;。` 拆成小句，去掉修饰符号后整句恰好是结论词的小句才算。
+ * 返回 'pass'、'fail'、'conflict'（同一处既有通过又有不通过）或 null（没有恰好是结论词的小句）。
+ * 所以“有 2 个高级问题，不通过”是不通过，“通过。一句话理由”是通过，“通过前需修复 H1”“通过与否取决于…”都不算结论。
+ */
+function clauseVerdict(s) {
+  const words = new Set(s.replace(/^[\s>-]*/, '').split(/[，,；;。]/).map(verdictWord).filter(Boolean));
+  if (words.size > 1) return 'conflict';
+  return words.size === 1 ? [...words][0] : null;
 }
 
 /**
- * 从报告里找出明确的结论。认两种写法（keyword 默认是“结论”，可配置）：
- *   同一行：`结论：通过` / `结论：不通过`，行首允许井号、引用符、列表符，词两边允许星号；冒号后按逗号、分号拆成小句，
- *     恰好是结论词的小句才算（所以“有 2 个高级问题，不通过”是不通过，“未通过的问题已修复，通过”是通过）。
- *   标题行：只有关键词的一行（如 `## 结论`），其后第一个非空行以 通过 / 不通过 / 未通过 开头。
+ * 从报告里找出明确的结论。认两种写法（keyword 默认是“结论”，可配置），判定规则相同（clauseVerdict）：
+ *   同一行：`结论：……`，行首允许井号、引用符、列表符，词两边允许星号，判定冒号后的文字。
+ *   标题行：只有关键词的一行（如 `## 结论`），判定其后第一个非空行。
  * 返回 { verdict: 'pass'|'fail'|null, conflict }：找不到时 verdict 为 null；出现多处且不一致时 conflict 为 true、verdict 为 null。
  */
 export function reportVerdict(text, keyword = '结论') {
@@ -72,18 +76,13 @@ export function reportVerdict(text, keyword = '结论') {
   const lines = String(text).split(/\r?\n/);
   const found = [];
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (heading.test(line)) {
-      const next = lines.slice(i + 1).find((l) => l.trim() !== '');
-      const v = next === undefined ? null : leadingVerdict(next.replace(/^[\s>-]*/, ''));
-      if (v) found.push(v);
-      continue;
-    }
-    const m = inline.exec(line);
-    if (!m) continue;
-    const words = new Set(m[1].split(/[，,；;]/).map(verdictWord).filter(Boolean));
-    if (words.size === 1) found.push([...words][0]);
-    else if (words.size > 1) found.push('pass', 'fail'); // 同一行里既写通过又写不通过：按矛盾处理
+    let body = null;
+    if (heading.test(lines[i])) body = lines.slice(i + 1).find((l) => l.trim() !== '') ?? null;
+    else body = inline.exec(lines[i])?.[1] ?? null;
+    if (body === null) continue;
+    const v = clauseVerdict(body);
+    if (v === 'conflict') found.push('pass', 'fail');
+    else if (v) found.push(v);
   }
   const kinds = new Set(found);
   if (kinds.size > 1) return { verdict: null, conflict: true };
@@ -114,7 +113,7 @@ function checkReport(config, verdict, reviewer, reportPath) {
     return { ok: false, message: `复审报告不少于 ${config.reviewMinChars} 字（当前 ${text.trim().length} 字）` };
   }
   const kw = config.reviewKeyword;
-  const how = `写法：同一行写“${kw}：通过”或“${kw}：不通过”，或者单独一行“## ${kw}”、其后第一个非空行以“通过”或“不通过”开头；全文只写一处结论`;
+  const how = `写法：同一行写“${kw}：通过。理由”或“${kw}：不通过。理由”，或者单独一行“## ${kw}”、其后第一个非空行写“通过。理由”或“不通过。理由”；结论词只认中文的通过、不通过、未通过，要单独成一个小句；全文只写一处结论`;
   if (!text.includes(kw)) return { ok: false, message: `复审报告缺少“${kw}”一节（${how}）` };
   const found = reportVerdict(text, kw);
   if (found.conflict) return { ok: false, message: `复审报告里有多处结论且不一致，无法判定（${how}）` };
@@ -132,9 +131,10 @@ function checkReport(config, verdict, reviewer, reportPath) {
  */
 export function recordReview({ root, verdict, reviewer, reportPath, summary = '', pr, kind, reason, gh = defaultGh }) {
   const config = loadConfig(root);
+  assertPolicy(config); // reviewFlow、reviewers、reviewMinChars、reviewKeyword 取基准提交上的配置，取不到时不按工作区的值登记
   if (config.reviewFlow === 'pr') return recordPrReview({ root, config, verdict, reviewer, reportPath, summary, pr, kind, reason, gh });
   if (pr !== undefined || kind !== undefined) {
-    return { ok: false, message: '本项目的复审流程是 pre-push，不接受 --pr、--kind；要启用 PR 双审，把 modules.gate.reviewFlow 改为 pr' };
+    return { ok: false, message: '本项目的复审流程是 pre-push，不接受 --pr、--kind；要启用 PR 双审，在主干上把 modules.gate.reviewFlow 改为 pr（闸门按基准提交上的配置判定）' };
   }
   if (verdict !== 'pass' && verdict !== 'fail') return { ok: false, message: '结论只能是 pass 或 fail' };
   const checked = checkReport(config, verdict, reviewer, reportPath);

@@ -1,10 +1,12 @@
-// 闸门漏洞回归测试（0.5.1）：一次独立审查复现的七个缺陷，每个用例对应一项，修复前应失败。
+// 闸门漏洞回归测试（0.5.1）：独立审查与两轮复审复现的十类缺陷，每组用例对应一项；多数修复前应失败，少数是防止改坏的对照用例（如主干上没有配置时用工作区的值）。
 // 业务含义：闸门是装进别的项目里的硬约束，任何能让分支“自己豁免自己”、让旧记录在新基线上继续有效、
 // 或绕开推送核对的路径，都会让闸门形同虚设。这里在临时 git 仓库里跑真实流程复现每一条。
 //   1. 分支改自己的 reviewIgnore 让闸门范围变空        2. 合入新主干后旧的测试与复审记录仍被接受
 //   3. git push origin 别的分支 绕过 pre-push 钩子       4. 复审报告的结论判定太窄或误判
 //   5. 子模块指针不进树哈希                            6. 测试产物导致“运行期间代码变化”时提示语误导
-//   7. git mv 进非白名单目录不被新文件位置检查拦截
+//   7. git mv 进非白名单目录不被新文件位置检查拦截   8. 分支把 modules.gate.base 指向自己让范围变空
+//   9. 判定策略（reviewFlow、reviewers、reviewMinChars、reviewKeyword）取自被审分支自己的配置
+//  10. 结论标题写法按前缀匹配，“通过前需修复…”被当成通过；带句号的同行写法认不出
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -44,7 +46,10 @@ test('漏洞 1a：分支把 reviewIgnore 改成 ["**"]，配置文件和源文�
   passingChange(root);
   write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, reviewIgnore: ['**'] }, null, 2));
   commitAll(root, 'feat: 自我豁免');
-  const scope = scopeFiles(root, { ...TEST_CONFIG, reviewIgnore: ['**'] });
+  // 0.5.1 起 gateScope 只认 loadConfig 得出的生效值（reviewIgnore 取基准提交上的配置）
+  const config = loadConfig(root);
+  assert.deepEqual(config.reviewIgnore, TEST_CONFIG.reviewIgnore);
+  const scope = scopeFiles(root, config);
   assert.ok(scope.includes('engineering.config.json'), `配置文件必须在范围内：${JSON.stringify(scope)}`);
   assert.ok(scope.includes('src/dedup.ts'), `判定范围用基准上的 reviewIgnore：${JSON.stringify(scope)}`);
   const res = verify({ root });
@@ -459,4 +464,82 @@ test('漏洞 8：默认主干上的配置不合法时报错，不放行', () => 
   git(root, ['checkout', '-q', '-b', 'feat']);
   write(root, 'engineering.config.json', JSON.stringify(TEST_CONFIG, null, 2));
   assert.throws(() => loadConfig(root), /默认主干/);
+});
+
+// ---------- 9. 判定策略字段取自被审分支自己的配置 ----------
+
+test('漏洞 9-1：pre-push 项目的功能分支把 reviewFlow 改成 pr，推送核对仍要求复审记录', () => {
+  const root = featureRepo();
+  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, reviewFlow: 'pr' }, null, 2));
+  passingChange(root);
+  commitAll(root, 'feat: 改成 pr 流程');
+  assert.equal(runGate({ root }).ok, true);
+  assert.equal(loadConfig(root).reviewFlow, 'pre-push', '判定策略取基准提交上的配置');
+  const res = verify({ root });
+  assert.equal(res.ok, false, JSON.stringify(res));
+  assert.ok(res.problems.some((p) => /没有复审记录/.test(p)), res.problems.join('\n'));
+  assert.match(res.note, /reviewFlow/, '工作区值与生效值不同时给一行提示');
+});
+
+test('漏洞 9-2：分支改 reviewKeyword / reviewers / reviewMinChars 后，登记仍按基准上的值判定', () => {
+  const root = featureRepo();
+  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, reviewKeyword: '处置', reviewers: ['me-myself'], reviewMinChars: 5 }, null, 2));
+  passingChange(root);
+  assert.equal(runGate({ root }).ok, true);
+  const bad = `${BODY}处置：通过\n## 结论\n不通过\n`;
+  const r1 = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(bad), summary: 's' });
+  assert.equal(r1.ok, false, `关键词仍是“结论”，结论为不通过：${r1.message}`);
+  const r2 = recordReview({ root, verdict: 'pass', reviewer: 'me-myself', reportPath: reportFile(PASS_REPORT), summary: 's' });
+  assert.equal(r2.ok, false, r2.message);
+  assert.match(r2.message, /复审者/);
+  const r3 = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile('结论：通过\n'), summary: 's' });
+  assert.equal(r3.ok, false, r3.message);
+  assert.match(r3.message, /不少于 60/);
+});
+
+test('漏洞 9-3：基准上没有配置时，判定策略用工作区的值', () => {
+  const root = tmpRepo();
+  write(root, 'README.md', '# 说明\n');
+  commitAll(root, 'base');
+  git(root, ['checkout', '-q', '-b', 'install']);
+  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, reviewKeyword: '评审意见', reviewFlow: 'pr', reviewMinChars: 10 }, null, 2));
+  const c = loadConfig(root);
+  assert.equal(c.reviewKeyword, '评审意见');
+  assert.equal(c.reviewFlow, 'pr');
+  assert.equal(c.reviewMinChars, 10);
+});
+
+test('漏洞 9-4：主干上合法地把 reviewFlow 改成 pr 之后，功能分支按 pr 走', () => {
+  const root = featureRepo();
+  git(root, ['checkout', '-q', 'main']);
+  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, reviewFlow: 'pr' }, null, 2));
+  commitAll(root, 'main: 改用 pr 流程');
+  git(root, ['checkout', '-q', 'feat']);
+  git(root, ['rebase', '-q', 'main']);
+  passingChange(root);
+  commitAll(root, 'feat');
+  assert.equal(runGate({ root }).ok, true);
+  assert.equal(loadConfig(root).reviewFlow, 'pr');
+  const res = verify({ root });
+  assert.equal(res.ok, true, JSON.stringify(res));
+});
+
+// ---------- 10. 结论判定：标题写法也必须整句恰好是结论词 ----------
+
+test('漏洞 10：“## 结论”下一行只是以“通过”开头（通过前需修复…、通过与否取决于…）不算通过', () => {
+  for (const tail of ['## 结论\n通过前需修复 H1、M2\n', '## 结论\n\n通过与否取决于 H1 的修复情况。\n', '## 结论\nPass\n']) {
+    const root = gatedRepo();
+    const r = reviewPass(root, `${BODY}${tail}`);
+    assert.equal(r.ok, false, `${tail} → ${r.message}`);
+  }
+});
+
+test('漏洞 10：带句号的写法都能认出：“结论：通过。无高、中级问题。”“## 结论 / 通过。理由”“## 结论 / 不通过。理由”', () => {
+  const root = gatedRepo();
+  for (const tail of ['结论：通过。无高、中级问题。\n', '## 结论\n通过。一句话理由；无高、中级问题。\n', '## 结论\n\n通过（或 不通过）。一句话理由；高、中级问题的编号清单。\n']) {
+    const r = reviewPass(root, `${BODY}${tail}`);
+    assert.equal(r.ok, true, `${tail} → ${r.message}`);
+  }
+  const f = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(`${BODY}## 结论\n不通过。H1 未修复。\n`), summary: 's' });
+  assert.equal(f.ok, true, f.message);
 });

@@ -69,10 +69,10 @@
 
 代码复审不攒到合并后：结论绑定 PR 的最终提交，合并后才发现的问题已在主干上，后续 PR 又叠在其上。一致性审可以集中审多个 PR，结论仍按 PR 各自记录。拿不准风险档位时按高一档处理。
 
-套件闸门的两种流程（`engineering.config.json` 的 `modules.gate.reviewFlow`，命令在项目的 `scripts/engineering/gate/` 下）：
+套件闸门的两种流程（`engineering.config.json` 的 `modules.gate.reviewFlow`，命令在项目的 `scripts/engineering/gate/` 下）。两种流程共同的规则：闸门的判定依据不由被审分支决定。基准分支设置 `modules.gate.base` 以默认主干上的配置为准；判定策略字段 `reviewIgnore`、`reviewFlow`、`reviewers`、`reviewMinChars`、`reviewKeyword` 取基准提交上的配置（基准上还没有配置时用工作区的值）；分支里改这些字段要合入主干后才生效，工作区的值与生效值不同时闸门和推送核对会给提示行。测试命令、glob 等其余字段仍用工作区的值。git 的 pre-push 钩子核对实际推送的提交：分支推送的提交必须是当前 HEAD 或已在基准分支里，`git push origin 别的分支` 会被拒绝；标签推送不查引用，只删除远端引用（分支或标签）的推送直接放行。
 
-- `pre-push`（默认）：`gate.mjs` 通过后由独立子代理复审，`review.mjs pass|fail --reviewer <名> --report <报告> --summary "<一句话>"` 登记；推送时核对静态检查、测试记录和复审记录，两份记录都绑定当前代码树和基线（`changedFiles` 做 diff 的基准提交；基准分支设置 `modules.gate.base` 以默认主干上的配置为准，分支里改它不生效，工作区的值与之不同时闸门和推送核对会提示一行）：合入新主干、变基后基线变了，旧记录作废，要重跑闸门并重新复审（没有基线字段的旧记录同样不认）。git 的 pre-push 钩子还核对实际推送的提交：分支推送的提交必须是当前 HEAD 或已在基准分支里，`git push origin 别的分支` 会被拒绝；标签推送不查引用，只删除远端分支的推送直接放行。登记时除树哈希和基线外，还写明分支、HEAD 提交号、文档内容哈希和未提交的文件数：树哈希不含文档，只改规则文本这类改动每一轮都相同，靠提交号和文档内容哈希才能把登记对应到具体提交；推送核对认的是树哈希与基线。每次登记另追加到 git 目录下的 `engineering-gate/reviews/log.jsonl`（闸门记录所在的目录，不是 docs 下的记录目录），报告副本放在同目录的 `branches/<分支>/` 下。合并按项目约定的入口。
-- `pr`：`gate.mjs` 通过后即可推送，推送核对只要求静态检查和与当前代码一致的测试记录。CI 在 PR 最终提交上全部通过（每项检查成功、跳过或中性；一项都没有视为未通过）后按上表分档审查并登记，PR 未打开或 CI 未全过时拒绝登记：
+- `pre-push`（默认）：`gate.mjs` 通过后由独立子代理复审，`review.mjs pass|fail --reviewer <名> --report <报告> --summary "<一句话>"` 登记；推送时核对静态检查、测试记录和复审记录，两份记录都绑定当前代码树和基线（`changedFiles` 做 diff 的基准提交）：合入新主干、变基后基线变了，旧记录作废，要重跑闸门并重新复审（没有基线字段的旧记录同样不认）。登记时除树哈希和基线外，还写明分支、HEAD 提交号、文档内容哈希和未提交的文件数：树哈希不含文档，只改规则文本这类改动每一轮都相同，靠提交号和文档内容哈希才能把登记对应到具体提交；推送核对认的是树哈希与基线。每次登记另追加到 git 目录下的 `engineering-gate/reviews/log.jsonl`（闸门记录所在的目录，不是 docs 下的记录目录），报告副本放在同目录的 `branches/<分支>/` 下。合并按项目约定的入口。
+- `pr`：`gate.mjs` 通过后即可推送，推送核对只要求静态检查和与当前代码、当前基线一致的测试记录。CI 在 PR 最终提交上全部通过（每项检查成功、跳过或中性；一项都没有视为未通过）后按上表分档审查并登记，PR 未打开或 CI 未全过时拒绝登记：
   - 代码复审：`review.mjs pass|fail --pr <编号> --kind code --reviewer <名> --report <报告> --summary "<一句话>"`。
   - 一致性审：同上，`--kind consistency`；按分档可延期时用 `review.mjs defer --pr <编号> --kind consistency --reason "<理由>"`。
   - 合并：`merge.mjs <编号> [--method squash|merge|rebase]`。PR 打开、CI 全过、代码复审为 pass、一致性审为 pass 或延期、两份记录的提交都等于当前最终提交，才执行 `gh pr merge --match-head-commit`（默认 squash 并删除远端分支）；否则逐条列出原因，不合并。PR 又有新提交时记录过期，重新审查后再登记。

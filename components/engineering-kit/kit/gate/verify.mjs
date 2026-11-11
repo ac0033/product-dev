@@ -3,7 +3,7 @@
 //   复审流程为 pr（modules.gate.reviewFlow）时不要求复审记录：复审在 CI 通过后针对 PR 最终提交进行，由 merge.mjs 核对。
 // 闸门范围的口径见 lib.mjs 的 gateScope：本次改动中去掉文档的部分，判定文档用基准提交上配置的 reviewIgnore，
 //   项目配置、豁免表和 scripts/engineering/** 永远在范围内；基准分支设置取默认主干上的配置（lib.mjs 的 loadConfig），
-//   工作区写的 base 与它不同时给一行提示。只改文档的推送直接放行。
+//   判定策略（reviewIgnore、reviewFlow 等）取基准提交上的配置，工作区写的值与生效值不同时给提示行。只改文档的推送直接放行。
 // 范围内有未提交改动、基准分支解析不了时拒绝。失败时列出阻塞原因，退出码 1。
 // git pre-push 钩子带 --pre-push 调用：另从 stdin 读取实际要推送的引用，分支推送的提交必须是当前 HEAD
 //   （闸门核对的就是它）或已在基准分支里；标签推送不查引用，但工作区核对照常；只删除远端引用的推送直接放行。
@@ -58,12 +58,11 @@ export function newFileProblems(root, config, exempt) {
 
 /**
  * 核对推送条件（工作区与记录）。返回 { ok, problems, note }。记录的基线（base）与当前基准提交不同、或旧记录没有基线时都不认。
- * 工作区配置的 base 与生效值（默认主干上的设置）不同时，note 里多一行提示（不算错误）。
+ * 工作区配置的 base 或判定策略字段与生效值不同时，note 里多提示行（不算错误）。config 可由调用方传入（只读一次）。
  */
-export function verify({ root }) {
-  const config = loadConfig(root);
+export function verify({ root, config = loadConfig(root) }) {
   const res = verifyWith(root, config);
-  return { ...res, note: [config.baseNote, res.note].filter(Boolean).join('\n') };
+  return { ...res, note: [...config.notes, res.note].filter(Boolean).join('\n') };
 }
 
 /** verify 的核对本身（配置由调用方读取）。 */
@@ -146,7 +145,7 @@ export function pushRefProblems(root, config, updates) {
     if (baseTip && git(root, ['merge-base', '--is-ancestor', u.localSha, baseTip]).ok) continue;
     problems.push(
       `推送的提交 ${u.localSha.slice(0, 12)}（${u.localRef} → ${u.remoteRef}）不是当前检出的提交，也不在基准分支 ${baseTip || '（无）'} 里：` +
-        `闸门只核对当前检出的 HEAD（${headSha ? headSha.slice(0, 12) : '尚无提交'}），请切到要推送的分支，跑闸门、复审后再推送`,
+        `闸门只核对当前检出的 HEAD（${headSha ? headSha.slice(0, 12) : '尚无提交'}），请切到要推送的分支（或到检出该分支的工作树里）跑闸门、复审后再推送`,
     );
   }
   return problems;
@@ -159,8 +158,9 @@ export function pushRefProblems(root, config, updates) {
 export function verifyPush({ root, stdin }) {
   const updates = parsePushUpdates(stdin);
   if (onlyDeletes(updates)) return { ok: true, problems: [], note: '只删除远端引用，不上传提交，无需核对' };
-  const refProblems = pushRefProblems(root, loadConfig(root), updates);
-  const res = verify({ root });
+  const config = loadConfig(root);
+  const refProblems = pushRefProblems(root, config, updates);
+  const res = verify({ root, config });
   const problems = [...refProblems, ...res.problems];
   return { ok: problems.length === 0, problems, note: res.note };
 }

@@ -1,8 +1,8 @@
 // 工程闸门共享函数：读取配置与豁免、判定改动范围、计算代码树哈希、读写记录、获取全局锁、读取 PR 状态（gh）。
 // 业务含义：闸门要回答三件事——这次改动了哪些文件（范围）、这些文件现在的内容是什么（树哈希）、
 // 测试与复审记录是不是针对这份内容、这个基准提交做的（绑定）。范围只有一个口径（gateScope）：
-// 判定文档用的 reviewIgnore 取基准提交上的配置（分支改自己的配置豁免不了自己），配置、豁免表和套件脚本永远在范围内；
-// 基准分支设置（base）取默认主干上的配置，在 loadConfig 里统一得出（分支把 base 指向自己也让范围变不空）。
+// 配置、豁免表和套件脚本永远在范围内。判定依据不由被审分支决定，在 loadConfig 一处得出：基准分支设置（base）取默认主干上的配置，
+// 判定策略字段（POLICY_KEYS：reviewIgnore、reviewFlow、reviewers、reviewMinChars、reviewKeyword）取基准提交上的配置。
 // 只读 git 与工作区，写入只发生在 git 目录下的记录目录里，
 // 不污染工作区。测试与推送前复审记录放在各工作树自己的 git 目录（互不覆盖）；全局锁与 PR 审查记录（pr 流程）
 // 放在 git 公共目录：同一仓库同时只跑一个闸门，PR 的复审与合并可以在不同工作树进行。
@@ -54,11 +54,37 @@ export function gitCommonDir(root) {
 }
 
 /**
+ * 判定策略字段：决定“这次改动要不要过闸门、怎样才算复审通过”的配置项。它们不能由被审分支自己决定，
+ * 生效值取基准提交上的配置（见 loadConfig）。其余字段（testCommand、testEnv、sourceGlobs、testGlobs、commentMode、
+ * layout、hygiene 等）仍用工作区的值：它们随功能分支一起变化是正常的（新加语言、改测试命令），而且配置文件
+ * 永远在闸门范围内，改了就要过测试与复审，会被复审者看到。base 另由默认主干上的配置决定（mainlineBase）。
+ */
+export const POLICY_KEYS = ['reviewIgnore', 'reviewFlow', 'reviewers', 'reviewMinChars', 'reviewKeyword'];
+
+/**
+ * 读取某个提交上的项目配置并展开。该提交上没有配置文件时返回 null；读不出或不合法时抛错（失败不放行），
+ * 错误信息里写明 label（例如“默认主干 main”“基准提交 1a2b3c”）。
+ */
+function configAt(root, rev, label) {
+  if (!git(root, ['cat-file', '-e', `${rev}:${CONFIG_FILE}`]).ok) return null;
+  const r = git(root, ['show', `${rev}:${CONFIG_FILE}`]);
+  if (!r.ok) throw new Error(`无法读取${label}上的 ${CONFIG_FILE}：${r.err.trim()}`);
+  try {
+    return normalizeConfig(JSON.parse(r.out));
+  } catch (e) {
+    throw new Error(`${label}上的 ${CONFIG_FILE} 无法展开：${e.message}`);
+  }
+}
+
+/**
  * 读取项目配置（profile 结构或旧版扁平结构）并展开为有效配置；缺失、不是合法 JSON 或结构错误时报错。
- * 基准分支设置（base）不由被审分支决定：生效值取默认主干上的配置（见 mainlineBase），所有解析基准的地方
- * （gateScope、newFiles、推送引用核对、合并入口、巡检）都经这里拿到同一个值。返回的配置另带：
- *   worktreeBase  工作区配置里写的 base
- *   baseNote      两者不同时给使用者的一行提示（不算错误），相同时为 null
+ * 闸门的判定依据不由被审分支决定，在这里一处得出，gate、verify、review、merge、hygiene 和钩子拿到的都是同一份生效值：
+ *   base           取默认主干上的配置（mainlineBase）；找不到默认主干或主干上没有配置时用工作区的值。
+ *   POLICY_KEYS    再用生效的 base 算出基准提交（baseRevision），取该提交上的配置；基准是空树或该提交上没有配置
+ *                  （首次安装）时用工作区的值。
+ * 主干或基准提交上的配置读不出、不合法时抛错。基准分支解析不了时不在这里抛错（巡检、编辑钩子仍要能用）：
+ * 判定策略保持工作区的值并记下 policyError，判定入口（gate、verify、review、merge）调用 assertPolicy 拒绝运行。
+ * 返回的配置另带：worktree（工作区里这些字段的原值）、notes（工作区值与生效值不同时的提示行，不算错误）、policyError。
  */
 export function loadConfig(root) {
   const file = path.join(root, CONFIG_FILE);
@@ -70,12 +96,38 @@ export function loadConfig(root) {
     throw new Error(`${CONFIG_FILE} 不是合法 JSON：${e.message}`);
   }
   const config = normalizeConfig(user);
+  const worktree = { base: config.base };
+  for (const k of POLICY_KEYS) worktree[k] = config[k];
+  const notes = [];
+
   const main = mainlineBase(root);
   const base = main ? main.base : config.base;
-  const baseNote = base === config.base
-    ? null
-    : `提示：工作区配置的 modules.gate.base 是 ${JSON.stringify(config.base)}，闸门以默认主干 ${main.ref} 上的设置 ${JSON.stringify(base)} 为准；要改基准，须先在主干上改配置`;
-  return { ...config, base, worktreeBase: config.base, baseNote };
+  if (base !== config.base) {
+    notes.push(`提示：工作区配置的 modules.gate.base 是 ${JSON.stringify(config.base)}，闸门以默认主干 ${main.ref} 上的设置 ${JSON.stringify(base)} 为准；要改基准，须先在主干上改配置`);
+  }
+
+  const policy = {};
+  let policyError = null;
+  let rev = null;
+  try {
+    rev = baseRevision(root, base).rev;
+  } catch (e) {
+    policyError = e.message; // 只有基准分支解析不了走这里；基准上的配置不合法时下面的 configAt 直接抛错
+  }
+  const atBase = rev && rev !== EMPTY_TREE ? configAt(root, rev, `基准提交 ${rev.slice(0, 12)} `) : null;
+  if (atBase) {
+    for (const k of POLICY_KEYS) policy[k] = atBase[k];
+    const differ = POLICY_KEYS.filter((k) => JSON.stringify(atBase[k]) !== JSON.stringify(config[k]));
+    if (differ.length > 0) {
+      notes.push(`提示：工作区配置的 ${differ.join('、')} 与基准提交 ${rev.slice(0, 12)} 上的不同，闸门按基准上的值判定；这些改动合入主干后才生效`);
+    }
+  }
+  return { ...config, ...policy, base, worktree, notes, policyError };
+}
+
+/** 判定入口（gate、verify、review、merge）调用：判定策略没能从基准提交取得（基准分支解析不了）时抛错，不按工作区的值放行。 */
+export function assertPolicy(config) {
+  if (config.policyError) throw new Error(`无法取得基准提交上的判定策略：${config.policyError}`);
 }
 
 /**
@@ -87,14 +139,8 @@ export function loadConfig(root) {
 export function mainlineBase(root) {
   const ref = AUTO_BASE_CANDIDATES.find((c) => git(root, ['rev-parse', '--verify', '--quiet', `${c}^{commit}`]).ok);
   if (!ref) return null;
-  if (!git(root, ['cat-file', '-e', `${ref}:${CONFIG_FILE}`]).ok) return null;
-  const r = git(root, ['show', `${ref}:${CONFIG_FILE}`]);
-  if (!r.ok) throw new Error(`无法读取默认主干 ${ref} 上的 ${CONFIG_FILE}：${r.err.trim()}`);
-  try {
-    return { ref, base: normalizeConfig(JSON.parse(r.out)).base };
-  } catch (e) {
-    throw new Error(`默认主干 ${ref} 上的 ${CONFIG_FILE} 无法展开：${e.message}`);
-  }
+  const cfg = configAt(root, ref, `默认主干 ${ref} `);
+  return cfg ? { ref, base: cfg.base } : null;
 }
 
 /** 读取豁免表；没有则为空。豁免只放行被列出的路径，不影响其他文件。 */
@@ -256,35 +302,19 @@ export function isIgnoredDoc(rel, reviewIgnore) {
 }
 
 /**
- * 判定闸门范围用的 reviewIgnore：取基准提交上的项目配置（分支自己的改动不能决定自己要不要过闸门）；
- * 基准是空树或基准上没有配置文件（例如首次安装套件）时，才用工作区配置的值。
- * 基准上的配置读不出或不合法时抛错（失败不放行）。
- */
-export function baseReviewIgnore(root, rev, fallback) {
-  if (rev === EMPTY_TREE) return fallback;
-  if (!git(root, ['cat-file', '-e', `${rev}:${CONFIG_FILE}`]).ok) return fallback;
-  const r = git(root, ['show', `${rev}:${CONFIG_FILE}`]);
-  if (!r.ok) throw new Error(`无法读取基准提交 ${rev.slice(0, 12)} 上的 ${CONFIG_FILE}：${r.err.trim()}`);
-  try {
-    return normalizeConfig(JSON.parse(r.out)).reviewIgnore;
-  } catch (e) {
-    throw new Error(`基准提交 ${rev.slice(0, 12)} 上的 ${CONFIG_FILE} 无法展开：${e.message}`);
-  }
-}
-
-/**
- * 闸门范围（gate、verify、review 三处共用的唯一口径）。返回：
+ * 闸门范围（gate、verify、review 三处共用的唯一口径）。config 必须来自 loadConfig（其中的 base 与 reviewIgnore 已是生效值）。返回：
  *   baseRev      基准提交（changedFiles 做 diff 用的那个），写进记录作为基线
  *   changed      本次全部改动
- *   reviewIgnore 判定用的 reviewIgnore（基准提交上的配置版本，见 baseReviewIgnore）
+ *   reviewIgnore 判定用的 reviewIgnore（基准提交上的配置版本，由 loadConfig 得出）
  *   scope        闸门范围：changed 去掉文档（isIgnoredDoc）的部分，参与树哈希绑定
  *   docs         changed 里的文档部分
  * 工作区配置的其他字段（测试命令、glob 等）照常由调用方使用。
  */
 export function gateScope(root, config) {
+  assertPolicy(config);
   const { rev } = baseRevision(root, config.base);
   const changed = changedSince(root, rev);
-  const reviewIgnore = baseReviewIgnore(root, rev, config.reviewIgnore);
+  const { reviewIgnore } = config;
   const scope = changed.filter((f) => !isIgnoredDoc(f, reviewIgnore));
   const docs = changed.filter((f) => isIgnoredDoc(f, reviewIgnore));
   return { baseRev: rev, changed, reviewIgnore, scope, docs };
