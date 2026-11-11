@@ -1,18 +1,4 @@
-# 本机工具发现目录，不进本仓库
-.agents/*
-# 例外：Codex 的插件市场清单要随仓库发布
-!.agents/plugins/
-
-# 仅本地保留、不随公开仓库发布
-# 个人助手的工作记录
-.workbuddy/
-# 根目录打包产物（与已提交的源码重复）
 /dist/
-# 开发者私人材料（设计稿、交接记录等）
-.notes/
-
-# 只留本机的记录（项目专用流程、试装与验收记录、实践来源：含私有项目名或本机路径）
-product-dev/components/engineering-kit/references/*.local.md
-
-# 第三方组件的原版存档：只存本机，不进公开仓库（清单见 product-dev/COMPONENTS.md）
-/product-dev/vendor/
+/vendor/
+node_modules/
+components/engineering-kit/references/*.local.md

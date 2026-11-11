@@ -1,0 +1,147 @@
+{
+  "note": "由 tools/build-plugin.mjs 生成，不要手改。",
+  "parts": [
+    {
+      "id": "engineering-kit",
+      "dest": "skills/engineering-kit",
+      "component": "engineering-kit",
+      "version": "0.4.0",
+      "license": "MIT",
+      "changes": "头部去掉 disable-model-invocation，加 user-invocable: false",
+      "fileCount": 47,
+      "sha256": "280b1de3420ebf639dab2b0d3987ea2c95944b3b5536af08dffdaef81d504ec3"
+    },
+    {
+      "id": "product-design-orchestrator",
+      "dest": "skills/product-design-orchestrator",
+      "component": "product-design-orchestrator",
+      "version": null,
+      "license": "MIT",
+      "changes": "头部加 user-invocable: false；指向 ../../evals/cases.md 的链接改为仓库网址",
+      "fileCount": 4,
+      "sha256": "acdd0c32f4fd3397e4b221c0afbd9f0dfe6eeca0269f5f559ca338ecced63019"
+    },
+    {
+      "id": "product-discovery-prd",
+      "dest": "skills/product-discovery-prd",
+      "component": "product-discovery-prd",
+      "version": null,
+      "license": "MIT",
+      "changes": "无（头部原本就是 user-invocable: false）",
+      "fileCount": 1,
+      "sha256": "9f4462a96f7e0650da2a7edc62024cce36b7ed7e6b0c53ba0ec713d650bf47be"
+    },
+    {
+      "id": "prototype-design",
+      "dest": "skills/prototype-design",
+      "component": "prototype-design",
+      "version": null,
+      "license": "MIT",
+      "changes": "无（头部原本就是 user-invocable: false）",
+      "fileCount": 1,
+      "sha256": "991ef38cfa5d5519d413dd81f22f59e77839a770317db9dc7a1299c0d3ae3452"
+    },
+    {
+      "id": "system-architecture-design",
+      "dest": "skills/system-architecture-design",
+      "component": "system-architecture-design",
+      "version": null,
+      "license": "MIT",
+      "changes": "无（头部原本就是 user-invocable: false）",
+      "fileCount": 1,
+      "sha256": "c4bb7ead2e9d26f03a3805ca2fdfbb63fbe380adb18a6864c9dc3a793b3e5946"
+    },
+    {
+      "id": "license",
+      "dest": "LICENSE",
+      "component": "仓库根 LICENSE",
+      "version": null,
+      "license": "MIT",
+      "changes": "无",
+      "fileCount": 1,
+      "sha256": "fcdef5ed7a71ddf1d28eadf8d9fbea53b36301103029d77708e60a7da50f65c8"
+    },
+    {
+      "id": "impeccable",
+      "dest": "skills/impeccable",
+      "component": "impeccable",
+      "source": "https://github.com/pbakaus/impeccable",
+      "version": "4.8.2",
+      "commit": "ec229b48547f24685ffb22aa51c462c5ae27908c",
+      "license": "Apache-2.0",
+      "from": [
+        "plugin/skills/impeccable/",
+        "LICENSE",
+        "NOTICE.md"
+      ],
+      "changes": "SKILL.md 头部 user-invocable 由 true 改为 false，并加一行改动说明注释；其余文件原样",
+      "fileCount": 60,
+      "sha256": "6cea75fdf7b9f775e90708241e65456e3689e1502a3fdc981e80d87f432eda03",
+      "executable": [
+        "scripts/impeccable"
+      ]
+    },
+    {
+      "id": "impeccable-agents",
+      "dest": "agents",
+      "component": "impeccable",
+      "source": "https://github.com/pbakaus/impeccable",
+      "version": "4.8.2",
+      "commit": "ec229b48547f24685ffb22aa51c462c5ae27908c",
+      "license": "Apache-2.0",
+      "from": [
+        "plugin/agents/"
+      ],
+      "changes": "无",
+      "fileCount": 4,
+      "sha256": "bc94d28a969b2d25c4e0f3fcfd6abc162ffef2e1ad9c001e7dee4009b4f39efa",
+      "files": [
+        "impeccable-asset-producer.md",
+        "impeccable-documenter.md",
+        "impeccable-finish-reviewer.md",
+        "impeccable-manual-edit-applier.md"
+      ]
+    },
+    {
+      "id": "archify",
+      "dest": "skills/archify",
+      "component": "archify",
+      "source": "https://github.com/tt-a1i/archify",
+      "version": "3.2.0",
+      "commit": "7e45f36c66de1254d5ad6ba1d878f6499ea269fd",
+      "license": "Apache-2.0",
+      "from": [
+        "archify/"
+      ],
+      "excluded": [
+        "examples/*.html（示例图的成品页，只被上游重新生成示例的脚本引用）"
+      ],
+      "changes": "SKILL.md 头部加 user-invocable: false 和一行改动说明注释；排除示例成品页；其余文件原样",
+      "fileCount": 191,
+      "sha256": "844188269fc2d0b1b9b96fdbf2cefd0be8e7ac3c148d54d615f66d52e8266b5c",
+      "executable": [
+        "bin/archify.mjs"
+      ]
+    },
+    {
+      "id": "feature-dev-agents",
+      "dest": "agents",
+      "component": "feature-dev",
+      "source": "https://github.com/anthropics/claude-plugins-official",
+      "version": "1.0.1",
+      "commit": null,
+      "license": "Apache-2.0",
+      "from": [
+        "plugins/feature-dev/agents/"
+      ],
+      "changes": "无",
+      "fileCount": 3,
+      "sha256": "65ece0344968af8c0f4edeb00f2604e944d5ee5c0777eef0aba8f735016ae922",
+      "files": [
+        "code-architect.md",
+        "code-explorer.md",
+        "code-reviewer.md"
+      ]
+    }
+  ]
+}
