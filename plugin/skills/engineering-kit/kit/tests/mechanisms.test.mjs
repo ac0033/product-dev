@@ -170,17 +170,17 @@ test('--affected：依赖清单常量覆盖常见语言（根目录与子目录�
   }
 });
 
-test('--affected：全量之后没有任何范围内文件改动时不跑测试，写一份沿用的记录', () => {
+test('--affected：全量之后没有任何范围内文件改动时沿用全量记录；带 --force 时改跑全量（L2：force 的含义是重跑）', () => {
   const root = groupRepo();
   changeDedup(root, 'v1');
   const full = runGate({ root });
   assert.equal(full.ok, true);
+  assert.ok(runGate({ root, affected: true }).messages.some((m) => /^沿用已有通过记录/.test(m)));
   const res = runGate({ root, affected: true, force: true });
   assert.equal(res.ok, true, res.messages.join('\n'));
-  assert.equal(res.record.mode, 'affected');
-  assert.deepEqual(res.record.groups, []);
-  assert.equal(res.record.command, null);
-  assert.ok(res.messages.some((m) => /没有改动.*未运行测试/.test(m)), res.messages.join('\n'));
+  assert.equal(res.record.mode, 'full');
+  assert.match(logOf(res), /RAN-FULL/);
+  assert.ok(res.messages.some((m) => /改跑全量.*--force/.test(m)), res.messages.join('\n'));
 });
 
 // ---------- 2. 结果复用 ----------
@@ -523,4 +523,115 @@ test('基准分支解析不了时，合并入口与 pr 流程的复审登记都�
   assert.throws(() => mergePr({ root, pr: '7', gh }), /无法取得基准提交上的判定策略/);
   assert.throws(() => prReg(root, gh, 'code', 'pass'), /无法取得基准提交上的判定策略/);
   assert.equal(gh.calls.length, 0);
+});
+
+// ---------- 0.6.0 首轮复审：改名检测让旧路径从改动列表消失（H1、M1、T1）及低级问题（L1、L2、L4、L5） ----------
+
+/** git mv（先建好目标目录：git mv 不会自动建目录）。 */
+function gitMv(root, from, to) {
+  fs.mkdirSync(path.dirname(path.join(root, to)), { recursive: true });
+  git(root, ['mv', from, to]);
+}
+
+/** pr 流程仓库：功能分支上提交一份代码改动 A，登记代码复审与一致性审（都针对 A）。返回 { root, gh, state, a }。 */
+function reviewedPr(extra = () => {}) {
+  const root = featureRepo({ reviewFlow: 'pr' });
+  changeDedup(root);
+  extra(root);
+  commitAll(root, 'feat');
+  const a = git(root, ['rev-parse', 'HEAD']).trim();
+  const state = { head: a, files: ['src/dedup.ts', 'test/dedup.test.ts'] };
+  const gh = ghFor(state);
+  assert.equal(prReg(root, gh, 'code', 'pass').ok, true);
+  assert.equal(prReg(root, gh, 'consistency', 'pass').ok, true);
+  return { root, gh, state, a };
+}
+
+/** 提交一个新增量，PR 最终提交指向它，并对它补登一致性审（一致性审本来就须针对最终提交）。 */
+function pushDelta(ctx, mutate) {
+  mutate(ctx.root);
+  commitAll(ctx.root, 'delta');
+  ctx.state.head = git(ctx.root, ['rev-parse', 'HEAD']).trim();
+  assert.equal(prReg(ctx.root, ctx.gh, 'consistency', 'pass').ok, true);
+  return mergePr({ root: ctx.root, pr: '7', gh: ctx.gh });
+}
+
+test('改名（H1）：代码复审后把测试或套件脚本 git mv 到 docs/ 下，不算只改文档，代码复审记录过期', () => {
+  for (const [from, to] of [['test/dedup.test.ts', 'docs/04-开发/dedup.test.ts'], ['scripts/engineering/gate/verify.mjs', 'docs/04-开发/verify.mjs']]) {
+    const ctx = reviewedPr((root) => write(root, 'scripts/engineering/gate/verify.mjs', '// 闸门脚本：推送核对。\nexport const v = 1;\n'));
+    const res = pushDelta(ctx, (root) => gitMv(root, from, to));
+    assert.equal(res.ok, false, `${from} → ${to} 被当成只改文档：${JSON.stringify(res)}`);
+    assert.ok(res.problems.some((p) => p.startsWith('代码复审记录已过期')), res.problems.join('\n'));
+  }
+});
+
+test('删除 ALWAYS_IN_SCOPE 文件（豁免表）的增量不算只改文档', () => {
+  const ctx = reviewedPr((root) => write(root, 'scripts/engineering/exempt.json', JSON.stringify({ testFirst: {} })));
+  const res = pushDelta(ctx, (root) => git(root, ['rm', '-q', 'scripts/engineering/exempt.json']));
+  assert.equal(res.ok, false, JSON.stringify(res));
+  assert.ok(res.problems.some((p) => p.startsWith('代码复审记录已过期')), res.problems.join('\n'));
+});
+
+test('改名（H1）：只把代码 git mv 进 docs/ 的 PR 不被当成只改文档的 PR（gh 的文件列表只给新路径也一样）', () => {
+  const root = featureRepo({ reviewFlow: 'pr' });
+  gitMv(root, 'src/dedup.ts', 'docs/04-开发/dedup.ts');
+  commitAll(root, 'mv');
+  const gh = ghFor({ head: git(root, ['rev-parse', 'HEAD']).trim(), files: ['docs/04-开发/dedup.ts'] });
+  const res = mergePr({ root, pr: '7', gh });
+  assert.equal(res.ok, false, JSON.stringify(res));
+  assert.ok(res.problems.some((p) => p.includes('缺少代码复审记录')), res.problems.join('\n'));
+});
+
+test('只改文档的 PR 以本地差异判定：最终提交在本地且只改文档时不要求审查；本地没有该提交时按含代码处理', () => {
+  const root = featureRepo({ reviewFlow: 'pr' });
+  write(root, 'docs/04-开发/说明.md', '说明\n');
+  commitAll(root, 'docs');
+  const head = git(root, ['rev-parse', 'HEAD']).trim();
+  assert.equal(mergePr({ root, pr: '7', gh: ghFor({ head, files: ['docs/04-开发/说明.md'] }) }).ok, true);
+  const res = mergePr({ root, pr: '7', gh: ghFor({ head: 'd'.repeat(40), files: ['docs/04-开发/说明.md'] }) });
+  assert.equal(res.ok, false, 'gh 的列表不再作为只改文档的依据');
+  assert.ok(res.problems.some((p) => p.includes('缺少代码复审记录')), res.problems.join('\n'));
+});
+
+test('改名（M1）：把一个分组的文件 git mv 到另一个分组后，--affected 两个分组都跑', () => {
+  const groups = [
+    { name: 'a', paths: ['a/**'], command: 'node run-dedup.mjs' },
+    { name: 'b', paths: ['b/**'], command: 'node run-rank.mjs' },
+  ];
+  const root = groupRepo({ testGroups: groups });
+  git(root, ['checkout', '-q', 'main']);
+  write(root, 'a/data.txt', '数据\n');
+  commitAll(root, 'a');
+  git(root, ['checkout', '-q', 'feat']);
+  git(root, ['rebase', '-q', 'main']);
+  write(root, 'a/note.txt', 'x\n');
+  assert.equal(runGate({ root }).ok, true);
+  gitMv(root, 'a/data.txt', 'b/data.txt');
+  commitAll(root, 'mv');
+  const res = runGate({ root, affected: true });
+  assert.equal(res.ok, true, res.messages.join('\n'));
+  assert.ok(res.record.mode === 'full' || (res.record.groups.includes('a') && res.record.groups.includes('b')), JSON.stringify(res.record.groups));
+  assert.ok('a/data.txt' in res.record.files, '改名的旧路径以删除进入范围');
+  assert.equal(res.record.files['a/data.txt'], 'deleted');
+});
+
+test('L1：同一代码树、同一基线的全量测试上次未通过时，--affected 改跑全量并写明原因', () => {
+  const root = groupRepo();
+  changeDedup(root, 'v1');
+  assert.equal(runGate({ root }).ok, true);
+  changeDedup(root, 'v2');
+  const aff = runGate({ root, affected: true });
+  assert.equal(aff.record.mode, 'affected');
+  writeRecord(root, 'tests.json', { ...aff.record, mode: 'full', groups: [], passed: false, exitCode: 1 });
+  const res = runGate({ root, affected: true });
+  assert.equal(res.record.mode, 'full', res.messages.join('\n'));
+  assert.ok(res.messages.some((m) => /改跑全量.*全量测试.*未通过/.test(m)), res.messages.join('\n'));
+});
+
+test('L4、L5：断言痕迹补更多写法并排除 require.resolve 等；用例计数不把正则的 .test( 算进去', () => {
+  for (const t of ['Assert.AreEqual(1, a);', 'Assert.That(a, Is.EqualTo(1));', 'XCTAssertEqual(a, 1)', 'a shouldBe 1', 'shouldThrow<IllegalStateException> { f() }', 'assert_equal 1, a', 'assert_raises ValueError']) {
+    assert.ok(hasAssertion(t), t);
+  }
+  for (const t of ["const p = require.resolve('x');", 'delete require.cache[k];', 'if (require.main === module) run();']) assert.ok(!hasAssertion(t), t);
+  assert.equal(countTestCases("if (/x/.test(s)) {}\nre.test(y);\ntest('a', () => {});\n"), 1);
 });

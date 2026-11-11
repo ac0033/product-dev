@@ -7,7 +7,7 @@
 //   全量（默认）     运行配置的 testCommand。通过的全量记录另存 tests-full.json，记下当时范围内每个文件的内容哈希。
 //   按影响范围（--affected）以最近一次通过的全量记录为起点，算出此后改动的文件，只运行命中的测试分组（modules.gate.testGroups）；
 //                    没有分组、没有可用的全量记录、基线或测试配置变了、改动不属于任何分组、涉及配置与套件脚本或依赖清单时，
-//                    自动改跑全量并写明原因。此后范围内没有改动时不跑测试，写一份沿用的记录。
+//                    自动改跑全量并写明原因；这份代码上次全量未通过、或带 --force 而此后没有改动时也改跑全量。改动文件按 diffNames 取（改名算删除加新增）。
 // 结果复用：已有通过的记录且代码树、基线、测试配置摘要（testCommand、testEnv、testGroups）都一致、模式满足要求
 //   （要全量时须是全量记录）时不重跑，输出“沿用已有通过记录”；--force 强制重跑。静态检查两种模式、复用与否都照常做。
 // 闸门范围的口径见 lib.mjs 的 gateScope；基准分支设置取默认主干上的配置，判定策略（reviewIgnore 等）取基准提交上的配置，
@@ -102,15 +102,22 @@ function reusable(root, { hash, baseRev, digest, affected }) {
 /**
  * 按影响范围测试的计划：返回 { mode: 'full', reason } 或 { mode: 'affected', full, changed, groups }。
  * 改动文件 = 当前范围内文件的内容哈希与全量记录里的不同（新增、修改、删除，以及回到与基准相同而离开范围的）。
+ * 另两种改跑全量：tests.json 是这份代码（同一树哈希、同一基线）的全量运行且未通过——手里已有全量失败的反证，
+ * 只跑分组会得到与之矛盾的通过记录；带了 --force 而此后没有任何改动——force 的含义是重跑，不能什么都不跑就写通过。
  */
-function planAffected(root, config, { files, baseRev, digest }) {
+function planAffected(root, config, { files, hash, baseRev, digest, force }) {
   if (!config.testGroups || config.testGroups.length === 0) return { mode: 'full', reason: '没有配置测试分组（modules.gate.testGroups）' };
+  const last = readRecord(root, 'tests.json');
+  if (last && last.mode === 'full' && !last.passed && last.treeHash === hash && last.base === baseRev) {
+    return { mode: 'full', reason: '这份代码（同一代码树、同一基线）上次的全量测试未通过' };
+  }
   const full = readRecord(root, FULL_RECORD);
   if (!full || !full.passed || full.mode !== 'full' || !full.files) return { mode: 'full', reason: '没有可用的全量通过记录' };
   if (full.base !== baseRev) return { mode: 'full', reason: '基线（基准提交）与全量记录不同' };
   if (full.configDigest !== digest) return { mode: 'full', reason: '测试命令、环境变量或测试分组与全量记录不同' };
   const keys = [...new Set([...Object.keys(full.files), ...Object.keys(files)])].sort();
   const changed = keys.filter((f) => (full.files[f] ?? 'absent') !== (files[f] ?? 'absent'));
+  if (changed.length === 0 && force) return { mode: 'full', reason: '带了 --force，而全量记录之后没有改动：按要求重跑全量' };
   const always = changed.filter((f) => matchesAny(f, ALWAYS_IN_SCOPE));
   if (always.length > 0) return { mode: 'full', reason: `改动涉及配置、豁免表或套件脚本：${listSome(always)}` };
   const deps = changed.filter((f) => matchesAny(f, DEPENDENCY_FILES));
@@ -217,7 +224,7 @@ function runChecks({ root, config, affected = false, force = false }) {
       }
     }
 
-    const plan = affected ? planAffected(root, config, { files, baseRev, digest }) : { mode: 'full' };
+    const plan = affected ? planAffected(root, config, { files, hash: beforeHash, baseRev, digest, force }) : { mode: 'full' };
     const messages = [...passLines];
     if (plan.reason) messages.push(`改跑全量：${plan.reason}`);
     fs.mkdirSync(recordDir(root), { recursive: true });

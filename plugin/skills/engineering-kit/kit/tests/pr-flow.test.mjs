@@ -281,14 +281,18 @@ test('验收 10：pr 流程项目同步后有 merge.mjs、冒烟通过；回滚�
 });
 
 test('只改文档的 PR：没有任何审查记录、CI 全过时合并；CI 未过时拒绝', () => {
+  // 0.6.0 起“只改文档”按本地差异判定：PR 的最终提交要在临时仓库里真的存在
   const root = prRepo();
   const docs = ['README.md', 'docs/04-开发/note.md'];
-  const gh = fakeGh(prView({ files: docs }));
+  for (const f of docs) write(root, f, '说明\n');
+  commitAll(root, 'docs');
+  const head = git(root, ['rev-parse', 'HEAD']).trim();
+  const gh = fakeGh(prView({ files: docs, head }));
   const res = mergePr({ root, pr: '7', gh });
   assert.equal(res.ok, true, JSON.stringify(res.problems));
-  assert.deepEqual(gh.calls.at(-1), ['pr', 'merge', '7', '--squash', '--match-head-commit', HEAD, '--delete-branch']);
+  assert.deepEqual(gh.calls.at(-1), ['pr', 'merge', '7', '--squash', '--match-head-commit', head, '--delete-branch']);
 
-  const red = fakeGh(prView({ files: docs, checks: [...GREEN, { __typename: 'CheckRun', name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] }));
+  const red = fakeGh(prView({ files: docs, head, checks: [...GREEN, { __typename: 'CheckRun', name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' }] }));
   const r2 = mergePr({ root, pr: '7', gh: red });
   assert.equal(r2.ok, false);
   assert.ok(r2.problems.some((p) => p.includes('CI 检查未通过')), r2.problems.join('\n'));
@@ -296,19 +300,31 @@ test('只改文档的 PR：没有任何审查记录、CI 全过时合并；CI �
 });
 
 test('文档与代码混合的 PR 没有审查记录时拒绝合并', () => {
-  const gh = fakeGh(prView({ files: ['README.md', 'src/dedup.ts'] }));
-  const res = mergePr({ root: prRepo(), pr: '7', gh });
+  // 0.6.0 起按本地差异判定，混合改动在临时仓库里真的提交出来（否则最终提交不在本地，结论不说明问题）
+  const root = prRepo();
+  write(root, 'README.md', '# 说明\n');
+  write(root, 'src/dedup.ts', `${SRC_HEADER}export const x = 1;\n`);
+  commitAll(root, 'mixed');
+  const gh = fakeGh(prView({ files: ['README.md', 'src/dedup.ts'], head: git(root, ['rev-parse', 'HEAD']).trim() }));
+  const res = mergePr({ root, pr: '7', gh });
   assert.equal(res.ok, false);
   assert.ok(res.problems.some((p) => p.includes('缺少代码复审记录')), res.problems.join('\n'));
   assert.equal(merged(gh), false);
 });
 
-test('文件列表为空或达到 100 个（可能被截断）时不按只改文档处理', () => {
-  for (const files of [[], Array.from({ length: 100 }, (_, i) => `docs/n${i}.md`)]) {
-    const gh = fakeGh(prView({ files }));
-    const res = mergePr({ root: prRepo(), pr: '7', gh });
-    assert.equal(res.ok, false, `文件数 ${files.length}`);
-    assert.ok(res.problems.some((p) => p.includes('缺少代码复审记录')), res.problems.join('\n'));
-    assert.equal(merged(gh), false);
-  }
+test('本地没有 PR 最终提交、或本地差异为空时不按只改文档处理（gh 的文件列表不作依据）', () => {
+  // 0.6.0 前这里测的是 gh 文件列表为空或达到 100 个；现在 gh 的列表不再作为“只改文档”的依据，改测两种算不出或为空的本地情况
+  const docs = Array.from({ length: 3 }, (_, i) => `docs/n${i}.md`);
+  const gh = fakeGh(prView({ files: docs })); // 最终提交 a…a 不在本地
+  const res = mergePr({ root: prRepo(), pr: '7', gh });
+  assert.equal(res.ok, false);
+  assert.ok(res.problems.some((p) => p.includes('缺少代码复审记录')), res.problems.join('\n'));
+  assert.equal(merged(gh), false);
+
+  const root = prRepo(); // 功能分支上没有任何提交：最终提交就是基准提交，差异为空
+  const empty = fakeGh(prView({ files: docs, head: git(root, ['rev-parse', 'HEAD']).trim() }));
+  const r2 = mergePr({ root, pr: '7', gh: empty });
+  assert.equal(r2.ok, false);
+  assert.ok(r2.problems.some((p) => p.includes('缺少代码复审记录')), r2.problems.join('\n'));
+  assert.equal(merged(empty), false);
 });

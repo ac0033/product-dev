@@ -187,28 +187,38 @@ export function changedFiles(root, base) {
   return changedSince(root, baseRevision(root, base).rev);
 }
 
-/** 相对给定基准提交（或空树）的全部改动，口径同 changedFiles。 */
+/**
+ * 套件里所有“改动了哪些文件”都经这里取：git diff --no-renames --name-only <args>。返回 { ok, files, err }（files 为斜杠路径）。
+ * 业务含义：git 默认开启改名检测，改名只列出新路径，旧路径从改动列表里消失——代码 git mv 进 docs/ 就像“只改了文档”，
+ * 文件从一个测试分组改名到另一个分组时旧分组不跑。固定 --no-renames，改名一律表现为“旧路径删除 + 新路径新增”。
+ */
+export function diffNames(root, args) {
+  const r = git(root, ['diff', '--no-renames', '--name-only', ...args]);
+  return { ok: r.ok, files: r.ok ? pathLines(r.out) : [], err: r.err };
+}
+
+/** 相对给定基准提交（或空树）的全部改动，口径同 changedFiles。改名按旧路径删除加新路径新增计（diffNames）。 */
 function changedSince(root, rev) {
   const set = new Set();
   if (git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).ok) {
-    for (const f of pathLines(git(root, ['diff', '--name-only', rev, 'HEAD']).out)) set.add(f);
-    for (const f of pathLines(git(root, ['diff', '--name-only', 'HEAD']).out)) set.add(f);
+    for (const f of diffNames(root, [rev, 'HEAD']).files) set.add(f);
+    for (const f of diffNames(root, ['HEAD']).files) set.add(f);
   }
   for (const f of pathLines(git(root, ['ls-files', '--others', '--exclude-standard']).out)) set.add(f);
   return [...set].sort();
 }
 
 /**
- * 本次新增的文件：未跟踪的文件，加上相对基准提交新增或改名而来的文件（改名后的新路径也算新文件，
- * 否则 git mv 进不允许的位置就绕过了位置检查）。比较的是基准提交与工作区，已提交、已暂存的都算。
+ * 本次新增的文件：未跟踪的文件，加上相对基准提交新增的文件。diffNames 不做改名检测，改名后的新路径自然算新增
+ * （否则 git mv 进不允许的位置就绕过了位置检查）。比较的是基准提交与工作区，已提交、已暂存的都算。
  */
 export function newFiles(root, base) {
   const out = new Set(pathLines(git(root, ['ls-files', '--others', '--exclude-standard']).out));
   if (git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).ok) {
     const { rev } = baseRevision(root, base);
-    const r = git(root, ['diff', '-M', '--name-only', '--diff-filter=AR', rev]);
+    const r = diffNames(root, ['--diff-filter=A', rev]);
     if (!r.ok) throw new Error(`无法读取新增文件（git diff 失败）：${r.err.trim()}`);
-    for (const f of pathLines(r.out)) out.add(f);
+    for (const f of r.files) out.add(f);
   }
   return [...out].sort();
 }

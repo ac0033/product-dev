@@ -106,11 +106,11 @@ test('漏洞 1b：review.mjs 与 gate.mjs 同一口径（工作区改 reviewIgno
 });
 
 /** 假的 gh：pr view 返回给定文件列表的打开 PR（CI 全过），其余命令成功。 */
-function fakeGh(files) {
+function fakeGh(files, head = 'a'.repeat(40)) {
   const calls = [];
   const view = {
     state: 'OPEN',
-    headRefOid: 'a'.repeat(40),
+    headRefOid: head,
     statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }],
     files: files.map((p) => ({ path: p })),
   };
@@ -123,21 +123,29 @@ function fakeGh(files) {
 }
 
 test('漏洞 1c：merge.mjs 判断“只改文档”用基准上的 reviewIgnore；含配置文件的 PR 不算只改文档', () => {
+  // 0.6.0 起“只改文档”按本地的基准提交到 PR 最终提交的差异判定（不再用 gh 的文件列表），所以每种 PR 都在临时仓库里真的提交出来
   const root = featureRepo({ reviewFlow: 'pr' });
-  // 工作区（PR 分支）把 reviewIgnore 改成 **：合并入口不能因此跳过审查
-  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, reviewFlow: 'pr', reviewIgnore: ['**'] }, null, 2));
-  const gh = fakeGh(['src/dedup.ts']);
-  const res = mergePr({ root, pr: '7', gh });
+  /** 从主干开一个分支、写入给定文件并提交，返回提交号（作为 PR 的最终提交）。 */
+  const prCommit = (branch, files) => {
+    git(root, ['checkout', '-q', '-b', branch, 'main']);
+    for (const [rel, text] of Object.entries(files)) write(root, rel, text);
+    commitAll(root, branch);
+    return git(root, ['rev-parse', 'HEAD']).trim();
+  };
+  // PR 分支把 reviewIgnore 改成 **：合并入口不能因此跳过审查
+  const selfIgnore = JSON.stringify({ ...TEST_CONFIG, reviewFlow: 'pr', reviewIgnore: ['**'] }, null, 2);
+  const h1 = prCommit('p1', { 'engineering.config.json': selfIgnore, 'src/dedup.ts': `${SRC_HEADER}export const x = 1;\n` });
+  const res = mergePr({ root, pr: '7', gh: fakeGh(['src/dedup.ts'], h1) });
   assert.equal(res.ok, false, JSON.stringify(res));
   assert.ok(res.problems.some((p) => p.includes('缺少代码复审记录')), res.problems.join('\n'));
 
-  const gh2 = fakeGh(['README.md', 'engineering.config.json']);
-  const res2 = mergePr({ root, pr: '7', gh: gh2 });
+  const h2 = prCommit('p2', { 'README.md': '# 说明\n', 'engineering.config.json': selfIgnore });
+  const res2 = mergePr({ root, pr: '7', gh: fakeGh(['README.md', 'engineering.config.json'], h2) });
   assert.equal(res2.ok, false, '含配置文件的 PR 不算只改文档');
   assert.ok(res2.problems.some((p) => p.includes('缺少代码复审记录')), res2.problems.join('\n'));
 
-  const gh3 = fakeGh(['README.md', 'docs/04-开发/a.md']);
-  assert.equal(mergePr({ root, pr: '7', gh: gh3 }).ok, true, '真正只改文档的 PR 仍按分档不审');
+  const h3 = prCommit('p3', { 'README.md': '# 说明\n', 'docs/04-开发/a.md': '说明\n' });
+  assert.equal(mergePr({ root, pr: '7', gh: fakeGh(['README.md', 'docs/04-开发/a.md'], h3) }).ok, true, '真正只改文档的 PR 仍按分档不审');
 });
 
 // ---------- 2. 基线变了旧记录仍有效 ----------

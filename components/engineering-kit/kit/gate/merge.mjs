@@ -3,14 +3,15 @@
 // 一致性审有 pass 或延期（defer）记录；两份记录的提交都等于当前最终提交。两种审查的 accept（报告不通过、用户已知情并决定接受风险）
 // 同样放行，输出写明“按用户决定接受风险放行”。代码复审记录之后 PR 只改了文档（记录的提交到最终提交之间的差异全是文档，
 // 判定同 isIgnoredDoc）时仍认这份代码复审记录并写明两个提交；本地算不出差异（没有这两个提交等）时按过期处理。
-// 一致性审记录不享受这一条，仍须针对最终提交。只改文档的 PR（全部文件在 reviewIgnore 之内，
+// 一致性审记录不享受这一条，仍须针对最终提交。改名一律按旧路径删除加新路径新增计（lib.mjs 的 diffNames）。
+// 只改文档的 PR（本地算出的基准提交到最终提交之间的全部文件在 reviewIgnore 之内，本地没有最终提交时按含代码处理，
 // 与闸门同一口径：reviewFlow、reviewIgnore 等判定策略取基准提交上的配置，项目配置、豁免表和 scripts/engineering/** 永远不算文档）
 // 按分档不做审查，只核对 PR 打开与 CI 全过。全部满足才执行
 // gh pr merge --match-head-commit（核对之后再有人推送，GitHub 会拒绝合并），默认 squash 并删除远端分支。
 // 任一项不满足就逐条列出原因、以 1 退出、不合并；gh 不存在或调用失败同样报错退出。
 // 用法：node scripts/engineering/gate/merge.mjs <PR> [--method squash|merge|rebase]
 import fs from 'node:fs';
-import { assertPolicy, defaultGh, git, isIgnoredDoc, isMain, loadConfig, prNumber, prRecordFile, readPr, repoRoot, runGh } from './lib.mjs';
+import { assertPolicy, defaultGh, diffNames, git, isIgnoredDoc, isMain, loadConfig, prNumber, prRecordFile, readPr, repoRoot, resolveBase, runGh } from './lib.mjs';
 
 /** 允许的合并方式（对应 gh pr merge 的 --squash、--merge、--rebase）。 */
 const METHODS = ['squash', 'merge', 'rebase'];
@@ -25,25 +26,34 @@ const REQUIRED = [
 ];
 
 /**
- * 两个提交之间是否只改了文档（git diff --name-only 的每个文件都是 isIgnoredDoc）。算不出差异（本地没有其中一个提交等）时返回 false。
+ * 两个提交之间是否只改了文档（diffNames 的每个文件都是 isIgnoredDoc；改名按旧路径删除加新路径新增，代码改名进 docs/ 不算只改文档）。
+ * 算不出差异（本地没有其中一个提交等）时返回 false。
  */
 function onlyDocsBetween(root, from, to, reviewIgnore) {
-  const r = git(root, ['diff', '--name-only', from, to]);
-  if (!r.ok) return false;
-  return r.out.split('\n').map((s) => s.trim()).filter(Boolean).every((f) => isIgnoredDoc(f, reviewIgnore));
+  const r = diffNames(root, [from, to]);
+  return r.ok && r.files.every((f) => isIgnoredDoc(f, reviewIgnore));
 }
-
-/** gh pr view 的 files 最多返回的文件数；达到它时列表可能被截断。 */
-const GH_FILES_LIMIT = 100;
 
 /**
  * PR 是否只改文档（全部文件都是文档，判定同闸门的 isIgnoredDoc）：按分档表这类 PR 不做代码复审、一致性审并入巡检。
+ * 文件列表取本地的 diffNames(<基准提交>, <PR 最终提交>)，基准提交是配置的基准分支与最终提交的 merge-base；
+ * 不用 gh 返回的文件列表：改名时它可能只给新路径（代码 git mv 进 docs/ 就像只改文档），且最多 100 个。
  * reviewIgnore 是基准提交上的配置版本（loadConfig 得出的生效值），PR 分支自己改的 reviewIgnore 不算数；
  * 含项目配置、豁免表或 scripts/engineering/** 的 PR 不算只改文档。
- * 保守处理：文件列表为空，或达到 gh 的返回上限（可能被截断）时，不算只改文档。
+ * 保守处理：本地没有最终提交、基准解析不了、差异算不出或为空时，不算只改文档（要求审查记录）。
  */
-function docsOnly(files, reviewIgnore) {
-  return files.length > 0 && files.length < GH_FILES_LIMIT && files.every((f) => isIgnoredDoc(f, reviewIgnore));
+function docsOnly(root, config, head) {
+  if (!git(root, ['cat-file', '-e', `${head}^{commit}`]).ok) return false;
+  let base;
+  try {
+    base = resolveBase(root, config.base);
+  } catch {
+    return false;
+  }
+  const mb = git(root, ['merge-base', base, head]);
+  if (!mb.ok) return false;
+  const r = diffNames(root, [mb.out.trim(), head]);
+  return r.ok && r.files.length > 0 && r.files.every((f) => isIgnoredDoc(f, config.reviewIgnore));
 }
 
 /** 读取一条 PR 审查记录；不存在或损坏返回 null（视为未登记）。 */
@@ -74,7 +84,7 @@ export function mergePr({ root, pr, method = 'squash', gh = defaultGh }) {
   const notes = [];
   if (st.state !== 'OPEN') problems.push(`PR #${no} 不是打开状态（${st.state}）`);
   for (const p of st.ciProblems) problems.push(`${p}（最终提交 ${short(st.head)}）`);
-  for (const r of docsOnly(st.files, config.reviewIgnore) ? [] : REQUIRED) {
+  for (const r of docsOnly(root, config, st.head) ? [] : REQUIRED) {
     const rec = readPrRecord(root, no, r.kind);
     if (!rec) problems.push(`缺少${r.name}记录：先运行 review.mjs … --pr ${no} --kind ${r.kind}`);
     else if (!r.accept.includes(rec.verdict)) problems.push(`${r.name}结论是 ${rec.verdict}，不是 ${r.accept.join(' 或 ')}`);

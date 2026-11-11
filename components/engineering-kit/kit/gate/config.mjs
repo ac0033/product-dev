@@ -34,7 +34,7 @@ export const DEFAULTS = {
   maxReviewRounds: 3,
 };
 
-/** 复审流程的合法取值：pre-push（推送前单项复审）或 pr（CI 通过后对 PR 最终提交做代码复审与一致性审，经 merge.mjs 合并）。 */
+/** 复审流程的合法取值：pre-push（推送前复审（推送核对只要求代码复审））或 pr（CI 通过后对 PR 最终提交做代码复审与一致性审，经 merge.mjs 合并）。 */
 export const REVIEW_FLOWS = ['pre-push', 'pr'];
 
 /** 目录布局与巡检的缺省值（profile 的 layout、hygiene 段）。 */

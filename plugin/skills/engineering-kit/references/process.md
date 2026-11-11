@@ -75,9 +75,9 @@
 - `pr`：`gate.mjs` 通过后即可推送，推送核对只要求静态检查和与当前代码、当前基线一致的测试记录（按影响范围的也认，CI 会在最终提交上跑全量）。CI 在 PR 最终提交上全部通过（每项检查成功、跳过或中性；一项都没有视为未通过）后按上表分档审查并登记，PR 未打开或 CI 未全过时拒绝登记：
   - 代码复审：`review.mjs pass|fail --pr <编号> --kind code --reviewer <名> --report <报告> --summary "<一句话>"`。
   - 一致性审：同上，`--kind consistency`；按分档可延期时用 `review.mjs defer --pr <编号> --kind consistency --reason "<理由>"`。
-  - 合并：`merge.mjs <编号> [--method squash|merge|rebase]`。PR 打开、CI 全过、代码复审为 pass、一致性审为 pass 或延期、两份记录的提交都等于当前最终提交，才执行 `gh pr merge --match-head-commit`（默认 squash 并删除远端分支）；否则逐条列出原因，不合并。PR 又有新提交时记录过期，重新审查后再登记；只有一个例外：代码复审之后的新提交只改了文档（`git diff` 的文件全在 `reviewIgnore` 之内）时，代码复审记录仍认，输出写明沿用及两个提交号，本地算不出差异时按过期处理，一致性审记录仍须针对最终提交。
+  - 合并：`merge.mjs <编号> [--method squash|merge|rebase]`。PR 打开、CI 全过、代码复审为 pass、一致性审为 pass 或延期、两份记录的提交都等于当前最终提交，才执行 `gh pr merge --match-head-commit`（默认 squash 并删除远端分支）；否则逐条列出原因，不合并。PR 又有新提交时记录过期，重新审查后再登记；只有一个例外：代码复审之后的新提交只改了文档（`git diff --no-renames` 的文件全在 `reviewIgnore` 之内；项目配置、豁免表、`scripts/engineering/**` 不算文档，改名按旧路径删除加新路径新增算，代码改名进 docs/ 不算只改文档）时，代码复审记录仍认，输出写明沿用及两个提交号，本地算不出差异时按过期处理，一致性审记录仍须针对最终提交。
   - 用户接受风险：`review.mjs accept --pr <编号> --kind code|consistency --reviewer <名> --report <报告> --user-decision "<用户的决定及出处>"`，报告结论须为不通过；合并入口把它当作可放行，输出写明按用户决定接受风险放行。
-  - 只改文档的 PR（全部文件在 `reviewIgnore` 之内，口径同闸门：`reviewIgnore` 取基准提交上的配置，含项目配置、豁免表或 `scripts/engineering/**` 的不算）按上表不做审查，合并入口只核对 PR 打开与 CI 全过；PR 文件列表为空或达到 100 个（`gh` 可能截断）时按含代码处理。其余 PR 合并入口不判断风险档位：代码复审必需，能否延期一致性审由登记者按上表判断。
+  - 只改文档的 PR（本地算出的基准提交到 PR 最终提交之间全部文件在 `reviewIgnore` 之内，本地没有最终提交时按含代码处理，口径同闸门：`reviewIgnore` 取基准提交上的配置，含项目配置、豁免表或 `scripts/engineering/**` 的不算）按上表不做审查，合并入口只核对 PR 打开与 CI 全过；差异为空时也按含代码处理。其余 PR 合并入口不判断风险档位：代码复审必需，能否延期一致性审由登记者按上表判断。
   - 需要 GitHub 远程和已登录的 `gh`；没有 CI 的项目留在 `pre-push`。
 
 测试模式与结果复用（两种流程相同）：`gate.mjs` 跑配置的 `testCommand` 全量，通过的全量记录另存一份，记下当时范围内每个文件的内容哈希。`gate.mjs --affected` 以这份全量记录为起点算出此后改动的文件，每个改动文件都要命中 `modules.gate.testGroups` 里至少一个分组的 `paths`，命中的分组各跑一次 `command`；没有配置分组、没有可用的全量记录、基线或测试配置与全量记录不同、有改动不属于任何分组、改动涉及项目配置、豁免表、套件脚本或依赖清单与锁文件时，自动改跑全量并在输出里写明原因；此后范围内没有改动时不跑测试，写一份沿用的记录。已有通过的记录、且代码树、基线和测试配置（`testCommand`、`testEnv`、`testGroups`）都一致、模式满足要求时，闸门不重跑，输出“沿用已有通过记录”，要重跑加 `--force`。静态检查每次都做，其中断言检查要求本次改动的测试文件里有断言的痕迹，测试用例数比基准提交少时只提示、不拦截。

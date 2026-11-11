@@ -8,19 +8,23 @@ import path from 'node:path';
 import { EMPTY_TREE, git, isIgnoredDoc, isTestFile } from './lib.mjs';
 
 /**
- * 断言痕迹（宽松，命中任一即算有断言）：JS/TS 的 assert、expect、should、ava/tap 的 t.is 等，Python 的 assert 语句、
- * pytest.raises、unittest 的 self.assertXxx，Java/Kotlin 的 assertXxx，Go 的 testify require./assert. 与 t.Error/Fatal 等，Rust 的 assert! 系列。
+ * 断言痕迹（宽松，命中任一即算有断言）：JS/TS 的 assert、expect、should、ava/tap 的 t.is 等，C#/NUnit 的 Assert.，Swift 的 XCTAssert，
+ * Kotest 的 shouldXxx，Python 的 assert 语句、pytest.raises、unittest 的 self.assertXxx，Java/Kotlin 的 assertXxx，Ruby 的 assert_xxx，
+ * Go 的 testify require./assert. 与 t.Error/Fatal 等，Rust 的 assert! 系列。
  */
 export const ASSERTION_PATTERNS = [
-  /\bassert\s*[.(]/, // assert(x)、assert.equal(...)、assert.strictEqual(...)
+  /\bassert\s*[.(]/i, // assert(x)、assert.equal(...)、C# 与 NUnit 的 Assert.AreEqual(...)、Assert.That(...)
   /^\s*assert\s+\S/m, // Python 的 assert 语句
   /\bassert[A-Z_]\w*\s*\(/, // assertEquals(...)、assertThat(...)、self.assertEqual(...)
+  /\bassert_\w+\s+\S/, // 不带括号的 assert_xxx（Ruby minitest 的 assert_equal 1, a、assert_raises X）
   /\bassert\w*!\s*\(/, // Rust 的 assert!、assert_eq!、assert_ne!
+  /\bXCTAssert\w*\s*\(/, // Swift 的 XCTAssert、XCTAssertEqual
+  /\bshould[A-Z]\w*/, // Kotest 的 shouldBe、shouldThrow、shouldContain 等
   /\bexpect\s*\(/, // Jest、Vitest、Chai 的 expect(...)
   /\.should\b|\bshould\s*[.(]/, // should.js、Chai 的 should
   /\bt\.(?:is|not|ok|notOk|true|false|truthy|falsy|equal|notEqual|deepEqual|notDeepEqual|strictEqual|same|notSame|like|regex|throws|throwsAsync|notThrows|rejects|resolves|match|snapshot|assert|fail|pass)\s*\(/, // ava、tap、node:test 的 t.xxx
   /\bpytest\.(?:raises|approx|warns|fail)\b/, // pytest
-  /\brequire\.\w+\s*\(/, // Go testify 的 require.Xxx
+  /\brequire\.(?!resolve\b|cache\b|main\b)\w+\s*\(/, // Go testify 的 require.Xxx（排除 Node 的 require.resolve、require.cache、require.main）
   /\bt\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)\s*\(/, // Go testing
 ];
 
@@ -30,8 +34,8 @@ export const ASSERTION_PATTERNS = [
  */
 export const NO_ASSERTION_NAMES = new Set(['__init__.py', 'conftest.py']);
 
-/** 测试用例的写法：JS/TS 的 test( 与 it(，Python 的 def test_，Go 的 func Test。 */
-export const TEST_CASE_PATTERNS = [/\b(?:test|it)\s*\(/g, /^\s*(?:async\s+)?def\s+test_/gm, /^func\s+Test\w*\s*\(/gm];
+/** 测试用例的写法：JS/TS 的 test( 与 it(（前面紧挨点号的不算，如正则的 re.test(s)），Python 的 def test_，Go 的 func Test。 */
+export const TEST_CASE_PATTERNS = [/(?<!\.)\b(?:test|it)\s*\(/g, /^\s*(?:async\s+)?def\s+test_/gm, /^func\s+Test\w*\s*\(/gm];
 
 /** 文本里有没有断言痕迹。 */
 export function hasAssertion(text) {
