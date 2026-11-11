@@ -536,7 +536,7 @@ function designBase(root, have, o = {}) {
   if (have.includes('proto')) {
     w(root, 'docs/02-原型/PROTOTYPE.md', o.proto ?? PROTO());
     w(root, 'docs/02-原型/prototype/index.html', PROTO_HTML);
-    reg('02-原型', ['PROTOTYPE.md']);
+    reg('02-原型', ['PROTOTYPE.md', 'prototype/index.html']);
     rows.push(['docs/02-原型/PROTOTYPE.md', 'v1.0', o.protoStatus ?? 'active', o.protoValid ?? '当前（依据 PRD v1.0）']);
   }
   if (have.includes('arch')) {
@@ -663,7 +663,7 @@ const cases = {
   C4: {
     make: (r) => designBase(r, ['proto', 'arch'], { archStatus: 'draft', arch: ARCH().replace('状态：active', '状态：draft').replace('## 3. 评审\n\n2026-11-05 架构角色自审：组件边界与 PRD、原型一致。', '## 3. 评审\n\n未评审。两张核心图尚未绘制。'), recs: 4, conclusion: '架构文字部分已写，图与评审未做。' }),
     env: '本宿主没有浏览器工具，也没有任何能把图渲染出来查看的环境（名字里带 Browser、chrome 的工具都不可用，不要调用）；本宿主也派发不了任何子代理（不要调用 Agent 工具）。',
-    bg: '需求、原型已确认；架构文档的文字部分已写好（草稿），两张核心图还没画，也没评审。',
+    bg: '需求、原型已确认；架构文档的文字部分已写好（草稿），两张核心图还没画，也没评审。用户已同意这次由主对话兼任架构角色（不另开上下文）。',
     msg: '把架构的两张核心图补上，然后把架构评审做完。',
   },
   D1: {
