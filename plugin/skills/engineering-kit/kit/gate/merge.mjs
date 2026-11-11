@@ -40,8 +40,9 @@ function onlyDocsBetween(root, from, to, reviewIgnore) {
  * 不用 gh 返回的文件列表：改名时它可能只给新路径（代码 git mv 进 docs/ 就像只改文档），且最多 100 个。
  * reviewIgnore 是基准提交上的配置版本（loadConfig 得出的生效值），PR 分支自己改的 reviewIgnore 不算数；
  * 含项目配置、豁免表或 scripts/engineering/** 的 PR 不算只改文档。
- * 保守处理：本地没有最终提交、基准解析不了、差异算不出或为空时，不算只改文档（要求审查记录）。
- * 返回 { docs, why }：因为本地算不出而按含代码处理时，why 写明原因（合并入口放进 notes，提示先 git fetch；不改变判定）。
+ * 保守处理：本地没有最终提交、基准解析不了、算不出共同提交、差异算不出或为空时，都不算只改文档（要求审查记录）。
+ * 返回 { docs, why }：前三种（本地缺提交或基准，git fetch 后可能就算得出）why 写明原因，合并入口放进 notes 并提示先 git fetch；
+ * 差异算不出或为空时 why 为 null，不给提示。why 只是说明，不改变判定。
  */
 function docsOnly(root, config, head) {
   const fetchHint = '：按含代码的 PR 处理（要求审查记录）；PR 若确实只改文档，先 git fetch 再运行合并入口';

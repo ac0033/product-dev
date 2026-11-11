@@ -705,6 +705,22 @@ test('复用：全量通过后同一棵树 --force 全量失败，再跑闸门�
   assert.ok(!fixed.messages.some((m) => /沿用/.test(m)), '失败之后的第一次通过要真的跑出来');
 });
 
+test('复用（只测 reusable）：同一棵树上有通过的 tests-full.json、而 tests.json 是未通过时，普通运行与 --affected 都不沿用', () => {
+  // 直接写两份记录，不经“全量失败时删除全量记录”那条路径：这条测试单独守住 reusable 里“最近一次运行未通过就不沿用”的判断
+  const root = groupRepo();
+  changeDedup(root, 'v1');
+  commitAll(root, 'feat');
+  const pass = runGate({ root });
+  assert.equal(pass.ok, true, pass.messages.join('\n'));
+  for (const affected of [false, true]) {
+    writeRecord(root, 'tests-full.json', { ...pass.record });
+    writeRecord(root, 'tests.json', { ...pass.record, passed: false, at: new Date(0).toISOString() });
+    const res = runGate({ root, affected });
+    assert.ok(!res.messages.some((m) => /沿用/.test(m)), `affected=${affected}：${res.messages.join('\n')}`);
+    assert.match(logOf(res), /RAN-FULL/, `affected=${affected}：应当真的重跑全量`);
+  }
+});
+
 test('复用：分组测试在某棵树上失败后，--affected 与普通运行都不沿用任何通过记录；verify 读到未通过', () => {
   const groups = [{ name: 'dedup', paths: ['src/dedup.ts', 'test/dedup.test.ts'], command: 'node flaky.mjs' }];
   const root = groupRepo({ testGroups: groups });
