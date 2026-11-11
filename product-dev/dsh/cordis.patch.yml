@@ -1,0 +1,5 @@
+# DSH bundle 的组合补丁：把本包的入口（lib/index.js）作为一个插件行加进配置档。
+# name 必须是真实的包名：DSH 从配置档目录按包名加载它。
+- insert:
+    - id: product-dev
+      name: 'dsh-product-dev'

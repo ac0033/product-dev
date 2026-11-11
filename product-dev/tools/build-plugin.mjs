@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 综合插件 product-dev 的装配脚本：把各组件复制进插件目录，并写出 BUILD.lock.json。
 // 业务含义：插件里“取自组件”的部分不手改，一律由本脚本从组件生成；组件更新后重新运行即可。
-// 用法：node tools/build-plugin.mjs [--out <目录>]   （默认写入仓库里的 product-dev/；--out 只写出生成的部分，不含手写文件）
+// 用法：node product-dev/tools/build-plugin.mjs [--out <目录>]   （默认写入 product-dev/plugin/；--out 只写出生成的部分，不含手写文件）
 // 只用 Node 内置模块。结果只取决于输入内容：不写时间戳，文件按路径排序。
 import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -9,8 +9,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+/** 本工具的根目录（仓库里的 product-dev/）：插件成品、组件、脚本、测试都在它下面。 */
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const PLUGIN_DIR = 'product-dev';
+/** 插件成品目录，相对 ROOT。 */
+export const PLUGIN_DIR = 'plugin';
+/** 自有组件的源目录，相对 ROOT。 */
+export const COMPONENTS_DIR = 'components';
+/** 仓库根的许可文件，相对 ROOT。 */
+const REPO_LICENSE = '../LICENSE';
 /** 插件里唯一可由用户调用的技能（手写，不由本脚本生成）。 */
 export const ENTRY_SKILL = 'product-dev';
 /** 插件里手写、不由本脚本生成的文件；另外入口技能的整个目录（入口和它的方法文档）也是手写的。 */
@@ -110,8 +116,8 @@ const commitOf = (repo) => (fs.existsSync(path.join(repo, '.git')) ? git(repo, '
 const merge = (...maps) => Object.assign(new Map(maps.flatMap((m) => [...m])), { executable: maps.flatMap((m) => m.executable || []) });
 const withSkill = (files, note) => files.set('SKILL.md', hideSkill(files.get('SKILL.md'), note));
 /** 行为用例属于仓库的自身验证，不随插件分发：组件里指向它的相对链接改成仓库网址，装好后仍可到达。 */
-const CASES_LINK = '](../evals/cases.md)';
-const CASES_URL = '](https://github.com/ac0033/skills/blob/main/evals/cases.md)';
+const CASES_LINK = '](../../evals/cases.md)';
+const CASES_URL = '](https://github.com/ac0033/skills/blob/main/product-dev/evals/cases.md)';
 function relinkCases(files) {
   for (const [rel, buf] of files) if (rel.endsWith('.md') && buf.includes(CASES_LINK)) files.set(rel, Buffer.from(buf.toString('utf8').replaceAll(CASES_LINK, CASES_URL)));
   return files;
@@ -119,18 +125,18 @@ function relinkCases(files) {
 
 /** 自有部分：每项 { id, dest, component, version, license, changes, files }。 */
 function ownParts(root) {
-  const kitVersion = json(path.join(root, 'engineering-kit/bundle.json')).bundleVersion;
+  const kitVersion = json(path.join(root, COMPONENTS_DIR, 'engineering-kit/bundle.json')).bundleVersion;
   const skill = (name, version, changes) => ({
-    id: name, dest: `skills/${name}`, component: name, version, license: 'MIT', changes, files: relinkCases(withSkill(ownFiles(root, name))),
+    id: name, dest: `skills/${name}`, component: name, version, license: 'MIT', changes, files: relinkCases(withSkill(ownFiles(root, `${COMPONENTS_DIR}/${name}`))),
   });
   const hidden = '头部加 user-invocable: false';
   return [
     skill('engineering-kit', kitVersion, '头部去掉 disable-model-invocation，加 user-invocable: false'),
-    skill('product-design-orchestrator', null, `${hidden}；指向 ../evals/cases.md 的链接改为仓库网址`),
+    skill('product-design-orchestrator', null, `${hidden}；指向 ../../evals/cases.md 的链接改为仓库网址`),
     skill('product-discovery-prd', null, '无（头部原本就是 user-invocable: false）'),
     skill('prototype-design', null, '无（头部原本就是 user-invocable: false）'),
     skill('system-architecture-design', null, '无（头部原本就是 user-invocable: false）'),
-    { id: 'license', dest: 'LICENSE', component: '仓库根 LICENSE', version: null, license: 'MIT', changes: '无', files: ownFiles(root, 'LICENSE') },
+    { id: 'license', dest: 'LICENSE', component: '仓库根 LICENSE', version: null, license: 'MIT', changes: '无', files: ownFiles(root, REPO_LICENSE) },
   ];
 }
 

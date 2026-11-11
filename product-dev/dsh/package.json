@@ -1,0 +1,48 @@
+{
+  "name": "dsh-product-dev",
+  "version": "0.2.3",
+  "description": "Product Dev for DeepSeek Harness: one entry skill that routes a product idea, feature, or bug through requirements, design, build, verification and delivery. 产品开发工作流：一个入口，根据任务选择路线。",
+  "author": "YuanLumen",
+  "homepage": "https://github.com/ac0033/skills/tree/main/product-dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ac0033/skills.git",
+    "directory": "product-dev/dsh"
+  },
+  "bugs": {
+    "url": "https://github.com/ac0033/skills/issues"
+  },
+  "license": "(MIT AND Apache-2.0)",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "skills",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.2-rc.1 <0.3.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "skills",
+    "agent-skills",
+    "product-development",
+    "workflow"
+  ]
+}

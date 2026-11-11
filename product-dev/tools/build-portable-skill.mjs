@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const plugin = fileURLToPath(new URL('../product-dev/', import.meta.url));
+const plugin = fileURLToPath(new URL('../plugin/', import.meta.url));
 const payloadPath = 'references/product-dev';
 const skillFilename = 'SKILL.md';
 const internalFilename = 'WORKFLOW.md';
@@ -71,6 +71,6 @@ export function buildPortableSkill(destination) {
 }
 
 if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (process.argv.length !== 3) throw new Error('用法：node tools/build-portable-skill.mjs <输出路径>/product-dev');
+  if (process.argv.length !== 3) throw new Error('用法：node product-dev/tools/build-portable-skill.mjs <输出路径>/product-dev');
   console.log(buildPortableSkill(process.argv[2]));
 }

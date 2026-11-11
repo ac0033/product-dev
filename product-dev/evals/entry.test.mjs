@@ -1,12 +1,12 @@
 // 综合插件入口技能的检查。
 // 业务含义：入口是用户唯一接触的部分。流程导图里的每个步骤都必须在入口里，并且目标、原则、工具、过关证据四栏齐全；
 // 每一步写的工具必须是插件里真实存在的文件、子代理或脚本，不能指向只存在于某个宿主或没有收录的东西。
-// 运行：在仓库根目录 node --test evals/entry.test.mjs
+// 运行：在仓库根目录 node --test product-dev/evals/entry.test.mjs
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { DEFAULTS, LAYOUT_DEFAULTS } from '../engineering-kit/kit/gate/config.mjs';
+import { DEFAULTS, LAYOUT_DEFAULTS } from '../components/engineering-kit/kit/gate/config.mjs';
 import { ENTRY_SKILL, PLUGIN_DIR, ROOT } from '../tools/build-plugin.mjs';
 
 const PLUGIN = path.join(ROOT, PLUGIN_DIR);
@@ -198,7 +198,7 @@ test('出处：改写的方法文档文末注明来源，第三方声明、组�
     ponytail: { url: 'https://github.com/DietrichGebert/ponytail', copyright: 'Copyright (c) 2026 DietrichGebert', docs: ['build', 'self-review'] },
     'agent-skills': { url: 'https://github.com/addyosmani/agent-skills', copyright: 'Copyright (c) 2025 Addy Osmani', docs: ['planning', 'build', 'debugging', 'review'] },
   };
-  assert.ok(readme.includes('(COMPONENTS.md)') && readme.includes('(product-dev/THIRD_PARTY_NOTICES.md)'), 'README 应链接组件版本清单与第三方声明');
+  assert.ok(readme.includes('(COMPONENTS.md)') && readme.includes('(plugin/THIRD_PARTY_NOTICES.md)'), 'README 应链接组件版本清单与第三方声明');
   for (const [name, s] of Object.entries(sources)) {
     const section = notices.split(/^## /m).find((x) => new RegExp(`^\\d+\\. ${name}$`).test(x.split('\n')[0]));
     assert.ok(section, `第三方声明里没有 ${name} 一节`);
@@ -335,7 +335,7 @@ test('不复述规则：入口和方法文档里没有 R1–R10 的原句', () =
 test('原文保留：process.md 由套件流程文档重组而来，各节的句子大多数还在', () => {
   // 局限：只比句子是否原样保留。个别句子因章节号、文件位置不同而改写是正常的，所以按比例判断；
   // 少量句子被删或被改弱查不出来，靠独立复审。套件那份改了而这里没跟着改时，比例下降，同样会报出来。
-  const original = fs.readFileSync(path.join(ROOT, 'engineering-kit/references/process.md'), 'utf8').replace(/\r\n/g, '\n');
+  const original = fs.readFileSync(path.join(ROOT, 'components/engineering-kit/references/process.md'), 'utf8').replace(/\r\n/g, '\n');
   const mine = norm(read(`${ENTRY_DIR}/references/process.md`));
   let total = 0;
   let kept = 0;

@@ -30,7 +30,7 @@ test('便携包只有一个可发现入口，内部资料随包交付', (t) => {
   assert.match(read(payload + '/skills/engineering-kit/references/process.md'), /\.\.\/WORKFLOW\.md/);
   assert.match(read(payload + '/skills/product-dev/references/debugging.md'), /skills\/debugging-and-error-recovery\/SKILL\.md/);
   assert.match(read(payload + '/THIRD_PARTY_NOTICES.md'), /\]\(BUILD\.lock\.json\)/);
-  assert.equal(read(payload + '/BUILD.lock.json'), fs.readFileSync(new URL('../product-dev/BUILD.lock.json', import.meta.url), 'utf8'));
+  assert.equal(read(payload + '/BUILD.lock.json'), fs.readFileSync(new URL('../plugin/BUILD.lock.json', import.meta.url), 'utf8'));
   assert.ok(fs.existsSync(path.join(output, payload, 'agents/code-reviewer.md')));
 
   const project = path.join(scratch, 'project');

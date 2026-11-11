@@ -17,9 +17,9 @@
       "component": "product-design-orchestrator",
       "version": null,
       "license": "MIT",
-      "changes": "头部加 user-invocable: false；指向 ../evals/cases.md 的链接改为仓库网址",
+      "changes": "头部加 user-invocable: false；指向 ../../evals/cases.md 的链接改为仓库网址",
       "fileCount": 4,
-      "sha256": "aaff5eac16e373c7da3810a693284e73c10fb6694120ff869137ca06f88f0fcf"
+      "sha256": "d18619af3d5b44048fbf3d940775b473639caf09a1707a119766e1a50a963c0b"
     },
     {
       "id": "product-discovery-prd",

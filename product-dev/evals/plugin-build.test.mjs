@@ -1,6 +1,6 @@
 // 综合插件 product-dev 的构建检查。
 // 业务含义：插件里“取自组件”的部分必须与组件一致、与锁文件相符；用户能调用的技能只有入口一个；插件单独装好后链接都能到达。
-// 运行：在仓库根目录 node --test evals/plugin-build.test.mjs
+// 运行：在仓库根目录 node --test product-dev/evals/plugin-build.test.mjs
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -158,7 +158,7 @@ test('清单与声明：两个插件清单一致，第三方声明覆盖锁文�
   const claude = JSON.parse(fs.readFileSync(path.join(PLUGIN, '.claude-plugin/plugin.json'), 'utf8'));
   const codex = JSON.parse(fs.readFileSync(path.join(PLUGIN, '.codex-plugin/plugin.json'), 'utf8'));
   for (const key of ['name', 'version', 'description', 'license']) assert.equal(claude[key], codex[key], `两个清单的 ${key} 不一致`);
-  assert.equal(claude.name, PLUGIN_DIR);
+  assert.equal(claude.name, ENTRY_SKILL);
   assert.match(claude.license, /THIRD_PARTY_NOTICES\.md/);
   const notices = fs.readFileSync(path.join(PLUGIN, 'THIRD_PARTY_NOTICES.md'), 'utf8');
   const components = fs.readFileSync(path.join(ROOT, 'COMPONENTS.md'), 'utf8');

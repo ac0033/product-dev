@@ -1,7 +1,6 @@
 ---
 name: product-design-orchestrator
 description: 协调从产品想法到 PRD、原型验证、系统架构及实施交接的设计流程；用三个独立专业上下文管理阶段、关键决策、变更与跨文档一致性。用于完整产品设计、续接设计项目或跨阶段变更；单独的需求、原型或架构任务也从本技能进入，只启动对应角色。
-user-invocable: false
 ---
 
 # 产品设计总控
@@ -51,4 +50,4 @@ user-invocable: false
 
 依据[实施准备度](references/artifacts.md#implementation)给出 `READY`、`READY_WITH_LIMITATIONS` 或 `BLOCKED`。文档齐全不等于可以实施；设计完成也不等于代码实现、真实验证或发布完成。
 
-向用户交付实际入口、设计结论、证据、未决事项和下一责任人。用户未授权工程实现时，交接后结束设计任务。技能包维护或首次试用时采用[验收用例](https://github.com/ac0033/skills/blob/main/evals/cases.md)，不要每个项目重复测试技能系统本身。
+向用户交付实际入口、设计结论、证据、未决事项和下一责任人。用户未授权工程实现时，交接后结束设计任务。技能包维护或首次试用时采用[验收用例](../../evals/cases.md)，不要每个项目重复测试技能系统本身。

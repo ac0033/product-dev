@@ -17,7 +17,7 @@
 
 ## 安装与调用
 
-将四个技能目录和 `engineering-kit/`、`evals/` 一起放入宿主支持的技能目录，并保持同级位置。子技能通过相对路径引用主技能目录中的共享资源，不能只复制单个子技能。新项目第一步由总控安装 engineering-kit，设计文档放它建好的阶段目录。
+将四个技能目录和 `engineering-kit/` 一起放入宿主支持的技能目录，并保持同级位置。子技能通过相对路径引用主技能目录中的共享资源，不能只复制单个子技能。新项目第一步由总控安装 engineering-kit，设计文档放它建好的阶段目录。
 
 ```text
 skills/
@@ -29,8 +29,7 @@ skills/
 ├── product-discovery-prd/SKILL.md
 ├── prototype-design/SKILL.md
 ├── system-architecture-design/SKILL.md
-├── engineering-kit/
-└── evals/cases.md
+└── engineering-kit/
 ```
 
 在支持技能名称调用的宿主中：
@@ -58,7 +57,7 @@ skills/
 
 ## 验证与边界
 
-技能修改后检查格式、相对引用及[行为验收用例](https://github.com/ac0033/skills/blob/main/evals/cases.md)。实际项目验收还需核对用户确认、原型操作、技术实验和实施准备度。
+技能修改后检查格式、相对引用及[行为验收用例](https://github.com/ac0033/skills/blob/main/product-dev/evals/cases.md)。实际项目验收还需核对用户确认、原型操作、技术实验和实施准备度。
 
 设计确认、代码实现、真实验证和发布是不同状态。技能的默认终点是实施交接，生产实现与发布由用户任务范围决定；模拟原型和文档检查不能替代真实功能验收。使用技能不会扩大宿主权限或自动授权付费、外发及发布操作。
 

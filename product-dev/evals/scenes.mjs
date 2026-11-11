@@ -1,20 +1,20 @@
-// 造行为用例和端到端试用的现场：node evals/scenes.mjs <输出目录> [--live] [--read] [--suffix=<后缀>] [用例ID ...]（不带用例ID则全部重造）。
+// 造行为用例和端到端试用的现场：node product-dev/evals/scenes.mjs <输出目录> [--live] [--read] [--suffix=<后缀>] [用例ID ...]（不带用例ID则全部重造）。
 // --live：运行说明用“多轮对话中的一轮”的口径（默认是“用户不在线”）；--read：让被测代理直接读入口文件而不用技能工具；--suffix：目录名加后缀，用于重跑。
 // 每例一个目录 <输出目录>/<ID>/{project,input.md}；input.md 是交给被测子代理的全部输入，不含“应观察到的行为”。
-// 用法与判定方法见 evals/cases.md 第 2 节，运行记录见 evals/runs/。
+// 用法与判定方法见 product-dev/evals/cases.md 第 2 节，运行记录见 product-dev/evals/runs/。
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..').split(path.sep).join('/');
-const KIT = REPO + '/product-dev/skills/engineering-kit/kit';
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..').split(path.sep).join('/');
+const KIT = REPO + '/product-dev/plugin/skills/engineering-kit/kit';
 const argv = process.argv.slice(2);
 const LIVE = argv.includes('--live');
 const READ = argv.includes('--read');
 const SUFFIX = argv.find((a) => a.startsWith('--suffix='))?.slice(9) ?? '';
 const [outArg, ...only] = argv.filter((a) => !a.startsWith('--'));
-if (!outArg) { console.error('用法：node evals/scenes.mjs <输出目录> [--live] [--read] [--suffix=<后缀>] [用例ID ...]'); process.exit(1); }
+if (!outArg) { console.error('用法：node product-dev/evals/scenes.mjs <输出目录> [--live] [--read] [--suffix=<后缀>] [用例ID ...]'); process.exit(1); }
 const CASES = path.resolve(outArg);
 
 const sh = (cwd, cmd, args) => execFileSync(cmd, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -610,7 +610,7 @@ const cases = {
   },
   B5: {
     make: (r) => designBase(r, ['proto']),
-    role: `你是被“设计总控”委派的原型角色子代理（不是主对话）。先用 Skill 工具加载 \`product-dev:prototype-design\`（找不到这个名字时读 \`<仓库>/product-dev/skills/prototype-design/SKILL.md\`），按它和它引用的共享协议执行下面总控给你的任务书。`,
+    role: `你是被“设计总控”委派的原型角色子代理（不是主对话）。先用 Skill 工具加载 \`product-dev:prototype-design\`（找不到这个名字时读 \`<仓库>/product-dev/plugin/skills/prototype-design/SKILL.md\`），按它和它引用的共享协议执行下面总控给你的任务书。`,
     msgTitle: '总控的任务书',
     msg: '任务：把“已保存”提示的停留时间从 2 秒改为 4 秒（用户反馈看不清，属于普通交互调整，用户已同意），原型说明和原型文件都要改。完成标准：说明与原型文件一致，版本号递增。另外用户顺口提了一句“保存后最好能撤销”，这一条总控还没处理，你在修订时看看它对原型意味着什么。',
   },
@@ -755,7 +755,7 @@ for (const [id, c] of Object.entries(cases)) {
   const proj = path.join(dir, 'project').replace(/\\/g, '/');
   c.make(proj);
   const d = dir.replace(/\\/g, '/');
-  const role = c.role ?? (READ ? '你是一次产品开发对话里的助手（主对话）。先用 Read 工具读取入口技能文件 `<仓库>/product-dev/skills/product-dev/SKILL.md` 的全文并按它处理下面的用户消息（不要用 Skill 工具加载 `product-dev:product-dev`：本会话的技能工具给出的可能是它改动前的旧版本；其他内部技能可以照常用 Skill 工具加载）；它要求加载的其他技能、方法文档、子代理，照它的要求使用。' : null) ?? '你是一次产品开发对话里的助手（主对话）。先用 Skill 工具加载 `product-dev:product-dev`，按它处理下面的用户消息；它要求加载的其他技能、方法文档、子代理，照它的要求使用。';
+  const role = c.role ?? (READ ? '你是一次产品开发对话里的助手（主对话）。先用 Read 工具读取入口技能文件 `<仓库>/product-dev/plugin/skills/product-dev/SKILL.md` 的全文并按它处理下面的用户消息（不要用 Skill 工具加载 `product-dev:product-dev`：本会话的技能工具给出的可能是它改动前的旧版本；其他内部技能可以照常用 Skill 工具加载）；它要求加载的其他技能、方法文档、子代理，照它的要求使用。' : null) ?? '你是一次产品开发对话里的助手（主对话）。先用 Skill 工具加载 `product-dev:product-dev`，按它处理下面的用户消息；它要求加载的其他技能、方法文档、子代理，照它的要求使用。';
   fs.writeFileSync(path.join(dir, 'input.md'), (`# 运行说明
 
 ${role}
