@@ -5,8 +5,9 @@
 //   pass / fail   复审结论。
 //   defer         一致性审延期（只限 consistency），须写理由。
 //   accept        用户接受风险：报告结论是不通过，但用户已知情并决定接受其中的问题、不再修改；须带 --user-decision 写明用户的决定及出处。
-// 复审轮次：一轮＝对同一 PR（pr 流程）或同一分支（pre-push 流程）登记一次 fail，两种 kind 合并计数。已有 maxReviewRounds（默认 3）次 fail 后，
-//   再登记 pass 或 fail 都拒绝，须向用户说明后带 --user-decision 重新登记；accept 与 defer 不计轮次、不受拦截。每次登记成功的输出末尾给出轮次统计。
+// 复审轮次：一轮＝同一 PR（pr 流程）或同一分支（pre-push 流程）上至少登记过一次 fail 的一个提交，同一提交上两种 kind 都 fail 只算一轮。
+//   已有 maxReviewRounds（默认 3）个不同提交登记过 fail 后，对新的提交再登记 pass 或 fail 都拒绝，须向用户说明后带 --user-decision 重新登记；
+//   对已计入的提交补登另一种审查不拦（见 roundBlock）。accept 与 defer 不计轮次、不受拦截。每次登记成功的输出末尾给出轮次统计。
 // 按项目的复审流程（modules.gate.reviewFlow）分两种：
 //   pre-push：推送前复审，绑定当前代码树哈希和基准提交（基线）；登记 pass、fail、accept 前必须已有与当前代码、当前基线一致的通过测试记录
 //       （全量或按影响范围的都行）。闸门范围与 gate.mjs、verify.mjs 同一口径（lib.mjs 的 gateScope）。
@@ -179,29 +180,52 @@ function cnNumber(n) {
 }
 
 /**
- * 轮次核对：prior 是同一 PR 或同一分支此前的登记。已有 limit 次 fail 后，登记 pass 或 fail 须带 userDecision。
- * 返回拒绝信息，放行时返回 null。
+ * 已计入轮次的提交，按第一次登记 fail 的先后排列。一轮＝至少登记过一次 fail 的一个提交：同一提交上代码复审和一致性审
+ * 都 fail 只算一轮。pr 流程的 headSha 是 PR 的最终提交，pre-push 流程是登记时的 HEAD（只改文档时树哈希每轮相同，所以不用树哈希）；
+ * headSha 为空的 fail 记录（仓库还没有提交时登记的）各算一个。
  */
-function roundBlock(prior, verdict, limit, userDecision, scope) {
+function failCommits(entries) {
+  const keys = [];
+  entries.forEach((e, i) => {
+    if (e.verdict !== 'fail') return;
+    const key = e.headSha || `无提交号#${i}`;
+    if (!keys.includes(key)) keys.push(key);
+  });
+  return keys;
+}
+
+/**
+ * 轮次核对：prior 是同一 PR 或同一分支此前的登记，head 是本次登记对应的提交。返回拒绝信息，放行时返回 null。
+ * 已有 limit 个不同提交登记过 fail 之后，对新的提交（还没计入的）登记 pass 或 fail 须带 userDecision；
+ * 对已经计入的提交补登另一种审查的结论不拦——并行双审的第二份登记不能被它自己这一轮拦住。
+ * 例（上限 3）：第 3 轮的提交上代码复审 fail 已登记，同一提交的一致性审 fail 或 pass 照常登记；第 4 个提交上的任何 pass、fail 都要 userDecision。
+ * accept 与 defer 不计轮次、不受拦截。
+ */
+function roundBlock(prior, verdict, limit, userDecision, scope, head) {
   if (verdict !== 'pass' && verdict !== 'fail') return null;
-  const fails = prior.filter((e) => e.verdict === 'fail').length;
-  if (fails < limit || (userDecision && userDecision.trim())) return null;
+  const counted = failCommits(prior);
+  if (head && counted.includes(head)) return null;
+  if (counted.length < limit || (userDecision && userDecision.trim())) return null;
   return (
     `已审${cnNumber(limit)}轮仍需再审：向用户说明剩余问题、原因和已做处置，由用户决定；用户同意继续的，带 --user-decision "<用户的决定及出处>" 重新登记` +
-    `（${scope}已登记 ${fails} 次不通过，上限 ${limit} 轮，见 modules.review.maxReviewRounds）`
+    `（${scope}已有 ${counted.length} 个不同提交登记过不通过，上限 ${limit} 轮，见 modules.review.maxReviewRounds）`
   );
 }
 
-/** 登记成功后的轮次统计行：第几轮（accept、defer 不计轮次）、累计登记次数、涉及的不同提交数。entries 含本次。 */
-function roundLine(entries, verdict, limit, scope) {
-  const fails = entries.filter((e) => e.verdict === 'fail').length;
+/**
+ * 登记成功后的轮次统计行：第几轮（按提交计；accept、defer 不计轮次）、累计登记次数、涉及的不同提交数。entries 含本次，head 是本次的提交。
+ * 本次的提交已计入时就是它那一轮；还没计入（本次是 pass）时是下一轮。
+ */
+function roundLine(entries, verdict, limit, scope, head) {
+  const counted = failCommits(entries);
   const commits = new Set(entries.map((e) => e.headSha).filter(Boolean)).size;
   const tail = `${scope}累计登记 ${entries.length} 次，涉及 ${commits} 个不同提交`;
   if (verdict === 'pass' || verdict === 'fail') {
-    const round = verdict === 'fail' ? fails : fails + 1;
-    return `复审轮次：第 ${round} 轮（上限 ${limit} 轮），${tail}`;
+    const at = head ? counted.indexOf(head) : -1;
+    const round = at >= 0 ? at + 1 : verdict === 'fail' ? counted.length : counted.length + 1;
+    return `复审轮次：第 ${round} 轮（按提交计，上限 ${limit} 轮），${tail}`;
   }
-  return `复审轮次：本次${verdict === 'accept' ? '接受风险' : '延期'}不计轮次；已审 ${fails} 轮（上限 ${limit} 轮），${tail}`;
+  return `复审轮次：本次${verdict === 'accept' ? '接受风险' : '延期'}不计轮次；已审 ${counted.length} 轮（按提交计，上限 ${limit} 轮），${tail}`;
 }
 
 /** 两种流程共用的参数校验：结论种类、defer 与 accept 的必填项。返回拒绝信息或 null。 */
@@ -258,7 +282,7 @@ export function recordReview({ root, verdict, reviewer, reportPath, summary = ''
   const logFile = path.join(reviews, 'log.jsonl');
   const prior = readLog(logFile).filter((e) => (e.branch ?? null) === branch);
   const scopeName = branch ? `分支 ${branch} ` : '游离 HEAD ';
-  const blocked = roundBlock(prior, verdict, config.maxReviewRounds, userDecision, scopeName);
+  const blocked = roundBlock(prior, verdict, config.maxReviewRounds, userDecision, scopeName, headSha);
   if (blocked) return { ok: false, message: blocked };
 
   const docHash = treeHash(root, docs);
@@ -286,7 +310,7 @@ export function recordReview({ root, verdict, reviewer, reportPath, summary = ''
   if (verdict === 'accept') lines.push(`用户决定接受风险：${userDecision}`);
   if (docsOnly) lines.push('本次只有文档类改动（reviewIgnore 之内）：闸门范围为空，树哈希每一轮都相同，这次登记以上面的提交号和文档内容哈希为准；推送核对不要求这份记录');
   if (uncommitted > 0) lines.push(`登记时有 ${uncommitted} 个改动文件未提交：上面的提交不含这些改动，复审对应的是当时的工作区内容`);
-  lines.push(roundLine([...prior, record], verdict, config.maxReviewRounds, scopeName));
+  lines.push(roundLine([...prior, record], verdict, config.maxReviewRounds, scopeName, headSha));
   return { ok: true, message: lines.join('\n'), record };
 }
 
@@ -306,12 +330,13 @@ function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, 
   const logFile = prLogFile(root, no);
   const prior = readLog(logFile);
   const scopeName = `PR #${no} `;
-  const blocked = roundBlock(prior, verdict, config.maxReviewRounds, userDecision, scopeName);
-  if (blocked) return { ok: false, message: blocked };
 
   const st = readPr(root, no, gh); // gh 失败时抛错
   if (st.state !== 'OPEN') return { ok: false, message: `PR #${no} 不是打开状态（${st.state}），不能登记` };
   if (st.ciProblems.length > 0) return { ok: false, message: `CI 未在最终提交 ${st.head.slice(0, 12)} 上全部通过，不能登记：\n  ${st.ciProblems.join('\n  ')}` };
+  // 轮次按提交计，要先知道这次登记对应 PR 的哪个最终提交
+  const blocked = roundBlock(prior, verdict, config.maxReviewRounds, userDecision, scopeName, st.head);
+  if (blocked) return { ok: false, message: blocked };
 
   const file = prRecordFile(root, no, kind);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -326,7 +351,7 @@ function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, 
   fs.writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`);
   const lines = [`已登记 PR #${no} 的${KINDS[kind]}（${verdict}，最终提交 ${st.head.slice(0, 12)}）`];
   if (verdict === 'accept') lines.push(`用户决定接受风险：${userDecision}`);
-  lines.push(roundLine([...prior, record], verdict, config.maxReviewRounds, scopeName));
+  lines.push(roundLine([...prior, record], verdict, config.maxReviewRounds, scopeName, st.head));
   return { ok: true, message: lines.join('\n'), record };
 }
 
