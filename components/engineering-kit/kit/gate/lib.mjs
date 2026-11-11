@@ -1,7 +1,8 @@
 // 工程闸门共享函数：读取配置与豁免、判定改动范围、计算代码树哈希、读写记录、获取全局锁、读取 PR 状态（gh）。
 // 业务含义：闸门要回答三件事——这次改动了哪些文件（范围）、这些文件现在的内容是什么（树哈希）、
 // 测试与复审记录是不是针对这份内容、这个基准提交做的（绑定）。范围只有一个口径（gateScope）：
-// 判定文档用的 reviewIgnore 取基准提交上的配置（分支改自己的配置豁免不了自己），配置、豁免表和套件脚本永远在范围内。
+// 判定文档用的 reviewIgnore 取基准提交上的配置（分支改自己的配置豁免不了自己），配置、豁免表和套件脚本永远在范围内；
+// 基准分支设置（base）取默认主干上的配置，在 loadConfig 里统一得出（分支把 base 指向自己也让范围变不空）。
 // 只读 git 与工作区，写入只发生在 git 目录下的记录目录里，
 // 不污染工作区。测试与推送前复审记录放在各工作树自己的 git 目录（互不覆盖）；全局锁与 PR 审查记录（pr 流程）
 // 放在 git 公共目录：同一仓库同时只跑一个闸门，PR 的复审与合并可以在不同工作树进行。
@@ -52,7 +53,13 @@ export function gitCommonDir(root) {
   return r.out.trim();
 }
 
-/** 读取项目配置（profile 结构或旧版扁平结构）并展开为有效配置；缺失、不是合法 JSON 或结构错误时报错。 */
+/**
+ * 读取项目配置（profile 结构或旧版扁平结构）并展开为有效配置；缺失、不是合法 JSON 或结构错误时报错。
+ * 基准分支设置（base）不由被审分支决定：生效值取默认主干上的配置（见 mainlineBase），所有解析基准的地方
+ * （gateScope、newFiles、推送引用核对、合并入口、巡检）都经这里拿到同一个值。返回的配置另带：
+ *   worktreeBase  工作区配置里写的 base
+ *   baseNote      两者不同时给使用者的一行提示（不算错误），相同时为 null
+ */
 export function loadConfig(root) {
   const file = path.join(root, CONFIG_FILE);
   if (!fs.existsSync(file)) throw new Error(`缺少 ${CONFIG_FILE}，请先运行同步脚本创建`);
@@ -62,7 +69,32 @@ export function loadConfig(root) {
   } catch (e) {
     throw new Error(`${CONFIG_FILE} 不是合法 JSON：${e.message}`);
   }
-  return normalizeConfig(user);
+  const config = normalizeConfig(user);
+  const main = mainlineBase(root);
+  const base = main ? main.base : config.base;
+  const baseNote = base === config.base
+    ? null
+    : `提示：工作区配置的 modules.gate.base 是 ${JSON.stringify(config.base)}，闸门以默认主干 ${main.ref} 上的设置 ${JSON.stringify(base)} 为准；要改基准，须先在主干上改配置`;
+  return { ...config, base, worktreeBase: config.base, baseNote };
+}
+
+/**
+ * 默认主干上配置的基准分支设置：按 auto 的规则找到默认主干（origin/HEAD、origin/main、origin/master、main、master），
+ * 读取该提交上的项目配置的 base。返回 { ref, base }；找不到默认主干（空仓库、首次提交前）或该提交上没有配置文件时返回 null
+ * （由调用方用工作区的值）。默认主干上的配置读不出或不合法时抛错（失败不放行）。
+ * 业务含义：分支把 base 改成指向自己，改动就成了空的，闸门会直接放行；所以基准设置只认主干上的。
+ */
+export function mainlineBase(root) {
+  const ref = AUTO_BASE_CANDIDATES.find((c) => git(root, ['rev-parse', '--verify', '--quiet', `${c}^{commit}`]).ok);
+  if (!ref) return null;
+  if (!git(root, ['cat-file', '-e', `${ref}:${CONFIG_FILE}`]).ok) return null;
+  const r = git(root, ['show', `${ref}:${CONFIG_FILE}`]);
+  if (!r.ok) throw new Error(`无法读取默认主干 ${ref} 上的 ${CONFIG_FILE}：${r.err.trim()}`);
+  try {
+    return { ref, base: normalizeConfig(JSON.parse(r.out)).base };
+  } catch (e) {
+    throw new Error(`默认主干 ${ref} 上的 ${CONFIG_FILE} 无法展开：${e.message}`);
+  }
 }
 
 /** 读取豁免表；没有则为空。豁免只放行被列出的路径，不影响其他文件。 */

@@ -403,3 +403,60 @@ test('漏洞 7：文档改名到不允许的位置也被拦', () => {
   const res = verify({ root });
   assert.ok(res.problems.some((p) => /允许的文档位置.*docs\/random\.md/.test(p)), res.problems.join('\n'));
 });
+
+// ---------- 8. 分支改 modules.gate.base 让范围变空 ----------
+
+test('漏洞 8a：分支把 base 改成指向自己、加一个无测试的源文件并提交，推送核对仍不通过，并提示以默认主干上的设置为准', () => {
+  const root = featureRepo();
+  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, base: 'feat' }, null, 2));
+  write(root, 'src/rank.ts', `${SRC_HEADER}/** 排序。 */\nexport function rank(x: number) {\n  return x * 2;\n}\n`);
+  commitAll(root, 'feat: 自己当基准');
+  const res = verify({ root });
+  assert.equal(res.ok, false, JSON.stringify(res));
+  assert.ok(res.problems.some((p) => /没有引用它的测试|没有测试记录/.test(p)), res.problems.join('\n'));
+  assert.match(res.note, /默认主干/);
+  assert.equal(loadConfig(root).base, 'main', '生效的基准设置取默认主干上的配置');
+  const g = runGate({ root });
+  assert.equal(g.ok, false);
+  assert.ok(g.messages.some((m) => /默认主干/.test(m)), g.messages.join('\n'));
+});
+
+test('漏洞 8b：主干配置的 base 是 dev 时，功能分支照常按 dev 计算范围（即使 dev 上的配置写的是别的）', () => {
+  const root = tmpRepo();
+  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, base: 'dev' }, null, 2));
+  write(root, 'README.md', '# 说明\n');
+  commitAll(root, 'base');
+  git(root, ['checkout', '-q', '-b', 'dev']);
+  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, base: 'main' }, null, 2));
+  write(root, 'dev.txt', 'dev\n');
+  commitAll(root, 'dev');
+  git(root, ['checkout', '-q', '-b', 'feat']);
+  write(root, 'feat.txt', 'feat\n');
+  const config = loadConfig(root);
+  assert.equal(config.base, 'dev');
+  assert.deepEqual(scopeFiles(root, config), ['feat.txt']);
+});
+
+test('漏洞 8c：默认主干上没有配置文件时，用工作区配置的 base', () => {
+  const root = tmpRepo();
+  write(root, 'README.md', '# 说明\n');
+  commitAll(root, 'base');
+  git(root, ['checkout', '-q', '-b', 'dev']);
+  write(root, 'dev.txt', 'dev\n');
+  commitAll(root, 'dev');
+  git(root, ['checkout', '-q', '-b', 'install']);
+  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, base: 'dev' }, null, 2));
+  write(root, 'a.txt', 'a\n');
+  const config = loadConfig(root);
+  assert.equal(config.base, 'dev');
+  assert.deepEqual(scopeFiles(root, config), ['a.txt', 'engineering.config.json']);
+});
+
+test('漏洞 8：默认主干上的配置不合法时报错，不放行', () => {
+  const root = tmpRepo();
+  write(root, 'engineering.config.json', '{ 不是 JSON');
+  commitAll(root, 'base');
+  git(root, ['checkout', '-q', '-b', 'feat']);
+  write(root, 'engineering.config.json', JSON.stringify(TEST_CONFIG, null, 2));
+  assert.throws(() => loadConfig(root), /默认主干/);
+});

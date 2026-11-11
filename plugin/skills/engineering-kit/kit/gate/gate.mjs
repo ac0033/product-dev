@@ -3,7 +3,8 @@
 // 只打印测试一行，看的人分不清静态检查是通过了还是没有执行。业务含义：测试记录只对“跑测试时”的那份代码、
 // 那个基准提交有效；跑测试期间代码变了，记录作废（树哈希前后不一致）。差异只来自运行期间新出现的未跟踪文件时
 // （多半是覆盖率、快照这类测试产物），仍判不通过，但提示列出这些文件并建议加入 .gitignore。
-// 闸门范围的口径见 lib.mjs 的 gateScope（reviewIgnore 取基准提交上的配置）。
+// 闸门范围的口径见 lib.mjs 的 gateScope（reviewIgnore 取基准提交上的配置）；基准分支设置取默认主干上的配置，
+// 工作区写的 base 与它不同时输出一行提示。
 // 用法：node scripts/engineering/gate/gate.mjs
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -58,7 +59,7 @@ function newArtifacts(root, beforeScope, beforeHash, afterScope) {
  * 运行闸门。返回 { ok, messages, record }。通过时 messages 先列两项静态检查，再列测试结果。
  * 静态检查未通过时直接返回，不运行测试，也不写测试记录。记录里的 base 是基准提交，verify 与 review 核对它。
  */
-export function runGate({ root }) {
+function runChecks({ root }) {
   const config = loadConfig(root);
   const exempt = loadExempt(root);
   const release = acquireLock(root, config.lockMaxAgeMinutes);
@@ -151,6 +152,16 @@ export function runGate({ root }) {
   } finally {
     release();
   }
+}
+
+/**
+ * 运行闸门，工作区配置的 base 与生效值（默认主干上的设置）不同时，在输出最前面加一行提示（不算错误）。
+ * 返回值同 runChecks。
+ */
+export function runGate({ root }) {
+  const res = runChecks({ root });
+  const { baseNote } = loadConfig(root);
+  return baseNote ? { ...res, messages: [baseNote, ...res.messages] } : res;
 }
 
 if (isMain(import.meta.url)) {

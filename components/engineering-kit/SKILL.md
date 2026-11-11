@@ -102,7 +102,7 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 ## 6. 套件的范围与局限
 
 - 必须是 git 仓库：目标不是 git 仓库时拒绝安装，加 `--init` 才会自动 git init。
-- 基准分支默认 `base: "auto"`：依次取 origin/HEAD、origin/main、origin/master、main、master；仓库还没有任何提交时，首次提交前的全部文件都按改动检查。没有远程也能用。
+- 基准分支默认 `base: "auto"`：依次取 origin/HEAD、origin/main、origin/master、main、master；仓库还没有任何提交时，首次提交前的全部文件都按改动检查。没有远程也能用。生效的 `base` 以默认主干（按同样的顺序找到的第一个）上的项目配置为准，被审分支改它不生效；找不到默认主干或主干上还没有配置文件（首次安装）时才用工作区的值；主干上的配置读不出或不合法时报错。工作区的值与生效值不同时，闸门和推送核对输出一行提示，要改基准须先在主干上改。
 - 尚无源码与测试文件时，闸门不运行测试命令（记录为“无需测试”）；一旦出现源码，测试先行检查就会要求测试。本次改动里有代码文件、却没有任何文件匹配 `sourceGlobs` 与 `testGlobs` 时，闸门报错（多半是配置没按项目修改），不记为通过。
 - Python 预设的测试命令是 `python -m pytest`：需要 Python 3.12 与 pytest 在 PATH 中。TypeScript 预设用 Node 24 的 `node --test` 直接运行 .test.ts，不做 tsc 类型检查。
 - 源文件判断依赖 `sourceGlobs` 与 `testGlobs`，配置不准，闸门就不准。
