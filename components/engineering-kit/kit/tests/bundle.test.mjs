@@ -188,6 +188,12 @@ test('--from-tag：用完删除导出的临时目录', () => {
 });
 
 test('仓库根的 .gitattributes 与模板一致（同步按字节复制，CRLF 检出会弄坏脚本与哈希）', () => {
-  const top = path.resolve(BUNDLE_ROOT, '..');
+  const top = spawnSync('git', ['-C', BUNDLE_ROOT, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).stdout.trim();
   assert.equal(read(top, '.gitattributes').trim(), read(BUNDLE_ROOT, 'kit/templates/gitattributes').trim());
+});
+
+test('历史目录移动：独立仓库仍可导出旧 engineering-kit 标签的真实内容', () => {
+  const exported = extractTag('engineering-kit-v0.2.0');
+  try { assert.equal(read(exported, 'kit/VERSION').trim(), '0.2.0'); }
+  finally { fs.rmSync(exported, { recursive: true, force: true }); }
 });

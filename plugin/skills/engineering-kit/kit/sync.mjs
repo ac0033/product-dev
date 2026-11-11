@@ -66,13 +66,16 @@ export function checkKit({ target, bundleRoot = BUNDLE_ROOT } = {}) {
 
 /**
  * 把某个 git 标签下的整包导出到临时目录，返回目录路径（用于回滚或安装旧版本）。
- * 标签位于套件所在的源仓库（skills 仓库）中，路径为 engineering-kit/。
+ * 标签位于套件源仓库；按该标签实际保存的目录读取，兼容历史目录移动。
  */
 export function extractTag(tag, bundleDir = BUNDLE_ROOT) {
   const top = repoRoot(bundleDir);
-  const rel = path.relative(top, bundleDir).replace(/\\/g, '/');
+  let rel = path.relative(top, bundleDir).replace(/\\/g, '/');
   const ref = git(top, ['rev-parse', '--verify', '--quiet', `${tag}^{commit}`]);
   if (!ref.ok) throw new Error(`找不到版本标签 ${tag}`);
+  const candidates = [...new Set([rel, 'components/engineering-kit', 'product-dev/components/engineering-kit', 'engineering-kit'])];
+  rel = candidates.find((candidate) => git(top, ['cat-file', '-e', tag + ':' + candidate + '/kit/VERSION']).ok);
+  if (!rel) throw new Error('标签中没有工程套件：' + tag);
   const out = fs.mkdtempSync(path.join(os.tmpdir(), `ekit-${tag}-`));
   const files = git(top, ['ls-tree', '-r', '--name-only', tag, rel]);
   if (!files.ok) throw new Error(`读取标签 ${tag} 失败`);

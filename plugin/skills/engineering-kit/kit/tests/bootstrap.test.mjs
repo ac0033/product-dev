@@ -186,7 +186,7 @@ test('命令行入口：经由目录连接（junction/符号链接）调用时�
   const real = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-real-'));
   const link = `${real}-link`;
   fs.symlinkSync(real, link, 'junction');
-  const kit = path.resolve('.');
+  const kit = path.resolve(BUNDLE_ROOT, 'kit');
   fs.cpSync(kit, path.join(real, 'kit'), { recursive: true });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-target-'));
   git(dir, ['init', '-q', '-b', 'main']);

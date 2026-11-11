@@ -36,6 +36,9 @@ export function git(cwd, args) {
 export function tmpRepo() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-'));
   git(root, ['init', '-q', '-b', 'main']);
+  git(root, ['config', 'user.name', 'test']);
+  git(root, ['config', 'user.email', 'test@example.com']);
+  git(root, ['config', 'commit.gpgsign', 'false']);
   return root;
 }
 
