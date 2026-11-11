@@ -18,14 +18,14 @@ const read = (rel) => fs.readFileSync(path.join(PLUGIN, rel), 'utf8').replace(/\
 const ENTRY = read(`${ENTRY_DIR}/SKILL.md`);
 
 /**
- * 流程导图里的步骤清单（来源：流程导图的四张流程图，共 31 步）。键是入口里的节标题开头。
- * 导图改了步骤，这里和入口要一起改。
+ * 流程导图里的步骤清单（来源：流程导图的四张流程图，共 31 步；2026-11-12 起交付段在任务拆解与逐片开发之间加了“测试设计”，
+ * 共 32 步，docs/images/delivery.png 还没重画）。键是入口里的节标题开头。导图改了步骤，这里和入口要一起改。
  */
 export const STEPS = {
   '0. 恢复现场': ['恢复现场'],
   '2. 新项目': ['装工程底座', '需求 PRD', '原型与 UI', '实际走查', '架构设计', '综合评审', '配置闸门'],
   '3. 加功能': ['开工检查', '探索代码库', '澄清问题', '改产品行为?', '功能契约', '方案对比', '用户选定方案'],
-  '4. 交付段': ['任务拆解', '逐片开发', '推送前自查', '机械闸门', 'PR 与 CI', '独立复审', '合并与收工', '验收与发布'],
+  '4. 交付段': ['任务拆解', '测试设计', '逐片开发', '推送前自查', '机械闸门', 'PR 与 CI', '独立复审', '合并与收工', '验收与发布'],
   '5. 修 bug': ['稳定复现', '定位根因', '是需求缺口?', '写失败测试', '最小修复', '查同类与调用方', '自查到合并', '回归入库'],
 };
 /**
@@ -49,6 +49,7 @@ export const GOALS = {
   "方案对比": "比较最小改动、结构清晰、折中三种做法并给出推荐",
   "用户选定方案": "得到明确批准再进入交付段",
   "任务拆解": "拆成纵向切片，每片有验收条件和验证方法",
+  "测试设计": "依据契约和场景表先写出测试，预期不从实现倒推",
   "逐片开发": "每片先写测试、再实现、通过后提交",
   "推送前自查": "作者一侧的问题清零",
   "机械闸门": "静态检查、测试记录都与当前代码一致",
@@ -120,7 +121,7 @@ test('步骤齐全：导图里的步骤入口里都有，次序一致，四栏�
       count += 1;
     }
   }
-  assert.equal(count, 31, '步骤总数不是导图里的 31 步');
+  assert.equal(count, 32, '步骤总数不是 32 步（导图的 31 步加测试设计）');
   assert.equal([...rows.keys()].length, Object.keys(STEPS).length, '入口里有清单之外的步骤表');
 });
 
@@ -241,7 +242,7 @@ test('分流与次序：授权的实质句子、缩短路线的步骤、两种�
   assert.ok(line('远程仓库与合并入口').includes('由用户合并或由用户指定入口，不自行合并'), '没有写明 pre-push 流程下不自行合并');
   assert.ok(line('始终单独授权的事项').includes('按 R2 的清单办，不因路线已开始而省略'), '“始终单独授权”一条被改了');
   // 分流表：六种情况各自的路线
-  const routes = { 新项目: '第 2 节（装工程底座 → 设计段 → 配置闸门）→ 第 4 节', 加功能: '第 3 节 → 第 4 节', '修 bug': '第 5 节', 小改动: '第 6 节', 只改文档: '第 6 节', 装或升级工程套件: '第 7 节' };
+  const routes = { 新项目: '第 2 节（装工程底座 → 设计段 → 配置闸门）→ 第 4 节', 加功能: '第 3 节 → 第 4 节', 小新增: '第 6 节', '修 bug': '第 5 节', 小改动: '第 6 节', 只改文档: '第 6 节', 装或升级工程套件: '第 7 节' };
   const routing = ENTRY.split(/^## /m).find((s) => s.startsWith('1. 分流'));
   for (const [kind, route] of Object.entries(routes)) {
     const row = routing.split('\n').find((l) => l.startsWith(`| ${kind} |`));
@@ -251,13 +252,13 @@ test('分流与次序：授权的实质句子、缩短路线的步骤、两种�
   assert.ok(line('建远程仓库是外部动作').includes('先得到用户批准'), '建远程仓库没有写明先得到批准');
   // 缩短路线：步骤序列固定，其中每一步都是流程里有的步骤
   const all = new Set(Object.values(STEPS).flat());
-  const short = { 小改动: ['开工检查', '逐片开发', '推送前自查', '机械闸门', 'PR 与 CI', '独立复审', '合并与收工'], 只改文档: ['开工检查', '直接改', '机械闸门', 'PR 与 CI', '合并与收工'] };
+  const short = { 小新增: ['开工检查', '读相关代码', '逐片开发', '推送前自查', '机械闸门', 'PR 与 CI', '独立复审', '合并与收工'], 小改动: ['开工检查', '逐片开发', '推送前自查', '机械闸门', 'PR 与 CI', '独立复审', '合并与收工'], 只改文档: ['开工检查', '直接改', '机械闸门', 'PR 与 CI', '合并与收工'] };
   for (const [route, expected] of Object.entries(short)) {
     const row = ENTRY.split('\n').find((l) => l.startsWith(`| ${route} |`) && l.includes('→'));
     assert.ok(row, `缩短路线里没有“${route}”`);
     const steps = row.split('|')[2].split('→').map((s) => s.replace(/（[^）]*）/g, '').trim());
     assert.deepEqual(steps, expected, `“${route}”的步骤走样了`);
-    for (const s of steps) assert.ok(all.has(s) || s === '直接改', `“${route}”里的 ${s} 不是流程里的步骤`);
+    for (const s of steps) assert.ok(all.has(s) || ['直接改', '读相关代码'].includes(s),`“${route}”里的 ${s} 不是流程里的步骤`);
   }
   assert.match(line('| 只改文档 | 开工检查'), /不做独立复审（R7）/);
   // 两种复审流程的次序
@@ -386,4 +387,21 @@ test('设计角色的兼任与模型：规则只写在设计总控第 1 节，�
   for (const banned of ['一份已有产物', '两个以上角色', '直接兼任', '确认再兼任', '原型角色可以用', '需求角色和架构角色用']) assert.ok(!ENTRY.includes(banned), `入口重复定义了设计总控的规则：${banned}`);
   // 入口里别的说法不能与总控矛盾：不能再写“不直接加载角色技能”这种一刀切的话
   assert.ok(!ENTRY.includes('；不直接加载角色技能。'), '入口仍写着主对话一律不加载角色技能，与兼任规则矛盾');
+});
+
+test('模型分档、测试阶段与复审循环：R9 写明分档，入口和方法文档只引用它；两份任务书、报告落盘、四个测试阶段都在', () => {
+  const r9 = read('skills/engineering-kit/kit/rules/AGENTS.block.md').split('\n').find((l) => l.startsWith('- R9 '));
+  for (const text of ['测试设计不低于实施者', '首轮代码复审、安全专项', '一致性审和范围明确的修后复核可以用中档模型', '升档重审', '优先用脚本']) assert.ok(r9.includes(text), `R9 缺：${text}`);
+  assert.ok(!r9.includes('复审模型不弱于被复审内容的作者'), 'R9 还是不分档的旧说法');
+  const review = read(`${ENTRY_DIR}/references/review.md`);
+  const proc = read(`${ENTRY_DIR}/references/process.md`);
+  assert.ok(ENTRY.includes('测试设计和各种复审按 R9 的分档') && !ENTRY.includes('方案设计和复审用不弱于主对话的模型'), '入口“约定”的模型一句没有改成引用 R9 的分档');
+  assert.ok(review.includes('模型：按 R9 的分档') && !review.includes('复审用的模型不弱于被复审内容的作者'), 'review.md 第 1 节的模型一段没有改成按 R9 分档');
+  for (const h of ['### 首轮任务书', '### 修后复核任务书', '## 8. 一轮与修复循环']) assert.ok(review.includes(h), `review.md 缺“${h}”`);
+  for (const text of ['以本任务书为准', '不按置信度过滤', '不是未暂存的改动', '报告一律由主对话落盘', '已关闭', '反转验证']) assert.ok(review.includes(text), `review.md 缺：${text}`);
+  assert.ok(!review.includes('能写文件的把报告写到'), 'review.md 还在区分复审者能不能写文件');
+  for (const cmd of ['accept', '--user-decision', '--kind consistency', 'defer --kind consistency']) assert.ok(review.includes(cmd), `review.md 缺 ${cmd}`);
+  const phases = proc.split('### 测试的四个阶段')[1]?.split(/^##+ /m)[0] ?? '';
+  for (const row of ['| 开发中 |', '| 首次候选 |', '| 修复后 |', '| 最终提交 |']) assert.ok(phases.includes(row), `process.md 的测试阶段缺 ${row}`);
+  assert.ok(phases.includes('变异检查') && phases.includes('gate.mjs --affected') && phases.includes('复审者不重跑全量测试'), '测试阶段缺变异检查、按影响范围或复审者不重跑全量');
 });

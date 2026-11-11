@@ -56,9 +56,9 @@
 - 版权声明：Copyright (c) 2026 DietrichGebert
 - 参考的原文件：`skills/ponytail/SKILL.md`（最小改动规则）、`skills/ponytail-review/SKILL.md`（评审检查项）
 - 本插件里的改写文件：
-  - [skills/product-dev/references/build.md](skills/product-dev/references/build.md)：第 1、2、5 节
+  - [skills/product-dev/references/build.md](skills/product-dev/references/build.md)：第 1、2、6 节
   - [skills/product-dev/references/self-review.md](skills/product-dev/references/self-review.md)
-- 我们的改动：译为中文。`build.md` 第 1、2、5 节和 `self-review.md` 第 1 到 3 节接近原文的逐句翻译，只做了少量调整；其余部分按本插件的流程重写。去掉了常驻模式、级别切换、回复结尾格式和评审报告格式；原文“只注释为什么”“琐碎改动不必写测试”两条改为以项目闸门为准；评审清单从“应要求出报告”改为“作者推送前自查”，并加了本项目特有的检查项。没有收录 ponytail 的钩子、命令和其余技能。
+- 我们的改动：译为中文。`build.md` 第 1、2、6 节和 `self-review.md` 第 1 到 3 节接近原文的逐句翻译，只做了少量调整；其余部分按本插件的流程重写。去掉了常驻模式、级别切换、回复结尾格式和评审报告格式；原文“只注释为什么”“琐碎改动不必写测试”两条改为以项目闸门为准；评审清单从“应要求出报告”改为“作者推送前自查”，并加了本项目特有的检查项。没有收录 ponytail 的钩子、命令和其余技能。
 
 ## 5. agent-skills
 
@@ -69,10 +69,10 @@
 - 参考的原文件：`skills/planning-and-task-breakdown/SKILL.md`、`skills/incremental-implementation/SKILL.md`、`skills/debugging-and-error-recovery/SKILL.md`、`skills/code-review-and-quality/SKILL.md`、`skills/security-and-hardening/SKILL.md`、`references/security-checklist.md`
 - 本插件里的改写文件：
   - [skills/product-dev/references/planning.md](skills/product-dev/references/planning.md)
-  - [skills/product-dev/references/build.md](skills/product-dev/references/build.md)：第 4 节
+  - [skills/product-dev/references/build.md](skills/product-dev/references/build.md)：第 5 节
   - [skills/product-dev/references/debugging.md](skills/product-dev/references/debugging.md)
-  - [skills/product-dev/references/review.md](skills/product-dev/references/review.md)：第 3、4、6 节和任务书里的评审步骤
-- 我们的改动：译为中文。各文件的结构、表格和步骤贴近原文（依赖图、任务大小表、调试六步、五个评审维度等），措辞是翻译加改写；文件位置、任务字段、严重级别、报告格式和登记要求按本插件的工程套件重写；逐片循环从“先实现再测试”改为“先写测试再实现”；没有采用原文的输出路径（`tasks/`）、git 流程、示例代码和评审时限；修 bug 时失败测试排在修复之前；复审者只读，变异实验改由作者执行。没有收录 agent-skills 的其余技能、命令、钩子和子代理。
+  - [skills/product-dev/references/review.md](skills/product-dev/references/review.md)：第 3、4、6 节和首轮任务书里的评审步骤
+- 我们的改动：译为中文。各文件的结构、表格和步骤贴近原文（依赖图、任务大小表、调试六步、五个评审维度等），措辞是翻译加改写；文件位置、任务字段、严重级别、报告格式和登记要求按本插件的工程套件重写；逐片循环从“先实现再测试”改为“先写测试再实现”；没有采用原文的输出路径（`tasks/`）、git 流程、示例代码和评审时限；修 bug 时失败测试排在修复之前；复审者只读，变异实验提前到首次候选、由作者做。没有收录 agent-skills 的其余技能、命令、钩子和子代理。
 
 ## 许可全文
 
