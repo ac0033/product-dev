@@ -4,8 +4,6 @@
 
 ## 工具
 
-各工具独立维护版本，skills 仓库不设统一的插件版本号。下表分别列出当前版本及对应发布记录。
-
 | 工具 | 当前版本 | 用途 | 从哪里开始 |
 | --- | --- | --- | --- |
 | [Product Dev](product-dev/README.md) | [0.2.4](https://github.com/ac0033/skills/releases/tag/product-dev-v0.2.4) | 产品开发插件：需求与 PRD、原型与界面、架构图表、开发测试、审查与交付；支持新项目、加功能、修 bug 和工程套件维护 | [快速开始](product-dev/README.md#快速开始) |
