@@ -2,7 +2,7 @@
 
 Product Dev 也提供一个可独立导入的 **Agent Skills 包**。整个包只注册 `product-dev` 入口，工作流需要的内部技能、子代理任务书、工程脚本和模板都在包里。不同宿主可以使用同一个包。
 
-[下载 Product Dev 技能包](https://github.com/ac0033/skills/releases/download/product-dev-portable-v0.2.1/product-dev-skill.zip)
+[下载 Product Dev 技能包](https://github.com/ac0033/skills/releases/download/product-dev-portable-v0.2.2/product-dev-skill.zip)
 
 ## 按宿主安装
 
