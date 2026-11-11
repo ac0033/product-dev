@@ -4,7 +4,7 @@
 // 用法：node scripts/engineering/gate/hygiene.mjs [--json]    有错误时退出码 1
 import fs from 'node:fs';
 import path from 'node:path';
-import { EMPTY_TREE, allowedTopDirs, git, isMain, loadConfig, parseStatusZ, repoRoot, resolveBase } from './lib.mjs';
+import { EMPTY_TREE, allowedTopDirs, diffNames, git, isMain, loadConfig, parseStatusZ, repoRoot, resolveBase } from './lib.mjs';
 import crypto from 'node:crypto';
 
 /** 列出仓库中已跟踪和未忽略的文件（相对路径，斜杠分隔）；已在工作区删除但未暂存的文件不算。 */
@@ -186,11 +186,11 @@ export function runHygiene(root) {
   const isRecord = (f) => hygiene.recordDirs.some((d) => f.startsWith(`${d}/`));
   const modified = new Set();
   const status = git(root, ['status', '--porcelain', '-uall', '-z']);
-  if (status.ok) for (const { code, file: f } of parseStatusZ(status.out)) if (code.includes('M')) modified.add(f);
+  // 改名、复制条目的旧路径（from）不是“修改”，不计；改名后的新路径带 M 时照常计
+  if (status.ok) for (const { code, file: f, from } of parseStatusZ(status.out)) if (code.includes('M') && !from) modified.add(f);
   const mb = base ? git(root, ['merge-base', base, 'HEAD']) : null;
   if (mb?.ok) {
-    const committed = git(root, ['diff', '--name-only', '--diff-filter=M', mb.out.trim(), 'HEAD']);
-    for (const f of committed.out.split('\n').filter(Boolean)) modified.add(f);
+    for (const f of diffNames(root, ['--diff-filter=M', mb.out.trim(), 'HEAD']).files) modified.add(f);
   }
   for (const f of [...modified].sort()) if (isRecord(f)) err(`记录类文档不得修改旧文件（请追加新文件）：${f}`);
 

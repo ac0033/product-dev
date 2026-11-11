@@ -2,7 +2,7 @@
 // 业务含义：闸门要回答三件事——这次改动了哪些文件（范围）、这些文件现在的内容是什么（树哈希）、
 // 测试与复审记录是不是针对这份内容、这个基准提交做的（绑定）。范围只有一个口径（gateScope）：
 // 配置、豁免表和套件脚本永远在范围内。判定依据不由被审分支决定，在 loadConfig 一处得出：基准分支设置（base）取默认主干上的配置，
-// 判定策略字段（POLICY_KEYS：reviewIgnore、reviewFlow、reviewers、reviewMinChars、reviewKeyword）取基准提交上的配置。
+// 判定策略字段（POLICY_KEYS：reviewIgnore、reviewFlow、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds）取基准提交上的配置。
 // 只读 git 与工作区，写入只发生在 git 目录下的记录目录里，
 // 不污染工作区。测试与推送前复审记录放在各工作树自己的 git 目录（互不覆盖）；全局锁与 PR 审查记录（pr 流程）
 // 放在 git 公共目录：同一仓库同时只跑一个闸门，PR 的复审与合并可以在不同工作树进行。
@@ -55,11 +55,11 @@ export function gitCommonDir(root) {
 
 /**
  * 判定策略字段：决定“这次改动要不要过闸门、怎样才算复审通过”的配置项。它们不能由被审分支自己决定，
- * 生效值取基准提交上的配置（见 loadConfig）。其余字段（testCommand、testEnv、sourceGlobs、testGlobs、commentMode、
- * layout、hygiene 等）仍用工作区的值：它们随功能分支一起变化是正常的（新加语言、改测试命令），而且配置文件
+ * 生效值取基准提交上的配置（见 loadConfig）。maxReviewRounds 是复审轮次上限（review.mjs 拦截第几轮之后的登记）。
+ * 其余字段（testCommand、testEnv、testGroups、sourceGlobs、testGlobs、commentMode、layout、hygiene 等）仍用工作区的值：它们随功能分支一起变化是正常的（新加语言、改测试命令），而且配置文件
  * 永远在闸门范围内，改了就要过测试与复审，会被复审者看到。base 另由默认主干上的配置决定（mainlineBase）。
  */
-export const POLICY_KEYS = ['reviewIgnore', 'reviewFlow', 'reviewers', 'reviewMinChars', 'reviewKeyword'];
+export const POLICY_KEYS = ['reviewIgnore', 'reviewFlow', 'reviewers', 'reviewMinChars', 'reviewKeyword', 'maxReviewRounds'];
 
 /**
  * 读取某个提交上的项目配置并展开。该提交上没有配置文件时返回 null；读不出或不合法时抛错（失败不放行），
@@ -143,12 +143,15 @@ export function mainlineBase(root) {
   return cfg ? { ref, base: cfg.base } : null;
 }
 
-/** 读取豁免表；没有则为空。豁免只放行被列出的路径，不影响其他文件。 */
+/**
+ * 读取豁免表；没有则为空。豁免只放行被列出的路径，不影响其他文件。各段：testFirst（测试先行）、comments（注释）、
+ * newFiles（新文件位置）、assertions（测试文件里没有断言痕迹，例如只验证能导入的冒烟测试）。
+ */
 export function loadExempt(root) {
   const file = path.join(root, EXEMPT_FILE);
-  if (!fs.existsSync(file)) return { testFirst: {}, comments: {}, newFiles: {} };
+  if (!fs.existsSync(file)) return { testFirst: {}, comments: {}, newFiles: {}, assertions: {} };
   const j = JSON.parse(fs.readFileSync(file, 'utf8'));
-  return { testFirst: j.testFirst || {}, comments: j.comments || {}, newFiles: j.newFiles || {} };
+  return { testFirst: j.testFirst || {}, comments: j.comments || {}, newFiles: j.newFiles || {}, assertions: j.assertions || {} };
 }
 
 /** 路径（斜杠分隔）是否匹配任一 glob。 */
@@ -184,28 +187,38 @@ export function changedFiles(root, base) {
   return changedSince(root, baseRevision(root, base).rev);
 }
 
-/** 相对给定基准提交（或空树）的全部改动，口径同 changedFiles。 */
+/**
+ * 套件里所有“改动了哪些文件”都经这里取：git diff --no-renames --name-only <args>。返回 { ok, files, err }（files 为斜杠路径）。
+ * 业务含义：git 默认开启改名检测，改名只列出新路径，旧路径从改动列表里消失——代码 git mv 进 docs/ 就像“只改了文档”，
+ * 文件从一个测试分组改名到另一个分组时旧分组不跑。固定 --no-renames，改名一律表现为“旧路径删除 + 新路径新增”。
+ */
+export function diffNames(root, args) {
+  const r = git(root, ['diff', '--no-renames', '--name-only', ...args]);
+  return { ok: r.ok, files: r.ok ? pathLines(r.out) : [], err: r.err };
+}
+
+/** 相对给定基准提交（或空树）的全部改动，口径同 changedFiles。改名按旧路径删除加新路径新增计（diffNames）。 */
 function changedSince(root, rev) {
   const set = new Set();
   if (git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).ok) {
-    for (const f of pathLines(git(root, ['diff', '--name-only', rev, 'HEAD']).out)) set.add(f);
-    for (const f of pathLines(git(root, ['diff', '--name-only', 'HEAD']).out)) set.add(f);
+    for (const f of diffNames(root, [rev, 'HEAD']).files) set.add(f);
+    for (const f of diffNames(root, ['HEAD']).files) set.add(f);
   }
   for (const f of pathLines(git(root, ['ls-files', '--others', '--exclude-standard']).out)) set.add(f);
   return [...set].sort();
 }
 
 /**
- * 本次新增的文件：未跟踪的文件，加上相对基准提交新增或改名而来的文件（改名后的新路径也算新文件，
- * 否则 git mv 进不允许的位置就绕过了位置检查）。比较的是基准提交与工作区，已提交、已暂存的都算。
+ * 本次新增的文件：未跟踪的文件，加上相对基准提交新增的文件。diffNames 不做改名检测，改名后的新路径自然算新增
+ * （否则 git mv 进不允许的位置就绕过了位置检查）。比较的是基准提交与工作区，已提交、已暂存的都算。
  */
 export function newFiles(root, base) {
   const out = new Set(pathLines(git(root, ['ls-files', '--others', '--exclude-standard']).out));
   if (git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).ok) {
     const { rev } = baseRevision(root, base);
-    const r = git(root, ['diff', '-M', '--name-only', '--diff-filter=AR', rev]);
+    const r = diffNames(root, ['--diff-filter=A', rev]);
     if (!r.ok) throw new Error(`无法读取新增文件（git diff 失败）：${r.err.trim()}`);
-    for (const f of pathLines(r.out)) out.add(f);
+    for (const f of r.files) out.add(f);
   }
   return [...out].sort();
 }
@@ -252,17 +265,22 @@ export function resolveBase(root, base) {
  * 范围内未提交（已修改、已暂存、未跟踪或已删除）的文件。
  * 不把范围作为 pathspec 传给 git（文件多时会超过命令行长度，路径里的 [ * 等会被当作通配符）；
  * 而是读全部状态，再在本地按范围过滤。git 失败时抛错，绝不返回空列表（失败不放行）。
+ * 暂存的改名（R）旧路径也算：提交里的旧路径还是改名前的内容，工作区里它已“删除”，不算上它，
+ * 把源文件只暂存 git mv 进 docs/ 就能让推送核对看不出 HEAD 里有未经测试和复审的代码。复制（C）的来源文件没有变，不算。
  */
 export function uncommittedInScope(root, scope) {
   const r = git(root, ['status', '--porcelain', '-uall', '-z']);
   if (!r.ok) throw new Error(`无法读取工作区状态（git status 失败）：${r.err.trim()}`);
   const inScope = new Set(scope);
-  return parseStatusZ(r.out).filter((e) => inScope.has(e.file)).map((e) => e.file);
+  const files = parseStatusZ(r.out).filter((e) => !(e.from && e.code.includes('C') && !e.code.includes('R'))).map((e) => e.file);
+  return [...new Set(files.filter((f) => inScope.has(f)))];
 }
 
 /**
- * 解析 `git status --porcelain -z` 的输出：返回 [{ code, file }]（斜杠路径）。
- * -z 下路径不加引号（带空格、中文的路径原样输出）；改名条目后面多跟一个字段（旧路径），这里跳过它。
+ * 解析 `git status --porcelain -z` 的输出：返回 [{ code, file, from? }]（斜杠路径）。
+ * -z 下路径不加引号（带空格、中文的路径原样输出）。改名（R）、复制（C）条目后面多跟一个字段（旧路径或来源），
+ * 它也作为一项返回，带 from: true、code 与新路径相同：调用方据此决定是否计入（改名的旧路径是一处改动，不能丢）。
+ * 不靠 git status --no-renames：解析两种输出都对，不依赖 git 的版本和 status.renames 配置。
  */
 export function parseStatusZ(text) {
   const out = [];
@@ -272,7 +290,10 @@ export function parseStatusZ(text) {
     if (p.length < 4) continue;
     const code = p.slice(0, 2);
     out.push({ code, file: p.slice(3).replace(/\\/g, '/') });
-    if (code.includes('R') || code.includes('C')) i++;
+    if ((code.includes('R') || code.includes('C')) && parts[i + 1]) {
+      i++;
+      out.push({ code, file: parts[i].replace(/\\/g, '/'), from: true });
+    }
   }
   return out;
 }
@@ -295,6 +316,19 @@ export function allowedTopDirs(layout) {
  * 改它们等于改闸门本身，所以不受 reviewIgnore 影响（否则分支把 reviewIgnore 改成 ** 就能让范围变空）。
  */
 export const ALWAYS_IN_SCOPE = [CONFIG_FILE, EXEMPT_FILE, 'scripts/engineering/**'];
+
+/**
+ * 依赖清单与锁文件（glob，根目录和子目录都匹配）：它们一变，任何测试的结果都可能变，按影响范围测试时一律改跑全量。
+ * 局限：只列常见语言的包管理文件；项目自定义的依赖脚本不在其中，不要把它放进任何测试分组，让它的改动触发全量。
+ */
+export const DEPENDENCY_FILES = [
+  '**/package.json', '**/package-lock.json', '**/npm-shrinkwrap.json', '**/yarn.lock', '**/pnpm-lock.yaml', '**/pnpm-workspace.yaml',
+  '**/bun.lock', '**/bun.lockb', '**/deno.json', '**/deno.lock',
+  '**/requirements*.txt', '**/constraints*.txt', '**/pyproject.toml', '**/poetry.lock', '**/uv.lock', '**/Pipfile', '**/Pipfile.lock',
+  '**/setup.py', '**/setup.cfg', '**/go.mod', '**/go.sum', '**/go.work', '**/Cargo.toml', '**/Cargo.lock',
+  '**/Gemfile', '**/Gemfile.lock', '**/composer.json', '**/composer.lock', '**/pom.xml', '**/build.gradle', '**/build.gradle.kts',
+  '**/gradle.lockfile', '**/*.csproj', '**/packages.lock.json', '**/Package.swift', '**/Package.resolved',
+];
 
 /** 是否算文档（不计入闸门范围）：匹配给定的 reviewIgnore，且不是永远在范围内的文件。 */
 export function isIgnoredDoc(rel, reviewIgnore) {
@@ -359,11 +393,11 @@ function indexGitlinks(root) {
 }
 
 /**
- * 代码树哈希：对每个文件的路径与内容摘要排序后再取摘要。
- * 子模块（gitlink）按它指向的提交号计入；文件不存在（已删除）记为 deleted。只看这些文件的当前内容，与是否提交无关。
+ * 每个文件的内容摘要：路径 → git 对象名（与 git add 相同的清洗过滤器）；子模块记为 gitlink:<提交号>，文件不存在（已删除）记为 deleted。
+ * 测试记录保存它（files），以后按影响范围测试时与当前内容逐个比较，算出此后改了哪些文件。
  */
-export function treeHash(root, files) {
-  const sorted = [...files].sort();
+export function fileHashes(root, files) {
+  const sorted = [...new Set(files)].sort();
   const dirs = [];
   const present = sorted.filter((f) => {
     const p = path.join(root, f);
@@ -389,11 +423,24 @@ export function treeHash(root, files) {
     const out = r.stdout.split('\n').filter(Boolean);
     present.forEach((f, i) => hashes.set(f, out[i]));
   }
+  const out = {};
+  for (const f of sorted) out[f] = hashes.get(f) ?? links.get(f) ?? 'deleted';
+  return out;
+}
+
+/** 由 fileHashes 的结果算代码树哈希：对每个文件的路径与内容摘要排序后再取摘要。 */
+export function hashOfFiles(map) {
   const h = crypto.createHash('sha256');
-  for (const f of sorted) {
-    h.update(`${f}\t${hashes.get(f) ?? links.get(f) ?? 'deleted'}\n`);
-  }
+  for (const f of Object.keys(map).sort()) h.update(`${f}\t${map[f]}\n`);
   return h.digest('hex');
+}
+
+/**
+ * 代码树哈希：对每个文件的路径与内容摘要排序后再取摘要。
+ * 子模块（gitlink）按它指向的提交号计入；文件不存在（已删除）记为 deleted。只看这些文件的当前内容，与是否提交无关。
+ */
+export function treeHash(root, files) {
+  return hashOfFiles(fileHashes(root, files));
 }
 
 /** 记录目录：当前工作树自己的 git 目录下的 engineering-gate/（多个工作树各用各的，不互相覆盖）。 */
@@ -499,10 +546,10 @@ export function ciProblems(checks) {
 
 /**
  * 读取 PR 的状态、最终提交与 CI 结果（gh pr view；statusCheckRollup 是最终提交上的检查）。
- * 返回 { state, head, ciProblems, files }（files 是 PR 改动的文件路径，gh 最多返回 100 个）；gh 失败或输出不合法时抛错。
+ * 返回 { state, head, ciProblems }；gh 失败或输出不合法时抛错。不取 PR 的文件列表：改名时它可能只给新路径，且最多 100 个，“只改文档”由 merge.mjs 按本地差异判定。
  */
 export function readPr(root, pr, gh) {
-  const out = runGh(gh, ['pr', 'view', pr, '--json', 'state,headRefOid,statusCheckRollup,files'], root);
+  const out = runGh(gh, ['pr', 'view', pr, '--json', 'state,headRefOid,statusCheckRollup'], root);
   let j;
   try {
     j = JSON.parse(out);
@@ -510,8 +557,12 @@ export function readPr(root, pr, gh) {
     throw new Error(`gh pr view 的输出不是合法 JSON：${e.message}`);
   }
   if (!j || !j.headRefOid) throw new Error('gh pr view 的输出缺少最终提交（headRefOid）');
-  const files = Array.isArray(j.files) ? j.files.map((f) => f.path) : [];
-  return { state: j.state, head: j.headRefOid, ciProblems: ciProblems(j.statusCheckRollup), files };
+  return { state: j.state, head: j.headRefOid, ciProblems: ciProblems(j.statusCheckRollup) };
+}
+
+/** PR 审查历史：git 公共目录下 engineering-gate/pr/<编号>/log.jsonl，每次登记（pass、fail、defer、accept）追加一行，复审轮次按它计数。 */
+export function prLogFile(root, pr) {
+  return path.join(gitCommonDir(root), 'engineering-gate', 'pr', pr, 'log.jsonl');
 }
 
 /** PR 审查记录文件：git 公共目录下 engineering-gate/pr/<编号>/<kind>.json（复审与合并可能在不同工作树进行，所以不放 recordDir）。 */

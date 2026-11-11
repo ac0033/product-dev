@@ -48,7 +48,7 @@ test('基准分支解析不了：改动范围计算直接报错，不返回空�
 test('推送核对：范围内有未提交改动时拒绝（推送的是提交，闸门核对的必须是同一份代码）', () => {
   const root = featureRepo();
   write(root, 'src/dedup.ts', '// 去重模块：按标题相似度合并重复资源，是导入流程的一步。\nexport function dedup(a) {\n  return a;\n}\n');
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'x');\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'x');\n");
   const res = verify({ root });
   assert.equal(res.ok, false);
   assert.ok(res.problems.some((p) => /未提交/.test(p)), JSON.stringify(res.problems));

@@ -1,5 +1,5 @@
 {
-  "_说明": "项目配置（profile 2）：同步时只创建一次，之后由本项目维护，同步不覆盖。modules 是模块参数，layout 是目录布局，hygiene 是巡检参数，rules 是闸门规则。sourceGlobs、testGlobs、testCommand 必须按本项目修改。modules.gate.reviewFlow 是复审流程：pre-push（默认，推送前单项复审）或 pr（CI 通过后对 PR 做代码复审与一致性审，经 merge.mjs 合并；需要 GitHub 远程与 gh）。",
+  "_说明": "项目配置（profile 2）：同步时只创建一次，之后由本项目维护，同步不覆盖。modules 是模块参数，layout 是目录布局，hygiene 是巡检参数，rules 是闸门规则。sourceGlobs、testGlobs、testCommand 必须按本项目修改。modules.gate.reviewFlow 是复审流程：pre-push（默认，推送前复审，推送核对只要求代码复审）或 pr（CI 通过后对 PR 做代码复审与一致性审，经 merge.mjs 合并；需要 GitHub 远程与 gh）。modules.gate.testGroups 是可选的测试分组：数组，每项 { \"name\": 分组名, \"paths\": [glob…], \"command\": 测试命令 }，供 gate.mjs --affected 只跑受影响的分组（没有分组时照常跑 testCommand 全量）。modules.review.maxReviewRounds 是复审轮次上限（默认 3）：同一 PR 或分支登记满这么多次不通过后，再登记须带用户决定。",
   "profile": 2,
   "modules": {
     "gate": {
@@ -12,7 +12,8 @@
     "review": {
       "reviewers": ["product-dev:code-reviewer", "feature-dev:code-reviewer", "/code-review", "general-purpose"],
       "reviewMinChars": 200,
-      "reviewKeyword": "结论"
+      "reviewKeyword": "结论",
+      "maxReviewRounds": 3
     }
   },
   "layout": {

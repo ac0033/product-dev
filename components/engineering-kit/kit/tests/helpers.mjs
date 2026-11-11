@@ -76,7 +76,7 @@ export function featureRepo(config = {}) {
   const root = tmpRepo();
   write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, ...config }, null, 2));
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)];\n}\n`);
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup);\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup);\n");
   write(root, 'pass.mjs', 'process.exit(0);\n');
   write(root, 'fail.mjs', 'process.exit(3);\n');
   commitAll(root, 'base');

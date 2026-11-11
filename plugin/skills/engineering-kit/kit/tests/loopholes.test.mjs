@@ -31,7 +31,7 @@ const PASS_REPORT = `${BODY}结论\n通过\n`;
 /** 在功能分支上做一份能过静态检查的改动（源文件与引用它的测试一起改）。 */
 function passingChange(root, tag = 'sorted') {
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort(); // ${tag}\n}\n`);
-  write(root, 'test/dedup.test.ts', `import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, '${tag}');\n`);
+  write(root, 'test/dedup.test.ts', `import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, '${tag}');\n`);
 }
 
 /** 登记一次 pre-push 复审（pass，合格报告）。 */
@@ -106,11 +106,11 @@ test('漏洞 1b：review.mjs 与 gate.mjs 同一口径（工作区改 reviewIgno
 });
 
 /** 假的 gh：pr view 返回给定文件列表的打开 PR（CI 全过），其余命令成功。 */
-function fakeGh(files) {
+function fakeGh(files, head = 'a'.repeat(40)) {
   const calls = [];
   const view = {
     state: 'OPEN',
-    headRefOid: 'a'.repeat(40),
+    headRefOid: head,
     statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }],
     files: files.map((p) => ({ path: p })),
   };
@@ -123,21 +123,31 @@ function fakeGh(files) {
 }
 
 test('漏洞 1c：merge.mjs 判断“只改文档”用基准上的 reviewIgnore；含配置文件的 PR 不算只改文档', () => {
+  // 0.6.0 起“只改文档”按本地的基准提交到 PR 最终提交的差异判定（不再用 gh 的文件列表），所以每种 PR 都在临时仓库里真的提交出来
   const root = featureRepo({ reviewFlow: 'pr' });
-  // 工作区（PR 分支）把 reviewIgnore 改成 **：合并入口不能因此跳过审查
-  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, reviewFlow: 'pr', reviewIgnore: ['**'] }, null, 2));
-  const gh = fakeGh(['src/dedup.ts']);
-  const res = mergePr({ root, pr: '7', gh });
+  /** 从主干开一个分支、写入给定文件并提交，返回提交号（作为 PR 的最终提交）。 */
+  const prCommit = (branch, files) => {
+    git(root, ['checkout', '-q', '-b', branch, 'main']);
+    for (const [rel, text] of Object.entries(files)) write(root, rel, text);
+    commitAll(root, branch);
+    return git(root, ['rev-parse', 'HEAD']).trim();
+  };
+  // 工作区把 reviewIgnore 改成 **（不提交），PR 提交里只改一个源文件：合并入口不能因工作区的配置跳过审查
+  const selfIgnore = JSON.stringify({ ...TEST_CONFIG, reviewFlow: 'pr', reviewIgnore: ['**'] }, null, 2);
+  const h1 = prCommit('p1', { 'src/dedup.ts': `${SRC_HEADER}export const x = 1;\n` });
+  write(root, 'engineering.config.json', selfIgnore);
+  const res = mergePr({ root, pr: '7', gh: fakeGh(['src/dedup.ts'], h1) });
   assert.equal(res.ok, false, JSON.stringify(res));
   assert.ok(res.problems.some((p) => p.includes('缺少代码复审记录')), res.problems.join('\n'));
+  git(root, ['checkout', '-q', '--', 'engineering.config.json']);
 
-  const gh2 = fakeGh(['README.md', 'engineering.config.json']);
-  const res2 = mergePr({ root, pr: '7', gh: gh2 });
+  const h2 = prCommit('p2', { 'README.md': '# 说明\n', 'engineering.config.json': selfIgnore });
+  const res2 = mergePr({ root, pr: '7', gh: fakeGh(['README.md', 'engineering.config.json'], h2) });
   assert.equal(res2.ok, false, '含配置文件的 PR 不算只改文档');
   assert.ok(res2.problems.some((p) => p.includes('缺少代码复审记录')), res2.problems.join('\n'));
 
-  const gh3 = fakeGh(['README.md', 'docs/04-开发/a.md']);
-  assert.equal(mergePr({ root, pr: '7', gh: gh3 }).ok, true, '真正只改文档的 PR 仍按分档不审');
+  const h3 = prCommit('p3', { 'README.md': '# 说明\n', 'docs/04-开发/a.md': '说明\n' });
+  assert.equal(mergePr({ root, pr: '7', gh: fakeGh(['README.md', 'docs/04-开发/a.md'], h3) }).ok, true, '真正只改文档的 PR 仍按分档不审');
 });
 
 // ---------- 2. 基线变了旧记录仍有效 ----------
@@ -311,11 +321,15 @@ test('漏洞 4：“结论：**未**通过”“结论：有 2 个高级问题�
 });
 
 test('漏洞 4：“结论：未通过的问题已修复，通过”是通过；报告模板的“## 结论”下一行写法照常可用', () => {
-  for (const line of ['结论：未通过的问题已修复，通过\n', '## 结论\n\n通过（或 不通过）。一句话理由；无高、中级问题。\n', '> **结论**：**通过**\n', '结论：通过\n']) {
+  // 0.6.0 起报告模板的结论一节改成不带括号的示例写法（二选一）；带括号的占位写法“通过（或 不通过）”不再认作通过
+  for (const line of ['结论：未通过的问题已修复，通过\n', '## 结论\n\n通过。一句话理由；无高、中级问题。\n', '> **结论**：**通过**\n', '结论：通过\n']) {
     const root = gatedRepo();
     const r = reviewPass(root, `${BODY}${line}`);
     assert.equal(r.ok, true, `${line} → ${r.message}`);
   }
+  const placeholder = reviewPass(gatedRepo(), `${BODY}## 结论\n\n通过（或 不通过）。一句话理由；无高、中级问题。\n`);
+  assert.equal(placeholder.ok, false, placeholder.message);
+  assert.match(placeholder.message, /括号/);
 });
 
 test('漏洞 4：登记 fail 要求结论是不通过；找不到明确结论或前后矛盾时拒绝并提示写法', () => {
@@ -536,7 +550,8 @@ test('漏洞 10：“## 结论”下一行只是以“通过”开头（通过�
 
 test('漏洞 10：带句号的写法都能认出：“结论：通过。无高、中级问题。”“## 结论 / 通过。理由”“## 结论 / 不通过。理由”', () => {
   const root = gatedRepo();
-  for (const tail of ['结论：通过。无高、中级问题。\n', '## 结论\n通过。一句话理由；无高、中级问题。\n', '## 结论\n\n通过（或 不通过）。一句话理由；高、中级问题的编号清单。\n']) {
+  // 0.6.0 起带括号的模板占位写法不认（见 mechanisms.test.mjs 的结论判定用例），这里换成模板的新写法
+  for (const tail of ['结论：通过。无高、中级问题。\n', '## 结论\n通过。一句话理由；无高、中级问题。\n', '## 结论\n\n通过。一句话理由；高、中级问题的编号清单。\n']) {
     const r = reviewPass(root, `${BODY}${tail}`);
     assert.equal(r.ok, true, `${tail} → ${r.message}`);
   }

@@ -1,6 +1,9 @@
 // 推送前核对：git pre-push 钩子与 Claude 推送钩子共用。业务含义：本次改动含源文件时，必须同时满足
-//   静态检查通过（测试先行、注释）、测试记录通过、复审记录通过，且两份记录都对应当前代码树和当前基准提交（基线）。
-//   复审流程为 pr（modules.gate.reviewFlow）时不要求复审记录：复审在 CI 通过后针对 PR 最终提交进行，由 merge.mjs 核对。
+//   静态检查通过（测试先行、注释、断言）、测试记录通过、复审记录通过，且两份记录都对应当前代码树和当前基准提交（基线）。
+//   pre-push 流程的测试记录须是全量（gate.mjs 不带 --affected；没有 mode 字段的旧记录视为全量）；代码复审记录的结论为
+//   pass，或 accept（报告不通过、用户已知情并决定接受风险，输出写明“按用户决定接受风险放行”）。一致性审记录不要求。
+//   复审流程为 pr（modules.gate.reviewFlow）时不要求复审记录，测试记录接受按影响范围的（CI 会在最终提交上跑全量）：
+//   复审在 CI 通过后针对 PR 最终提交进行，由 merge.mjs 核对。
 // 闸门范围的口径见 lib.mjs 的 gateScope：本次改动中去掉文档的部分，判定文档用基准提交上配置的 reviewIgnore，
 //   项目配置、豁免表和 scripts/engineering/** 永远在范围内；基准分支设置取默认主干上的配置（lib.mjs 的 loadConfig），
 //   判定策略（reviewIgnore、reviewFlow 等）取基准提交上的配置，工作区写的值与生效值不同时给提示行。只改文档的推送直接放行。
@@ -10,6 +13,7 @@
 // 用法：node scripts/engineering/gate/verify.mjs
 //       node scripts/engineering/gate/verify.mjs --pre-push <远端名> <远端地址>   （由 pre-push 钩子调用，stdin 为推送的引用）
 import fs from 'node:fs';
+import { checkAssertions } from './check-assertions.mjs';
 import { checkComments } from './check-comments.mjs';
 import { checkTestFirst } from './check-test-first.mjs';
 import {
@@ -80,6 +84,7 @@ function verifyWith(root, config) {
     ...newProblems,
     ...checkTestFirst({ root, changed, config, exempt: exempt.testFirst }).map((p) => p.message),
     ...checkComments({ root, files: sources, config, exempt: exempt.comments }).map((p) => p.message),
+    ...checkAssertions({ root, changed, config: { ...config, reviewIgnore }, exempt: exempt.assertions }).problems.map((p) => p.message),
   ];
   // 推送的是提交；闸门核对的是工作区。范围内有未提交的改动时两者不是同一份代码，必须先提交再核对。
   const uncommitted = uncommittedInScope(root, scope); // git 失败时抛错，不放行
@@ -91,15 +96,18 @@ function verifyWith(root, config) {
   else if (!tests.passed) problems.push('最近一次测试未通过（或运行期间代码变化）');
   else if (tests.base !== baseRev) problems.push('测试记录的基线已变化（基准提交与跑闸门时不同，例如合入了新主干），请重跑闸门');
   else if (tests.treeHash !== hash) problems.push('测试记录与当前代码不一致（代码已变化），请重跑闸门');
+  else if (config.reviewFlow !== 'pr' && tests.mode === 'affected') problems.push('测试记录是按影响范围跑的（--affected）：pre-push 流程最终推送前须跑一次全量：gate.mjs');
 
   if (config.reviewFlow === 'pr') return { ok: problems.length === 0, problems, note: '' };
   const review = readRecord(root, 'review.json');
+  let note = '';
   if (!review) problems.push('没有复审记录：复审通过后运行 review.mjs pass --reviewer ... --report ...');
-  else if (review.verdict !== 'pass') problems.push('最近一次复审结论不是通过');
+  else if (review.verdict !== 'pass' && review.verdict !== 'accept') problems.push('最近一次复审结论不是通过');
   else if (review.base !== baseRev) problems.push('复审记录的基线已变化（基准提交与复审时不同），请重跑闸门并重新复审');
   else if (review.treeHash !== hash) problems.push('复审记录与当前代码不一致（复审之后代码变了），需重跑闸门并重新复审');
+  else if (review.verdict === 'accept') note = `代码复审结论为不通过，按用户决定接受风险放行（用户决定：${review.userDecision}）`;
 
-  return { ok: problems.length === 0, problems, note: '' };
+  return { ok: problems.length === 0, problems, note };
 }
 
 /** 全零的对象名：pre-push 的 stdin 里表示“删除”（本地一侧）或“远端还没有”（远端一侧）。 */

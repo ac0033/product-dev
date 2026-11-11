@@ -45,6 +45,8 @@ test('扁平 ⇄ profile 互转：字段不丢失', () => {
     base: 'origin/main', sourceGlobs: ['src/**/*.ts'], testGlobs: ['tests/**/*.ts'], reviewIgnore: ['**/*.md'],
     commentMode: 'header', testCommand: 'npm test', testEnv: { X: 'y' }, reviewers: ['general-purpose'],
     reviewMinChars: 200, reviewKeyword: '结论', lockMaxAgeMinutes: 90, reviewFlow: 'pr',
+    // 0.6.0 新增的两个扁平字段
+    testGroups: [{ name: 'unit', paths: ['src/**'], command: 'npm run test:unit' }], maxReviewRounds: 4,
   };
   const prof = toProfile(flat);
   assert.equal(prof.profile, 2);

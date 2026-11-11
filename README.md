@@ -1,6 +1,6 @@
 # Product Dev
 
-**面向 Claude Code、Codex、DeepSeek Harness 及其他支持 Agent Skills 的 Agent 的产品开发插件（0.2.7）。** 把一个产品想法或现有项目的改进目标，逐步变成可核对的设计、代码和交付结果。既能从零做产品、加功能、修 bug，也能只做设计、文档修改、复审、验收或工程套件维护。
+**面向 Claude Code、Codex、DeepSeek Harness 及其他支持 Agent Skills 的 Agent 的产品开发插件（0.2.8）。** 把一个产品想法或现有项目的改进目标，逐步变成可核对的设计、代码和交付结果。既能从零做产品、加功能、修 bug，也能只做设计、文档修改、复审、验收或工程套件维护。
 
 内置三组协作能力：**产品设计**（需求梳理、PRD、原型与界面设计、架构与图表）、**工程实现**（代码探索、方案对比、任务拆解、开发测试与调试）、**质量与交付**（检查闸门、独立审查、PR 与合并、验收与获授权的发布）。一个入口按任务选择需要的阶段，沿用项目规则，保留阶段产物与验证证据，帮助你减少遗漏、反复解释和交接断层。各阶段执行依赖[宿主提供的工具](INSTALL.md)。
 
@@ -49,7 +49,7 @@ codex plugin add product-dev@ac0033-skills
 在网页版或桌面版打开 **Plugins → Add plugin**，输入下面的包名和版本号，安装后启用。
 
 ```text
-dsh-product-dev@0.2.7
+dsh-product-dev@0.2.8
 ```
 
 在输入框用 `/product-dev` 加上你的任务。命令行安装和不装插件的用法见[其他 Agent 安装指南](INSTALL.md#deepseek-harness)。

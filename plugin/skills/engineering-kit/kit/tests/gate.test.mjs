@@ -37,7 +37,7 @@ test('测试先行：新源文件没有任何测试引用 → 报缺测试', () 
 test('测试先行：源文件和测试一起改 → 通过', () => {
   const root = featureRepo();
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'sorted');\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   const problems = checkTestFirst({ root, changed: changedFiles(root, 'main'), config: cfg, exempt: {} });
   assert.equal(problems.length, 0);
 });
@@ -99,7 +99,7 @@ test('树哈希：只改文档不改变哈希；改源文件后哈希变化', ()
 test('测试记录：测试通过后写入记录，哈希与当前树一致', () => {
   const root = featureRepo();
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'sorted');\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   const result = runGate({ root });
   assert.equal(result.ok, true, result.messages.join('\n'));
   assert.equal(result.record.passed, true);
@@ -109,7 +109,7 @@ test('测试记录：测试通过后写入记录，哈希与当前树一致', ()
 test('测试记录：测试失败 → 记录 passed=false，闸门不通过', () => {
   const root = featureRepo({ testCommand: 'node fail.mjs' });
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'sorted');\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   const result = runGate({ root });
   assert.equal(result.ok, false);
   assert.equal(result.record.passed, false);
@@ -118,7 +118,7 @@ test('测试记录：测试失败 → 记录 passed=false，闸门不通过', ()
 test('复审记录：报告太短 → 拒绝', () => {
   const root = featureRepo();
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'sorted');\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   assert.equal(runGate({ root }).ok, true);
   const rp = reportFile('结论\n通过\n');
   const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: rp, summary: 's' });
@@ -129,7 +129,7 @@ test('复审记录：报告太短 → 拒绝', () => {
 test('复审记录：复审者不在允许名单 → 拒绝', () => {
   const root = featureRepo();
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'sorted');\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   runGate({ root });
   const rp = reportFile(GOOD_REPORT);
   const r = recordReview({ root, verdict: 'pass', reviewer: 'me-myself', reportPath: rp, summary: 's' });
@@ -140,7 +140,7 @@ test('复审记录：复审者不在允许名单 → 拒绝', () => {
 test('复审记录：报告结论写“不通过”却记 pass → 拒绝', () => {
   const root = featureRepo();
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'sorted');\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   runGate({ root });
   const rp = reportFile(GOOD_REPORT.replace('通过\n', '不通过\n'));
   const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: rp, summary: 's' });
@@ -151,7 +151,7 @@ test('复审记录：报告结论写“不通过”却记 pass → 拒绝', () =
 test('复审记录：没有通过的测试记录时拒绝（先跑闸门）', () => {
   const root = featureRepo();
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'sorted');\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   const rp = reportFile(GOOD_REPORT);
   const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: rp, summary: 's' });
   assert.equal(r.ok, false);
@@ -161,7 +161,7 @@ test('复审记录：没有通过的测试记录时拒绝（先跑闸门）', ()
 test('推送前核对：完整流程通过；改源文件后作废；只改文档仍有效', () => {
   const root = featureRepo();
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'sorted');\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   assert.equal(runGate({ root }).ok, true);
   const rp = reportFile(GOOD_REPORT);
   assert.equal(recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: rp, summary: 's' }).ok, true);
@@ -193,7 +193,7 @@ function envRepo(config) {
   const root = featureRepo(config);
   write(root, 'check-env.mjs', 'process.exit(process.env.KIT_TEST_FLAG === "on" ? 0 : 5);\n');
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'sorted');\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   return root;
 }
 
@@ -232,7 +232,7 @@ test('闸门：只有套件脚本与配置的首次提交仍可通过（不被�
 
 test('推送核对与巡检的顶层目录白名单一致：testGlobs 推出的 test/ 目录，新文件不被推送核对拦截', () => {
   const root = featureRepo();
-  write(root, 'test/other.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup);\n");
+  write(root, 'test/other.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup);\n");
   const config = loadConfig(root);
   const problems = newFileProblems(root, config, {});
   assert.deepEqual(problems.filter((p) => p.includes('顶层目录')), [], problems.join('\n'));
@@ -242,7 +242,7 @@ test('复审记录：“结论：**不通过**”“结论：未通过”也识�
   for (const verdictLine of ['结论：**不通过**\n', '结论：未通过\n']) {
     const root = featureRepo();
     write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
-    write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'sorted');\n");
+    write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
     runGate({ root });
     const rp = reportFile(`${GOOD_REPORT.replace('结论\n通过\n', '')}${verdictLine}`);
     const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: rp, summary: 's' });
@@ -289,7 +289,7 @@ test('注释：#! 解释器行不算文件头注释', () => {
 function passingChange(config) {
   const root = featureRepo(config);
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'sorted');\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   return root;
 }
 
@@ -357,7 +357,7 @@ test('复审登记（pre-push）：记录分支名和 HEAD 提交号，报告副
   // 同一工作树切到另一个分支再登记：最新记录换成新分支的，历史里两条都在、各带各的分支
   git(root, ['checkout', '-q', '-b', 'topic/second']);
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort().reverse();\n}\n`);
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'reversed');\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'reversed');\n");
   assert.equal(runGate({ root }).ok, true);
   const r2 = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile(GOOD_REPORT), summary: 's2' });
   assert.equal(r2.ok, true, r2.message);
@@ -462,7 +462,7 @@ test('闸门输出：删除的源文件计入测试先行的“无需测试”�
   fs.rmSync(path.join(root, 'src/dedup.ts'));
   fs.rmSync(path.join(root, 'test/dedup.test.ts'));
   write(root, 'src/legacy/old.ts', `${SRC_HEADER}export const old = 1;\n`);
-  write(root, 'test/old.test.ts', "import { old } from '../src/legacy/old.ts';\nconsole.log(old);\n");
+  write(root, 'test/old.test.ts', "import { old } from '../src/legacy/old.ts';\nassert.ok(old);\n");
   const res = runGate({ root });
   assert.equal(res.ok, true, res.messages.join('\n'));
   // 改动的源文件 2 个：dedup.ts 已删除（无需测试），legacy/old.ts 被测试先行检查、但在 reviewIgnore 之内所以注释检查不看
