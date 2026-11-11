@@ -37,3 +37,9 @@ test('使用文档链接存在，便携包版本与本次发行一致', () => {
   const install = fs.readFileSync(path.join(ROOT, 'INSTALL.md'), 'utf8');
   assert.ok(install.includes('https://github.com/ac0033/product-dev/releases/download/v' + claude.version + '/product-dev-skill.zip'));
 });
+
+test('入口所写的套件源码位置与独立仓库实际目录一致', () => {
+  const entry = fs.readFileSync(path.join(ROOT, 'plugin/skills/product-dev/SKILL.md'), 'utf8');
+  assert.ok(entry.includes('components/engineering-kit/kit'), '入口没有说明独立仓库的套件源码位置');
+  assert.ok(fs.existsSync(path.join(ROOT, 'components/engineering-kit/kit/sync.mjs')));
+});
