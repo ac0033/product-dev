@@ -308,7 +308,7 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
         ops.push({ rel: hookRel, abs: hookFile, content: text, exec: true, action: 'create' });
         actions.push({ type: 'create', file: hookRel });
       } else if (!cur.toString('utf8').includes(HOOK_MARK)) {
-        messages.push('已有其他 pre-push 钩子，未覆盖。请在其中加入一行：node scripts/engineering/gate/verify.mjs');
+        messages.push('已有其他 pre-push 钩子，未覆盖。请在其中加入一行：node scripts/engineering/gate/verify.mjs --pre-push "$@" || exit 1（钩子的 stdin 要原样传给它）');
         actions.push({ type: 'warn', file: hookRel });
       } else if (!cur.equals(text)) {
         ops.push({ rel: hookRel, abs: hookFile, content: text, exec: true, action: 'update' });

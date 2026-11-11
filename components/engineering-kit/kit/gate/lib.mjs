@@ -1,6 +1,8 @@
 // 工程闸门共享函数：读取配置与豁免、判定改动范围、计算代码树哈希、读写记录、获取全局锁、读取 PR 状态（gh）。
 // 业务含义：闸门要回答三件事——这次改动了哪些文件（范围）、这些文件现在的内容是什么（树哈希）、
-// 测试与复审记录是不是针对这份内容做的（绑定）。只读 git 与工作区，写入只发生在 git 目录下的记录目录里，
+// 测试与复审记录是不是针对这份内容、这个基准提交做的（绑定）。范围只有一个口径（gateScope）：
+// 判定文档用的 reviewIgnore 取基准提交上的配置（分支改自己的配置豁免不了自己），配置、豁免表和套件脚本永远在范围内。
+// 只读 git 与工作区，写入只发生在 git 目录下的记录目录里，
 // 不污染工作区。测试与推送前复审记录放在各工作树自己的 git 目录（互不覆盖）；全局锁与 PR 审查记录（pr 流程）
 // 放在 git 公共目录：同一仓库同时只跑一个闸门，PR 的复审与合并可以在不同工作树进行。
 import { spawnSync } from 'node:child_process';
@@ -100,9 +102,13 @@ function pathLines(text) {
  * 删除的文件也算改动（会改变树哈希）。
  */
 export function changedFiles(root, base) {
-  const set = new Set();
   // 基准分支解析不了时必须报错：若静默返回空列表，已提交的功能分支会被判定为“没有改动”而放行（失败放行）。
-  const { rev } = baseRevision(root, base);
+  return changedSince(root, baseRevision(root, base).rev);
+}
+
+/** 相对给定基准提交（或空树）的全部改动，口径同 changedFiles。 */
+function changedSince(root, rev) {
+  const set = new Set();
   if (git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).ok) {
     for (const f of pathLines(git(root, ['diff', '--name-only', rev, 'HEAD']).out)) set.add(f);
     for (const f of pathLines(git(root, ['diff', '--name-only', 'HEAD']).out)) set.add(f);
@@ -112,13 +118,16 @@ export function changedFiles(root, base) {
 }
 
 /**
- * 本次新增的文件：未跟踪的文件，加上相对基准分支已提交新增（diff-filter=A）的文件。
+ * 本次新增的文件：未跟踪的文件，加上相对基准提交新增或改名而来的文件（改名后的新路径也算新文件，
+ * 否则 git mv 进不允许的位置就绕过了位置检查）。比较的是基准提交与工作区，已提交、已暂存的都算。
  */
 export function newFiles(root, base) {
   const out = new Set(pathLines(git(root, ['ls-files', '--others', '--exclude-standard']).out));
   if (git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).ok) {
     const { rev } = baseRevision(root, base);
-    for (const f of pathLines(git(root, ['diff', '--name-only', '--diff-filter=A', rev, 'HEAD']).out)) out.add(f);
+    const r = git(root, ['diff', '-M', '--name-only', '--diff-filter=AR', rev]);
+    if (!r.ok) throw new Error(`无法读取新增文件（git diff 失败）：${r.err.trim()}`);
+    for (const f of pathLines(r.out)) out.add(f);
   }
   return [...out].sort();
 }
@@ -128,8 +137,11 @@ export function repoFiles(root) {
   return pathLines(git(root, ['ls-files', '--cached', '--others', '--exclude-standard']).out);
 }
 
-/** 空树基线与 merge-base 两种情况共用的解析：返回可用于 git diff 的修订。 */
-function baseRevision(root, base) {
+/**
+ * 基准提交：配置的基准分支与 HEAD 的 merge-base（首次提交前为空树）。返回 { rev }，rev 是 changedFiles 实际用来做 diff 的修订，
+ * 测试与复审记录写入它（基线）；解析不了时抛错（失败不放行）。
+ */
+export function baseRevision(root, base) {
   const resolved = resolveBase(root, base);
   if (resolved === EMPTY_TREE) return { rev: EMPTY_TREE };
   const mb = git(root, ['merge-base', resolved, 'HEAD']);
@@ -200,9 +212,55 @@ export function allowedTopDirs(layout) {
   return new Set([...layout.topLevelAllowed, ...literalTopDirs([...layout.sourceGlobs, ...layout.testGlobs])]);
 }
 
-/** 参与闸门记录绑定的文件：本次改动中去掉 reviewIgnore 的部分（纯文档改动不使记录失效）。 */
+/**
+ * 永远计入闸门范围的路径（glob）：项目配置、豁免表和装进项目的套件脚本。它们决定闸门怎么判，
+ * 改它们等于改闸门本身，所以不受 reviewIgnore 影响（否则分支把 reviewIgnore 改成 ** 就能让范围变空）。
+ */
+export const ALWAYS_IN_SCOPE = [CONFIG_FILE, EXEMPT_FILE, 'scripts/engineering/**'];
+
+/** 是否算文档（不计入闸门范围）：匹配给定的 reviewIgnore，且不是永远在范围内的文件。 */
+export function isIgnoredDoc(rel, reviewIgnore) {
+  return !matchesAny(rel, ALWAYS_IN_SCOPE) && matchesAny(rel, reviewIgnore);
+}
+
+/**
+ * 判定闸门范围用的 reviewIgnore：取基准提交上的项目配置（分支自己的改动不能决定自己要不要过闸门）；
+ * 基准是空树或基准上没有配置文件（例如首次安装套件）时，才用工作区配置的值。
+ * 基准上的配置读不出或不合法时抛错（失败不放行）。
+ */
+export function baseReviewIgnore(root, rev, fallback) {
+  if (rev === EMPTY_TREE) return fallback;
+  if (!git(root, ['cat-file', '-e', `${rev}:${CONFIG_FILE}`]).ok) return fallback;
+  const r = git(root, ['show', `${rev}:${CONFIG_FILE}`]);
+  if (!r.ok) throw new Error(`无法读取基准提交 ${rev.slice(0, 12)} 上的 ${CONFIG_FILE}：${r.err.trim()}`);
+  try {
+    return normalizeConfig(JSON.parse(r.out)).reviewIgnore;
+  } catch (e) {
+    throw new Error(`基准提交 ${rev.slice(0, 12)} 上的 ${CONFIG_FILE} 无法展开：${e.message}`);
+  }
+}
+
+/**
+ * 闸门范围（gate、verify、review 三处共用的唯一口径）。返回：
+ *   baseRev      基准提交（changedFiles 做 diff 用的那个），写进记录作为基线
+ *   changed      本次全部改动
+ *   reviewIgnore 判定用的 reviewIgnore（基准提交上的配置版本，见 baseReviewIgnore）
+ *   scope        闸门范围：changed 去掉文档（isIgnoredDoc）的部分，参与树哈希绑定
+ *   docs         changed 里的文档部分
+ * 工作区配置的其他字段（测试命令、glob 等）照常由调用方使用。
+ */
+export function gateScope(root, config) {
+  const { rev } = baseRevision(root, config.base);
+  const changed = changedSince(root, rev);
+  const reviewIgnore = baseReviewIgnore(root, rev, config.reviewIgnore);
+  const scope = changed.filter((f) => !isIgnoredDoc(f, reviewIgnore));
+  const docs = changed.filter((f) => isIgnoredDoc(f, reviewIgnore));
+  return { baseRev: rev, changed, reviewIgnore, scope, docs };
+}
+
+/** 参与闸门记录绑定的文件：gateScope 的 scope（纯文档改动不使记录失效）。 */
 export function scopeFiles(root, config) {
-  return changedFiles(root, config.base).filter((f) => !matchesAny(f, config.reviewIgnore));
+  return gateScope(root, config).scope;
 }
 
 /**
@@ -216,15 +274,50 @@ export function headInfo(root) {
 }
 
 /**
+ * 子模块（gitlink）当前指向的提交：已检出的子模块取它自己的 HEAD（工作区里实际用的那份），
+ * 未检出的取索引里记录的提交；都不是时返回 null。
+ */
+function gitlinkCommit(root, rel, indexLinks) {
+  const dir = path.join(root, rel);
+  if (fs.existsSync(path.join(dir, '.git'))) {
+    const r = git(dir, ['rev-parse', '--verify', '--quiet', 'HEAD']);
+    if (r.ok) return r.out.trim();
+  }
+  return indexLinks.get(rel) ?? null;
+}
+
+/** 索引里的全部 gitlink（模式 160000）：路径 → 提交号。 */
+function indexGitlinks(root) {
+  const out = new Map();
+  for (const entry of git(root, ['ls-files', '--stage', '-z']).out.split('\0')) {
+    const m = /^160000 ([0-9a-f]+) \d+\t(.+)$/.exec(entry);
+    if (m) out.set(m[2].replace(/\\/g, '/'), m[1]);
+  }
+  return out;
+}
+
+/**
  * 代码树哈希：对每个文件的路径与内容摘要排序后再取摘要。
- * 文件不存在（已删除）记为 deleted。只看这些文件的当前内容，与是否提交无关。
+ * 子模块（gitlink）按它指向的提交号计入；文件不存在（已删除）记为 deleted。只看这些文件的当前内容，与是否提交无关。
  */
 export function treeHash(root, files) {
   const sorted = [...files].sort();
+  const dirs = [];
   const present = sorted.filter((f) => {
     const p = path.join(root, f);
-    return fs.existsSync(p) && fs.statSync(p).isFile();
+    if (!fs.existsSync(p)) return false;
+    if (fs.statSync(p).isDirectory()) dirs.push(f);
+    return fs.statSync(p).isFile();
   });
+  // 改动列表里的目录只可能是子模块：按指向的提交号计入，不当作已删除（否则子模块指针变化不改变哈希）
+  const links = new Map();
+  if (dirs.length > 0) {
+    const indexLinks = indexGitlinks(root);
+    for (const d of dirs) {
+      const sha = gitlinkCommit(root, d, indexLinks);
+      if (sha) links.set(d, `gitlink:${sha}`);
+    }
+  }
   // 内容哈希交给 git hash-object（与 git add 相同的清洗过滤器）：Windows 的 core.autocrlf 会在 checkout 时
   // 把 LF 改成 CRLF，直接读字节会让同一份提交的哈希变化，从而误判“代码变了”。
   const hashes = new Map();
@@ -236,7 +329,7 @@ export function treeHash(root, files) {
   }
   const h = crypto.createHash('sha256');
   for (const f of sorted) {
-    h.update(`${f}\t${hashes.has(f) ? hashes.get(f) : 'deleted'}\n`);
+    h.update(`${f}\t${hashes.get(f) ?? links.get(f) ?? 'deleted'}\n`);
   }
   return h.digest('hex');
 }

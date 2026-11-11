@@ -1,6 +1,6 @@
 {
   "name": "dsh-product-dev",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "DSH 产品开发插件：从零做产品、加功能、修 bug，也可单独做设计、文档修改、复审或验收。内置需求与 PRD、原型与界面设计、架构图表、代码探索、开发测试与调试、工程闸门、独立审查和 PR 交付；按项目规则与授权推进，保留产物和验证证据，减少遗漏与交接断层。支持工程套件安装升级和获授权的发布，实际执行依赖宿主工具。",
   "author": "YuanLumen",
   "homepage": "https://github.com/ac0033/product-dev",

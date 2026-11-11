@@ -71,12 +71,12 @@
 
 套件闸门的两种流程（`engineering.config.json` 的 `modules.gate.reviewFlow`，命令在项目的 `scripts/engineering/gate/` 下）：
 
-- `pre-push`（默认）：`gate.mjs` 通过后由独立子代理复审，`review.mjs pass|fail --reviewer <名> --report <报告> --summary "<一句话>"` 登记；推送时核对静态检查、测试记录和复审记录，三者都绑定当前代码树。登记时除树哈希外，还写明分支、HEAD 提交号、文档内容哈希和未提交的文件数：树哈希不含文档，只改规则文本这类改动每一轮都相同，靠提交号和文档内容哈希才能把登记对应到具体提交；推送核对的规则不变，仍只认树哈希。每次登记另追加到 git 目录下的 `engineering-gate/reviews/log.jsonl`（闸门记录所在的目录，不是 docs 下的记录目录），报告副本放在同目录的 `branches/<分支>/` 下。合并按项目约定的入口。
+- `pre-push`（默认）：`gate.mjs` 通过后由独立子代理复审，`review.mjs pass|fail --reviewer <名> --report <报告> --summary "<一句话>"` 登记；推送时核对静态检查、测试记录和复审记录，两份记录都绑定当前代码树和基线（`changedFiles` 做 diff 的基准提交）：合入新主干、变基后基线变了，旧记录作废，要重跑闸门并重新复审（没有基线字段的旧记录同样不认）。git 的 pre-push 钩子还核对实际推送的提交：分支推送的提交必须是当前 HEAD 或已在基准分支里，`git push origin 别的分支` 会被拒绝；标签推送不查引用，只删除远端分支的推送直接放行。登记时除树哈希和基线外，还写明分支、HEAD 提交号、文档内容哈希和未提交的文件数：树哈希不含文档，只改规则文本这类改动每一轮都相同，靠提交号和文档内容哈希才能把登记对应到具体提交；推送核对认的是树哈希与基线。每次登记另追加到 git 目录下的 `engineering-gate/reviews/log.jsonl`（闸门记录所在的目录，不是 docs 下的记录目录），报告副本放在同目录的 `branches/<分支>/` 下。合并按项目约定的入口。
 - `pr`：`gate.mjs` 通过后即可推送，推送核对只要求静态检查和与当前代码一致的测试记录。CI 在 PR 最终提交上全部通过（每项检查成功、跳过或中性；一项都没有视为未通过）后按上表分档审查并登记，PR 未打开或 CI 未全过时拒绝登记：
   - 代码复审：`review.mjs pass|fail --pr <编号> --kind code --reviewer <名> --report <报告> --summary "<一句话>"`。
   - 一致性审：同上，`--kind consistency`；按分档可延期时用 `review.mjs defer --pr <编号> --kind consistency --reason "<理由>"`。
   - 合并：`merge.mjs <编号> [--method squash|merge|rebase]`。PR 打开、CI 全过、代码复审为 pass、一致性审为 pass 或延期、两份记录的提交都等于当前最终提交，才执行 `gh pr merge --match-head-commit`（默认 squash 并删除远端分支）；否则逐条列出原因，不合并。PR 又有新提交时记录过期，重新审查后再登记。
-  - 只改文档的 PR（全部文件在 `reviewIgnore` 之内）按上表不做审查，合并入口只核对 PR 打开与 CI 全过；PR 文件列表为空或达到 100 个（`gh` 可能截断）时按含代码处理。其余 PR 合并入口不判断风险档位：代码复审必需，能否延期一致性审由登记者按上表判断。
+  - 只改文档的 PR（全部文件在 `reviewIgnore` 之内，口径同闸门：`reviewIgnore` 取基准提交上的配置，含项目配置、豁免表或 `scripts/engineering/**` 的不算）按上表不做审查，合并入口只核对 PR 打开与 CI 全过；PR 文件列表为空或达到 100 个（`gh` 可能截断）时按含代码处理。其余 PR 合并入口不判断风险档位：代码复审必需，能否延期一致性审由登记者按上表判断。
   - 需要 GitHub 远程和已登录的 `gh`；没有 CI 的项目留在 `pre-push`。
 
 ## 5. 预发、生产与事故回归
