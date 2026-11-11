@@ -206,6 +206,16 @@ export function scopeFiles(root, config) {
 }
 
 /**
+ * 当前检出的位置：{ branch, headSha }。游离 HEAD 时 branch 为 null；仓库还没有任何提交时 headSha 为 null。
+ * 复审登记用它写明“这次登记对应哪个分支的哪个提交”。
+ */
+export function headInfo(root) {
+  const branch = git(root, ['branch', '--show-current']).out.trim() || null;
+  const head = git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']);
+  return { branch, headSha: head.ok ? head.out.trim() : null };
+}
+
+/**
  * 代码树哈希：对每个文件的路径与内容摘要排序后再取摘要。
  * 文件不存在（已删除）记为 deleted。只看这些文件的当前内容，与是否提交无关。
  */

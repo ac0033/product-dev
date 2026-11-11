@@ -37,6 +37,15 @@ test('设计文档：按约定位置和状态写入后，巡检零错误、推�
   write(root, 'docs/02-原型/prototype/index.html', '<!doctype html><title>原型</title>\n');
   const config = normalizeConfig(JSON.parse(read(root, 'engineering.config.json')));
   assert.deepEqual(newFileProblems(root, config, { newFiles: {} }), []);
+  // 还没登记到各阶段 README 时，巡检按 R6 逐个报出（记录目录 docs/adr/ 不登记，不报）
+  const before = runHygiene(root).findings.error;
+  assert.equal(before.length, 7, JSON.stringify(before));
+  assert.ok(before.every((e) => /未登记到该阶段的 README/.test(e)) && !before.some((e) => /docs\/adr\//.test(e)), JSON.stringify(before));
+  // 按套件装好的阶段 README 模板（表格）登记：文件登记文件名，原型目录登记目录名
+  const rows = { '00-总览': ['PROJECT_STATE.md', 'RECORDS.md', 'IMPLEMENTATION.md'], '01-需求': ['PRD.md'], '02-原型': ['PROTOTYPE.md', 'prototype/'], '03-架构': ['ARCHITECTURE.md'] };
+  for (const [stage, names] of Object.entries(rows)) {
+    write(root, `docs/${stage}/README.md`, `${read(root, `docs/${stage}/README.md`).trimEnd()}\n${names.map((n) => `| ${n} | 设计 | active | 说明 |`).join('\n')}\n`);
+  }
   const report = runHygiene(root);
   assert.deepEqual(report.findings.error, [], JSON.stringify(report.findings.error));
 });
@@ -54,6 +63,23 @@ test('升级：旧配置缺少新状态值和总览目录时，同步给出升�
   assert.ok(res.messages.some((m) => /升级提示/.test(m) && /statusValues/.test(m) && /review/.test(m)), JSON.stringify(res.messages));
   assert.ok(res.messages.some((m) => /升级提示/.test(m) && /layout.stages/.test(m) && /00-总览/.test(m)), JSON.stringify(res.messages));
   assert.equal(read(root, 'engineering.config.json'), before);
+});
+
+test('升级：旧配置的复审者名单缺少新默认名字时给出升级提示，不改项目配置', () => {
+  const root = installedProject();
+  const cfg = JSON.parse(read(root, 'engineering.config.json'));
+  cfg.modules.review.reviewers = ['feature-dev:code-reviewer', '/code-review', 'general-purpose'];
+  const before = `${JSON.stringify(cfg, null, 2)}\n`;
+  write(root, 'engineering.config.json', before);
+  const res = syncKit({ target: root, hooks: false });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.ok(res.messages.some((m) => /升级提示/.test(m) && /modules\.review\.reviewers/.test(m) && /product-dev:code-reviewer/.test(m)), JSON.stringify(res.messages));
+  assert.equal(read(root, 'engineering.config.json'), before);
+  // 项目有意精简名单（留着新名字，删了别的）：不提示
+  cfg.modules.review.reviewers = ['product-dev:code-reviewer', 'general-purpose'];
+  write(root, 'engineering.config.json', JSON.stringify(cfg, null, 2));
+  const slim = syncKit({ target: root, hooks: false });
+  assert.ok(!slim.messages.some((m) => /modules\.review\.reviewers/.test(m)), JSON.stringify(slim.messages));
 });
 
 test('升级：配置已是当前默认时不给升级提示', () => {

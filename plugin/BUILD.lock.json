@@ -5,11 +5,11 @@
       "id": "engineering-kit",
       "dest": "skills/engineering-kit",
       "component": "engineering-kit",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "license": "MIT",
       "changes": "头部去掉 disable-model-invocation，加 user-invocable: false",
       "fileCount": 47,
-      "sha256": "5d1bfab58baa56ec5fe7d55e5dcbf6c2cf5cf852a50beb13fcd64014f5e7c8ee"
+      "sha256": "2f18dabe4b1a034700d13834d5576624316a288260f5d3c25abc89c063e7e53c"
     },
     {
       "id": "product-design-orchestrator",
@@ -19,7 +19,7 @@
       "license": "MIT",
       "changes": "头部加 user-invocable: false；指向 ../../evals/cases.md 的链接改为仓库网址",
       "fileCount": 4,
-      "sha256": "acdd0c32f4fd3397e4b221c0afbd9f0dfe6eeca0269f5f559ca338ecced63019"
+      "sha256": "b396a393a4bf6ba21f2e542aa31b84b84e26e154731968ea240ea71af5704212"
     },
     {
       "id": "product-discovery-prd",

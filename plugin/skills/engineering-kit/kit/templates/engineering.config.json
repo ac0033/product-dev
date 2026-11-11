@@ -10,7 +10,7 @@
       "reviewFlow": "pre-push"
     },
     "review": {
-      "reviewers": ["feature-dev:code-reviewer", "/code-review", "general-purpose"],
+      "reviewers": ["product-dev:code-reviewer", "feature-dev:code-reviewer", "/code-review", "general-purpose"],
       "reviewMinChars": 200,
       "reviewKeyword": "结论"
     }

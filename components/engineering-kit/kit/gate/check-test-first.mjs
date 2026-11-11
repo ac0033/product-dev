@@ -38,18 +38,31 @@ function listTests(root, config) {
 /**
  * 检查改动的源文件。changed 为本次改动文件列表；requireTestChange 为 false 时只检查“有没有测试引用”（编辑后的即时提醒用）。
  * 返回 [{ file, message }]，空数组表示通过。exempt 为豁免表中 testFirst 部分（路径 -> 理由）。
+ * stats 是可选的计数输出（闸门用它报告“查了几个文件”）：checked 实际核对了测试引用的源文件数，exempt 豁免表放行的，
+ * skipped 无需测试的（已删除、没有可测的导出、入口与再导出文件）。
  */
-export function checkTestFirst({ root, changed, config, exempt = {}, requireTestChange = true }) {
+export function checkTestFirst({ root, changed, config, exempt = {}, requireTestChange = true, stats = {} }) {
   const problems = [];
+  Object.assign(stats, { checked: 0, exempt: 0, skipped: 0 });
   const testsChanged = changed.filter((f) => isTestFile(f, config));
   const tests = listTests(root, config);
   for (const src of changed.filter((f) => isSourceFile(f, config))) {
-    if (exempt[src]) continue;
+    if (exempt[src]) {
+      stats.exempt++;
+      continue;
+    }
     const abs = path.join(root, src);
-    if (!fs.existsSync(abs)) continue; // 已删除的源文件没有可检查的内容
+    if (!fs.existsSync(abs)) {
+      stats.skipped++; // 已删除的源文件没有可检查的内容
+      continue;
+    }
     const text = fs.readFileSync(abs, 'utf8');
     const name = path.basename(src, path.extname(src));
-    if (!VALUE_EXPORT.test(text) || SKIP_NAMES.has(name)) continue;
+    if (!VALUE_EXPORT.test(text) || SKIP_NAMES.has(name)) {
+      stats.skipped++;
+      continue;
+    }
+    stats.checked++;
     const refs = tests.filter((t) => referencesModule(fs.readFileSync(path.join(root, t), 'utf8'), name));
     if (refs.length === 0) {
       problems.push({ file: src, message: `${src}：没有引用它的测试（先写或补测试，再改实现）` });
