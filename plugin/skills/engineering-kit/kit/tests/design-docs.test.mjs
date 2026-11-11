@@ -75,6 +75,11 @@ test('升级：旧配置的复审者名单缺少新默认名字时给出升级�
   assert.equal(res.ok, true, JSON.stringify(res));
   assert.ok(res.messages.some((m) => /升级提示/.test(m) && /modules\.review\.reviewers/.test(m) && /product-dev:code-reviewer/.test(m)), JSON.stringify(res.messages));
   assert.equal(read(root, 'engineering.config.json'), before);
+  // 项目有意精简名单（留着新名字，删了别的）：不提示
+  cfg.modules.review.reviewers = ['product-dev:code-reviewer', 'general-purpose'];
+  write(root, 'engineering.config.json', JSON.stringify(cfg, null, 2));
+  const slim = syncKit({ target: root, hooks: false });
+  assert.ok(!slim.messages.some((m) => /modules\.review\.reviewers/.test(m)), JSON.stringify(slim.messages));
 });
 
 test('升级：配置已是当前默认时不给升级提示', () => {

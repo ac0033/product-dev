@@ -9,7 +9,7 @@
       "license": "MIT",
       "changes": "头部去掉 disable-model-invocation，加 user-invocable: false",
       "fileCount": 47,
-      "sha256": "e3310af7efaa74793707230710a9bdb7398f774357c0dd422573078e01e4bfb5"
+      "sha256": "2f18dabe4b1a034700d13834d5576624316a288260f5d3c25abc89c063e7e53c"
     },
     {
       "id": "product-design-orchestrator",
@@ -19,7 +19,7 @@
       "license": "MIT",
       "changes": "头部加 user-invocable: false；指向 ../../evals/cases.md 的链接改为仓库网址",
       "fileCount": 4,
-      "sha256": "bcca3a17f9fba58a81ac0c0ae6cf9ad1ba7c034e1229f649d3be85274d6d4714"
+      "sha256": "b396a393a4bf6ba21f2e542aa31b84b84e26e154731968ea240ea71af5704212"
     },
     {
       "id": "product-discovery-prd",

@@ -71,6 +71,9 @@ export function applyBlock(text, version, body) {
   return text.slice(0, found.start) + block + text.slice(found.end);
 }
 
+/** 默认复审者名单里后来新增的名字（0.5.0：插件自带的复审子代理）。升级时只对这些名字给提示。 */
+const REVIEWERS_ADDED = ['product-dev:code-reviewer'];
+
 /** 旧版（0.1.0）的清单：没有 bundle.json 的套件版本按它处理，保证能从旧版本回滚。 */
 export function legacyBundle() {
   return {
@@ -257,8 +260,9 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
     // 阶段目录可以沿用项目自己的名称，只有跨阶段文件用的总览目录是必需的，所以只提示它，避免每次同步都重复提示
     const overview = tpl.layout.stages[0];
     if (missStatus.length) messages.push(`升级提示：engineering.config.json 的 hygiene.statusValues 缺少 ${missStatus.join('、')}（规则 R5 会用到）；同步不改项目配置，请手动加上`);
-    // 默认名单新增的复审者（如插件自带的 product-dev:code-reviewer）：老项目的名单不会自动更新，用它登记会被拒，所以提示
-    const missReviewers = tpl.reviewers.filter((v) => !cur.reviewers.includes(v));
+    // 0.5.0 起默认名单新增的复审者：老项目的名单不会自动更新，用它登记会被拒，所以提示。
+    // 只看新增的名字，不比整份默认名单：项目有意删掉别的名字时，不该每次同步都提示一遍。
+    const missReviewers = REVIEWERS_ADDED.filter((v) => tpl.reviewers.includes(v) && !cur.reviewers.includes(v));
     if (missReviewers.length) messages.push(`升级提示：engineering.config.json 的 modules.review.reviewers 里没有 ${missReviewers.join('、')}，用这些名字登记复审会被拒；同步不改项目配置，要用的请手动加上（不用可忽略）`);
     if (!cur.layout.stages.includes(overview)) messages.push(`升级提示：engineering.config.json 的 layout.stages 里没有 ${overview}。跨阶段文件（项目状态、记录、实施交接）需要这个位置：请手动加上并登记到 docs/README.md；其余阶段目录可以沿用现有名称`);
   }

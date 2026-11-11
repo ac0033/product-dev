@@ -166,7 +166,7 @@ test('阶段内登记（R6）：文件名只是别的登记名的一部分不算
 test('阶段内登记（R6）：子目录里的同名文件不靠裸文件名算登记；说明列里的词不算登记', () => {
   const root = repoWith({
     'docs/README.md': '状态：active\n\n01-原型 04-开发\n',
-    'docs/04-开发/README.md': '状态：active\n\n| 文件 | 说明 |\n|---|---|\n| plan.md | 图片放在 assets 目录 |\n| sub/ok.md | 按相对路径登记 |\n',
+    'docs/04-开发/README.md': '状态：active\n\n| 文件 | 说明 |\n|---|---|\n| plan.md | assets |\n| sub/ok.md | 按相对路径登记 |\n',
     'docs/04-开发/plan.md': '状态：active\n计划\n',
     'docs/04-开发/sub/plan.md': '状态：active\n另一份同名文件\n',
     'docs/04-开发/sub/ok.md': '状态：active\n已登记\n',
