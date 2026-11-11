@@ -6,8 +6,8 @@
   "plugins": [
     {
       "name": "product-dev",
-      "version": "0.2.3",
-      "description": "只说想法，由一个入口判断情况并按对应路线逐步推进，每一步由插件自带的技能、子代理、脚本和方法文档执行。",
+      "version": "0.2.4",
+      "description": "产品开发插件：需求与 PRD、原型与界面、架构图表、开发测试、工程闸门、独立审查与交付。支持从零做产品、加功能、修 bug、文档修改和工程套件维护，也可只做设计、复审或验收；按项目规则与授权推进，保留产物和验证证据。",
       "source": {
         "source": "local",
         "path": "./product-dev/plugin"

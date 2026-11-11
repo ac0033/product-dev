@@ -6,7 +6,7 @@
 
 | 工具 | 用途 | 从哪里开始 |
 | --- | --- | --- |
-| [Product Dev](product-dev/README.md) | 产品开发工作流。一个入口，根据任务选择路线，推进需求、设计、开发、验证和交付 | [快速开始](product-dev/README.md#快速开始) |
+| [Product Dev](product-dev/README.md) | 产品开发插件：需求与 PRD、原型与界面、架构图表、开发测试、审查与交付；支持新项目、加功能、修 bug 和工程套件维护 | [快速开始](product-dev/README.md#快速开始) |
 
 ## 目录结构
 

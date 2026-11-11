@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
   "name": "ac0033-skills",
-  "description": "产品开发综合插件 product-dev 的插件市场：从想法到交付，一个入口自动分流。",
+  "description": "ac0033 的 Agent 工具与插件集合，面向 Claude Code、Codex、DeepSeek Harness 及其他 Agent；各工具独立维护、按需安装。",
   "owner": {
     "name": "YuanLumen",
     "url": "https://github.com/ac0033"
@@ -9,10 +9,10 @@
   "plugins": [
     {
       "name": "product-dev",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "source": "./product-dev/plugin",
-      "description": "只说想法，由一个入口判断情况并按对应路线逐步推进，每一步由插件自带的技能、子代理、脚本和方法文档执行。",
-      "homepage": "https://github.com/ac0033/skills",
+      "description": "产品开发插件：需求与 PRD、原型与界面、架构图表、开发测试、工程闸门、独立审查与交付。支持从零做产品、加功能、修 bug、文档修改和工程套件维护，也可只做设计、复审或验收；按项目规则与授权推进，保留产物和验证证据。",
+      "homepage": "https://github.com/ac0033/skills/tree/main/product-dev",
       "keywords": ["product", "development", "workflow", "design", "engineering"]
     }
   ]
