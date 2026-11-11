@@ -418,7 +418,8 @@ test('复审登记（pre-push）：代码改动里夹着文档时也记文档内
   assert.equal(r1.record.treeHash, r2.record.treeHash);
   assert.notEqual(r1.record.docHash, r2.record.docHash);
   git(root, ['checkout', '-q', '--detach']);
-  const r3 = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(GOOD_REPORT), summary: 's' });
+  // 0.5.1 起登记 fail 要求报告结论是不通过，所以这里用结论为不通过的报告
+  const r3 = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(GOOD_REPORT.replace('通过\n', '不通过\n')), summary: 's' });
   assert.equal(r3.ok, true, r3.message);
   assert.equal(r3.record.branch, null);
   assert.match(r3.message, /游离/);

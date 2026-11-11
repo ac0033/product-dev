@@ -1,6 +1,9 @@
 // 工程闸门共享函数：读取配置与豁免、判定改动范围、计算代码树哈希、读写记录、获取全局锁、读取 PR 状态（gh）。
 // 业务含义：闸门要回答三件事——这次改动了哪些文件（范围）、这些文件现在的内容是什么（树哈希）、
-// 测试与复审记录是不是针对这份内容做的（绑定）。只读 git 与工作区，写入只发生在 git 目录下的记录目录里，
+// 测试与复审记录是不是针对这份内容、这个基准提交做的（绑定）。范围只有一个口径（gateScope）：
+// 配置、豁免表和套件脚本永远在范围内。判定依据不由被审分支决定，在 loadConfig 一处得出：基准分支设置（base）取默认主干上的配置，
+// 判定策略字段（POLICY_KEYS：reviewIgnore、reviewFlow、reviewers、reviewMinChars、reviewKeyword）取基准提交上的配置。
+// 只读 git 与工作区，写入只发生在 git 目录下的记录目录里，
 // 不污染工作区。测试与推送前复审记录放在各工作树自己的 git 目录（互不覆盖）；全局锁与 PR 审查记录（pr 流程）
 // 放在 git 公共目录：同一仓库同时只跑一个闸门，PR 的复审与合并可以在不同工作树进行。
 import { spawnSync } from 'node:child_process';
@@ -50,7 +53,39 @@ export function gitCommonDir(root) {
   return r.out.trim();
 }
 
-/** 读取项目配置（profile 结构或旧版扁平结构）并展开为有效配置；缺失、不是合法 JSON 或结构错误时报错。 */
+/**
+ * 判定策略字段：决定“这次改动要不要过闸门、怎样才算复审通过”的配置项。它们不能由被审分支自己决定，
+ * 生效值取基准提交上的配置（见 loadConfig）。其余字段（testCommand、testEnv、sourceGlobs、testGlobs、commentMode、
+ * layout、hygiene 等）仍用工作区的值：它们随功能分支一起变化是正常的（新加语言、改测试命令），而且配置文件
+ * 永远在闸门范围内，改了就要过测试与复审，会被复审者看到。base 另由默认主干上的配置决定（mainlineBase）。
+ */
+export const POLICY_KEYS = ['reviewIgnore', 'reviewFlow', 'reviewers', 'reviewMinChars', 'reviewKeyword'];
+
+/**
+ * 读取某个提交上的项目配置并展开。该提交上没有配置文件时返回 null；读不出或不合法时抛错（失败不放行），
+ * 错误信息里写明 label（例如“默认主干 main”“基准提交 1a2b3c”）。
+ */
+function configAt(root, rev, label) {
+  if (!git(root, ['cat-file', '-e', `${rev}:${CONFIG_FILE}`]).ok) return null;
+  const r = git(root, ['show', `${rev}:${CONFIG_FILE}`]);
+  if (!r.ok) throw new Error(`无法读取${label}上的 ${CONFIG_FILE}：${r.err.trim()}`);
+  try {
+    return normalizeConfig(JSON.parse(r.out));
+  } catch (e) {
+    throw new Error(`${label}上的 ${CONFIG_FILE} 无法展开：${e.message}`);
+  }
+}
+
+/**
+ * 读取项目配置（profile 结构或旧版扁平结构）并展开为有效配置；缺失、不是合法 JSON 或结构错误时报错。
+ * 闸门的判定依据不由被审分支决定，在这里一处得出，gate、verify、review、merge、hygiene 和钩子拿到的都是同一份生效值：
+ *   base           取默认主干上的配置（mainlineBase）；找不到默认主干或主干上没有配置时用工作区的值。
+ *   POLICY_KEYS    再用生效的 base 算出基准提交（baseRevision），取该提交上的配置；基准是空树或该提交上没有配置
+ *                  （首次安装）时用工作区的值。
+ * 主干或基准提交上的配置读不出、不合法时抛错。基准分支解析不了时不在这里抛错（巡检、编辑钩子仍要能用）：
+ * 判定策略保持工作区的值并记下 policyError，判定入口（gate、verify、review、merge）调用 assertPolicy 拒绝运行。
+ * 返回的配置另带：worktree（工作区里这些字段的原值）、notes（工作区值与生效值不同时的提示行，不算错误）、policyError。
+ */
 export function loadConfig(root) {
   const file = path.join(root, CONFIG_FILE);
   if (!fs.existsSync(file)) throw new Error(`缺少 ${CONFIG_FILE}，请先运行同步脚本创建`);
@@ -60,7 +95,52 @@ export function loadConfig(root) {
   } catch (e) {
     throw new Error(`${CONFIG_FILE} 不是合法 JSON：${e.message}`);
   }
-  return normalizeConfig(user);
+  const config = normalizeConfig(user);
+  const worktree = { base: config.base };
+  for (const k of POLICY_KEYS) worktree[k] = config[k];
+  const notes = [];
+
+  const main = mainlineBase(root);
+  const base = main ? main.base : config.base;
+  if (base !== config.base) {
+    notes.push(`提示：工作区配置的 modules.gate.base 是 ${JSON.stringify(config.base)}，闸门以默认主干 ${main.ref} 上的设置 ${JSON.stringify(base)} 为准；要改基准，须先在主干上改配置`);
+  }
+
+  const policy = {};
+  let policyError = null;
+  let rev = null;
+  try {
+    rev = baseRevision(root, base).rev;
+  } catch (e) {
+    policyError = e.message; // 只有基准分支解析不了走这里；基准上的配置不合法时下面的 configAt 直接抛错
+  }
+  const atBase = rev && rev !== EMPTY_TREE ? configAt(root, rev, `基准提交 ${rev.slice(0, 12)} `) : null;
+  if (atBase) {
+    for (const k of POLICY_KEYS) policy[k] = atBase[k];
+    const differ = POLICY_KEYS.filter((k) => JSON.stringify(atBase[k]) !== JSON.stringify(config[k]));
+    if (differ.length > 0) {
+      notes.push(`提示：工作区配置的 ${differ.join('、')} 与基准提交 ${rev.slice(0, 12)} 上的不同，闸门按基准上的值判定；这些改动合入主干后才生效`);
+    }
+  }
+  return { ...config, ...policy, base, worktree, notes, policyError };
+}
+
+/** 判定入口（gate、verify、review、merge）调用：判定策略没能从基准提交取得（基准分支解析不了）时抛错，不按工作区的值放行。 */
+export function assertPolicy(config) {
+  if (config.policyError) throw new Error(`无法取得基准提交上的判定策略：${config.policyError}`);
+}
+
+/**
+ * 默认主干上配置的基准分支设置：按 auto 的规则找到默认主干（origin/HEAD、origin/main、origin/master、main、master），
+ * 读取该提交上的项目配置的 base。返回 { ref, base }；找不到默认主干（空仓库、首次提交前）或该提交上没有配置文件时返回 null
+ * （由调用方用工作区的值）。默认主干上的配置读不出或不合法时抛错（失败不放行）。
+ * 业务含义：分支把 base 改成指向自己，改动就成了空的，闸门会直接放行；所以基准设置只认主干上的。
+ */
+export function mainlineBase(root) {
+  const ref = AUTO_BASE_CANDIDATES.find((c) => git(root, ['rev-parse', '--verify', '--quiet', `${c}^{commit}`]).ok);
+  if (!ref) return null;
+  const cfg = configAt(root, ref, `默认主干 ${ref} `);
+  return cfg ? { ref, base: cfg.base } : null;
 }
 
 /** 读取豁免表；没有则为空。豁免只放行被列出的路径，不影响其他文件。 */
@@ -100,9 +180,13 @@ function pathLines(text) {
  * 删除的文件也算改动（会改变树哈希）。
  */
 export function changedFiles(root, base) {
-  const set = new Set();
   // 基准分支解析不了时必须报错：若静默返回空列表，已提交的功能分支会被判定为“没有改动”而放行（失败放行）。
-  const { rev } = baseRevision(root, base);
+  return changedSince(root, baseRevision(root, base).rev);
+}
+
+/** 相对给定基准提交（或空树）的全部改动，口径同 changedFiles。 */
+function changedSince(root, rev) {
+  const set = new Set();
   if (git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).ok) {
     for (const f of pathLines(git(root, ['diff', '--name-only', rev, 'HEAD']).out)) set.add(f);
     for (const f of pathLines(git(root, ['diff', '--name-only', 'HEAD']).out)) set.add(f);
@@ -112,13 +196,16 @@ export function changedFiles(root, base) {
 }
 
 /**
- * 本次新增的文件：未跟踪的文件，加上相对基准分支已提交新增（diff-filter=A）的文件。
+ * 本次新增的文件：未跟踪的文件，加上相对基准提交新增或改名而来的文件（改名后的新路径也算新文件，
+ * 否则 git mv 进不允许的位置就绕过了位置检查）。比较的是基准提交与工作区，已提交、已暂存的都算。
  */
 export function newFiles(root, base) {
   const out = new Set(pathLines(git(root, ['ls-files', '--others', '--exclude-standard']).out));
   if (git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).ok) {
     const { rev } = baseRevision(root, base);
-    for (const f of pathLines(git(root, ['diff', '--name-only', '--diff-filter=A', rev, 'HEAD']).out)) out.add(f);
+    const r = git(root, ['diff', '-M', '--name-only', '--diff-filter=AR', rev]);
+    if (!r.ok) throw new Error(`无法读取新增文件（git diff 失败）：${r.err.trim()}`);
+    for (const f of pathLines(r.out)) out.add(f);
   }
   return [...out].sort();
 }
@@ -128,8 +215,11 @@ export function repoFiles(root) {
   return pathLines(git(root, ['ls-files', '--cached', '--others', '--exclude-standard']).out);
 }
 
-/** 空树基线与 merge-base 两种情况共用的解析：返回可用于 git diff 的修订。 */
-function baseRevision(root, base) {
+/**
+ * 基准提交：配置的基准分支与 HEAD 的 merge-base（首次提交前为空树）。返回 { rev }，rev 是 changedFiles 实际用来做 diff 的修订，
+ * 测试与复审记录写入它（基线）；解析不了时抛错（失败不放行）。
+ */
+export function baseRevision(root, base) {
   const resolved = resolveBase(root, base);
   if (resolved === EMPTY_TREE) return { rev: EMPTY_TREE };
   const mb = git(root, ['merge-base', resolved, 'HEAD']);
@@ -200,9 +290,39 @@ export function allowedTopDirs(layout) {
   return new Set([...layout.topLevelAllowed, ...literalTopDirs([...layout.sourceGlobs, ...layout.testGlobs])]);
 }
 
-/** 参与闸门记录绑定的文件：本次改动中去掉 reviewIgnore 的部分（纯文档改动不使记录失效）。 */
+/**
+ * 永远计入闸门范围的路径（glob）：项目配置、豁免表和装进项目的套件脚本。它们决定闸门怎么判，
+ * 改它们等于改闸门本身，所以不受 reviewIgnore 影响（否则分支把 reviewIgnore 改成 ** 就能让范围变空）。
+ */
+export const ALWAYS_IN_SCOPE = [CONFIG_FILE, EXEMPT_FILE, 'scripts/engineering/**'];
+
+/** 是否算文档（不计入闸门范围）：匹配给定的 reviewIgnore，且不是永远在范围内的文件。 */
+export function isIgnoredDoc(rel, reviewIgnore) {
+  return !matchesAny(rel, ALWAYS_IN_SCOPE) && matchesAny(rel, reviewIgnore);
+}
+
+/**
+ * 闸门范围（gate、verify、review 三处共用的唯一口径）。config 必须来自 loadConfig（其中的 base 与 reviewIgnore 已是生效值）。返回：
+ *   baseRev      基准提交（changedFiles 做 diff 用的那个），写进记录作为基线
+ *   changed      本次全部改动
+ *   reviewIgnore 判定用的 reviewIgnore（基准提交上的配置版本，由 loadConfig 得出）
+ *   scope        闸门范围：changed 去掉文档（isIgnoredDoc）的部分，参与树哈希绑定
+ *   docs         changed 里的文档部分
+ * 工作区配置的其他字段（测试命令、glob 等）照常由调用方使用。
+ */
+export function gateScope(root, config) {
+  assertPolicy(config);
+  const { rev } = baseRevision(root, config.base);
+  const changed = changedSince(root, rev);
+  const { reviewIgnore } = config;
+  const scope = changed.filter((f) => !isIgnoredDoc(f, reviewIgnore));
+  const docs = changed.filter((f) => isIgnoredDoc(f, reviewIgnore));
+  return { baseRev: rev, changed, reviewIgnore, scope, docs };
+}
+
+/** 参与闸门记录绑定的文件：gateScope 的 scope（纯文档改动不使记录失效）。 */
 export function scopeFiles(root, config) {
-  return changedFiles(root, config.base).filter((f) => !matchesAny(f, config.reviewIgnore));
+  return gateScope(root, config).scope;
 }
 
 /**
@@ -216,15 +336,50 @@ export function headInfo(root) {
 }
 
 /**
+ * 子模块（gitlink）当前指向的提交：已检出的子模块取它自己的 HEAD（工作区里实际用的那份），
+ * 未检出的取索引里记录的提交；都不是时返回 null。
+ */
+function gitlinkCommit(root, rel, indexLinks) {
+  const dir = path.join(root, rel);
+  if (fs.existsSync(path.join(dir, '.git'))) {
+    const r = git(dir, ['rev-parse', '--verify', '--quiet', 'HEAD']);
+    if (r.ok) return r.out.trim();
+  }
+  return indexLinks.get(rel) ?? null;
+}
+
+/** 索引里的全部 gitlink（模式 160000）：路径 → 提交号。 */
+function indexGitlinks(root) {
+  const out = new Map();
+  for (const entry of git(root, ['ls-files', '--stage', '-z']).out.split('\0')) {
+    const m = /^160000 ([0-9a-f]+) \d+\t(.+)$/.exec(entry);
+    if (m) out.set(m[2].replace(/\\/g, '/'), m[1]);
+  }
+  return out;
+}
+
+/**
  * 代码树哈希：对每个文件的路径与内容摘要排序后再取摘要。
- * 文件不存在（已删除）记为 deleted。只看这些文件的当前内容，与是否提交无关。
+ * 子模块（gitlink）按它指向的提交号计入；文件不存在（已删除）记为 deleted。只看这些文件的当前内容，与是否提交无关。
  */
 export function treeHash(root, files) {
   const sorted = [...files].sort();
+  const dirs = [];
   const present = sorted.filter((f) => {
     const p = path.join(root, f);
-    return fs.existsSync(p) && fs.statSync(p).isFile();
+    if (!fs.existsSync(p)) return false;
+    if (fs.statSync(p).isDirectory()) dirs.push(f);
+    return fs.statSync(p).isFile();
   });
+  // 改动列表里的目录只可能是子模块：按指向的提交号计入，不当作已删除（否则子模块指针变化不改变哈希）
+  const links = new Map();
+  if (dirs.length > 0) {
+    const indexLinks = indexGitlinks(root);
+    for (const d of dirs) {
+      const sha = gitlinkCommit(root, d, indexLinks);
+      if (sha) links.set(d, `gitlink:${sha}`);
+    }
+  }
   // 内容哈希交给 git hash-object（与 git add 相同的清洗过滤器）：Windows 的 core.autocrlf 会在 checkout 时
   // 把 LF 改成 CRLF，直接读字节会让同一份提交的哈希变化，从而误判“代码变了”。
   const hashes = new Map();
@@ -236,7 +391,7 @@ export function treeHash(root, files) {
   }
   const h = crypto.createHash('sha256');
   for (const f of sorted) {
-    h.update(`${f}\t${hashes.has(f) ? hashes.get(f) : 'deleted'}\n`);
+    h.update(`${f}\t${hashes.get(f) ?? links.get(f) ?? 'deleted'}\n`);
   }
   return h.digest('hex');
 }

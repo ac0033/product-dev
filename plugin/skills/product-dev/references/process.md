@@ -58,9 +58,9 @@ R10 的展开。目的：用户在场的时间和本机的资源，留给需要�
 |---|---|
 | `modules.gate.testCommand`、`testEnv` | 本项目跑测试的命令和它需要的环境变量。Python 项目在 `testEnv` 里设 `PYTHONPATH` |
 | `layout.sourceGlobs`、`testGlobs` | 源文件和测试文件的匹配规则。Python 项目把 `sourceGlobs` 改成 `**/*.py` |
-| `rules.reviewIgnore` | 只应包含纯文档 |
-| `modules.review.reviewers` | 确认名单里有 `product-dev:code-reviewer`，否则用它做的复审登记不了。套件 0.5.0 起新装的项目默认已有；更早安装的项目同步时不改项目配置，要手动加（见 [review.md](review.md) 第 1 节） |
-| `modules.gate.reviewFlow` | 默认 `pre-push`；有 GitHub 远程、已登录的 `gh` 且 PR 上有 CI 检查的项目可以改成 `pr`（建议项，由用户决定或按授权采用推荐） |
+| `rules.reviewIgnore` | 只应包含纯文档。闸门按基准提交上的版本判定，分支里的修改合入主干后才生效；项目配置、豁免表和 `scripts/engineering/**` 永远在闸门范围内 |
+| `modules.review.reviewers` | 确认名单里有 `product-dev:code-reviewer`，否则用它做的复审登记不了。套件 0.5.0 起新装的项目默认已有；更早安装的项目同步时不改项目配置，要手动加（见 [review.md](review.md) 第 1 节）；名单按基准提交上的配置判定，在功能分支里加要合入主干后才生效 |
+| `modules.gate.reviewFlow` | 默认 `pre-push`；有 GitHub 远程、已登录的 `gh` 且 PR 上有 CI 检查的项目可以改成 `pr`（建议项，由用户决定或按授权采用推荐）；闸门按基准提交上的配置判定，改动合入主干后才生效 |
 
 同一步还要定两件事，都由用户决定：要不要建远程仓库和 CI（建远程仓库是外部动作，先得到批准；不建的话“PR 与 CI”一步做不了，要如实写未执行）；`pre-push` 流程下由谁、经哪个入口合并，定了就写进项目的 AGENTS.md。安装时没加 `--profile` 的项目没有脚手架，包清单、测试框架等按选定的技术栈自己建，默认的测试命令也要相应改掉。
 
@@ -104,12 +104,14 @@ R10 的展开。目的：用户在场的时间和本机的资源，留给需要�
 
 由 `engineering.config.json` 的 `modules.gate.reviewFlow` 决定，命令都在项目的 `scripts/engineering/gate/` 下。
 
-- `pre-push`（默认）：`gate.mjs` 通过后由独立子代理复审，`review.mjs pass|fail --reviewer <名> --report <报告> --summary "<一句话>"` 登记；推送时核对静态检查、测试记录和复审记录，三者都绑定当前代码树。登记时除树哈希外，还写明分支、HEAD 提交号、文档内容哈希和未提交的文件数：树哈希不含文档，只改规则文本这类改动每一轮都相同，靠提交号和文档内容哈希才能把登记对应到具体提交；推送核对的规则不变，仍只认树哈希。每次登记另追加到 git 目录下的 `engineering-gate/reviews/log.jsonl`（闸门记录所在的目录，不是 docs 下的记录目录），报告副本放在同目录的 `branches/<分支>/` 下。套件不提供合并入口，Claude Code 的钩子拒绝直接 `gh pr merge`（别的宿主里没有这层钩子，只有 git 的 pre-push 钩子生效，同样不得直接合并）；合并按项目约定的入口，并等 CI 全部通过。项目没有约定入口时由用户合并或由用户指定入口。
-- `pr`：`gate.mjs` 通过后即可推送，推送核对只要求静态检查和与当前代码一致的测试记录。CI 在 PR 最终提交上全部通过（每项检查成功、跳过或中性；一项都没有视为未通过）后按上表分档审查并登记，PR 未打开或 CI 未全过时拒绝登记：
+两种流程共同的规则：闸门的判定依据不由被审分支决定。基准分支设置 `modules.gate.base` 以默认主干上的配置为准；判定策略字段 `reviewIgnore`、`reviewFlow`、`reviewers`、`reviewMinChars`、`reviewKeyword` 取基准提交上的配置（基准上还没有配置时用工作区的值）；分支里改这些字段要合入主干后才生效，工作区的值与生效值不同时闸门和推送核对会给提示行。测试命令、glob 等其余字段仍用工作区的值。git 的 pre-push 钩子核对实际推送的提交：分支推送的提交必须是当前 HEAD 或已在基准分支里，`git push origin 别的分支` 会被拒绝；标签推送不查引用，只删除远端引用（分支或标签）的推送直接放行。
+
+- `pre-push`（默认）：`gate.mjs` 通过后由独立子代理复审，`review.mjs pass|fail --reviewer <名> --report <报告> --summary "<一句话>"` 登记；推送时核对静态检查、测试记录和复审记录，两份记录都绑定当前代码树和基线（`changedFiles` 做 diff 的基准提交）：合入新主干、变基后基线变了，旧记录作废，要重跑闸门并重新复审（没有基线字段的旧记录同样不认）。登记时除树哈希和基线外，还写明分支、HEAD 提交号、文档内容哈希和未提交的文件数：树哈希不含文档，只改规则文本这类改动每一轮都相同，靠提交号和文档内容哈希才能把登记对应到具体提交；推送核对认的是树哈希与基线。每次登记另追加到 git 目录下的 `engineering-gate/reviews/log.jsonl`（闸门记录所在的目录，不是 docs 下的记录目录），报告副本放在同目录的 `branches/<分支>/` 下。套件不提供合并入口，Claude Code 的钩子拒绝直接 `gh pr merge`（别的宿主里没有这层钩子，只有 git 的 pre-push 钩子生效，同样不得直接合并）；合并按项目约定的入口，并等 CI 全部通过。项目没有约定入口时由用户合并或由用户指定入口。
+- `pr`：`gate.mjs` 通过后即可推送，推送核对只要求静态检查和与当前代码、当前基线一致的测试记录。CI 在 PR 最终提交上全部通过（每项检查成功、跳过或中性；一项都没有视为未通过）后按上表分档审查并登记，PR 未打开或 CI 未全过时拒绝登记：
   - 代码复审：`review.mjs pass|fail --pr <编号> --kind code --reviewer <名> --report <报告> --summary "<一句话>"`。
   - 一致性审：同上，`--kind consistency`；按分档可延期时用 `review.mjs defer --pr <编号> --kind consistency --reason "<理由>"`。
   - 合并：`merge.mjs <编号> [--method squash|merge|rebase]`。PR 打开、CI 全过、代码复审为 pass、一致性审为 pass 或延期、两份记录的提交都等于当前最终提交，才执行 `gh pr merge --match-head-commit`（默认 squash 并删除远端分支）；否则逐条列出原因，不合并。PR 又有新提交时记录过期，重新审查后再登记。
-  - 只改文档的 PR（全部文件在 `reviewIgnore` 之内）按上表不做审查，合并入口只核对 PR 打开与 CI 全过；PR 文件列表为空或达到 100 个（`gh` 可能截断）时按含代码处理。其余 PR 合并入口不判断风险档位：代码复审必需，能否延期一致性审由登记者按上表判断。
+  - 只改文档的 PR（全部文件在 `reviewIgnore` 之内，口径同闸门：`reviewIgnore` 取基准提交上的配置，含项目配置、豁免表或 `scripts/engineering/**` 的不算）按上表不做审查，合并入口只核对 PR 打开与 CI 全过；PR 文件列表为空或达到 100 个（`gh` 可能截断）时按含代码处理。其余 PR 合并入口不判断风险档位：代码复审必需，能否延期一致性审由登记者按上表判断。
   - 需要 GitHub 远程和已登录的 `gh`；没有 CI 的项目留在 `pre-push`。
 
 ## 预发、生产与事故回归

@@ -263,7 +263,7 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
     // 0.5.0 起默认名单新增的复审者：老项目的名单不会自动更新，用它登记会被拒，所以提示。
     // 只看新增的名字，不比整份默认名单：项目有意删掉别的名字时，不该每次同步都提示一遍。
     const missReviewers = REVIEWERS_ADDED.filter((v) => tpl.reviewers.includes(v) && !cur.reviewers.includes(v));
-    if (missReviewers.length) messages.push(`升级提示：engineering.config.json 的 modules.review.reviewers 里没有 ${missReviewers.join('、')}，用这些名字登记复审会被拒；同步不改项目配置，要用的请手动加上（不用可忽略）`);
+    if (missReviewers.length) messages.push(`升级提示：engineering.config.json 的 modules.review.reviewers 里没有 ${missReviewers.join('、')}，用这些名字登记复审会被拒；同步不改项目配置，要用的请手动加上，且须合入主干后才生效（不用可忽略）`);
     if (!cur.layout.stages.includes(overview)) messages.push(`升级提示：engineering.config.json 的 layout.stages 里没有 ${overview}。跨阶段文件（项目状态、记录、实施交接）需要这个位置：请手动加上并登记到 docs/README.md；其余阶段目录可以沿用现有名称`);
   }
   if (preset) {
@@ -308,7 +308,7 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
         ops.push({ rel: hookRel, abs: hookFile, content: text, exec: true, action: 'create' });
         actions.push({ type: 'create', file: hookRel });
       } else if (!cur.toString('utf8').includes(HOOK_MARK)) {
-        messages.push('已有其他 pre-push 钩子，未覆盖。请在其中加入一行：node scripts/engineering/gate/verify.mjs');
+        messages.push('已有其他 pre-push 钩子，未覆盖。请在其中加入一行：node scripts/engineering/gate/verify.mjs --pre-push "$@" || exit 1（钩子的 stdin 要原样传给它）');
         actions.push({ type: 'warn', file: hookRel });
       } else if (!cur.equals(text)) {
         ops.push({ rel: hookRel, abs: hookFile, content: text, exec: true, action: 'update' });
