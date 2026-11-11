@@ -1,26 +1,41 @@
-// 测试闸门：推送前运行。先做静态检查（测试先行、注释），通过后运行配置的测试命令，
-// 把结果连同当前代码树哈希和基准提交（基线）写入记录。通过时逐项列出两项静态检查各查了几个文件，再列测试结果：
+// 测试闸门：推送前运行。先做静态检查（测试先行、注释、断言），通过后运行测试，
+// 把结果连同当前代码树哈希和基准提交（基线）写入记录。通过时逐项列出静态检查各查了几个文件，再列测试结果：
 // 只打印测试一行，看的人分不清静态检查是通过了还是没有执行。业务含义：测试记录只对“跑测试时”的那份代码、
-// 那个基准提交有效；跑测试期间代码变了，记录作废（树哈希前后不一致）。差异只来自运行期间新出现的未跟踪文件时
+// 那个基准提交、那份测试配置有效；跑测试期间代码变了，记录作废（树哈希前后不一致）。差异只来自运行期间新出现的未跟踪文件时
 // （多半是覆盖率、快照这类测试产物），仍判不通过，但提示列出这些文件并建议加入 .gitignore。
+// 两种测试模式：
+//   全量（默认）     运行配置的 testCommand。通过的全量记录另存 tests-full.json，记下当时范围内每个文件的内容哈希。
+//   按影响范围（--affected）以最近一次通过的全量记录为起点，算出此后改动的文件，只运行命中的测试分组（modules.gate.testGroups）；
+//                    没有分组、没有可用的全量记录、基线或测试配置变了、改动不属于任何分组、涉及配置与套件脚本或依赖清单时，
+//                    自动改跑全量并写明原因。此后范围内没有改动时不跑测试，写一份沿用的记录。
+// 结果复用：已有通过的记录且代码树、基线、测试配置摘要（testCommand、testEnv、testGroups）都一致、模式满足要求
+//   （要全量时须是全量记录）时不重跑，输出“沿用已有通过记录”；--force 强制重跑。静态检查两种模式、复用与否都照常做。
 // 闸门范围的口径见 lib.mjs 的 gateScope；基准分支设置取默认主干上的配置，判定策略（reviewIgnore 等）取基准提交上的配置，
 // 工作区写的值与生效值不同时输出提示行。
-// 用法：node scripts/engineering/gate/gate.mjs
+// 用法：node scripts/engineering/gate/gate.mjs [--affected] [--force]
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { checkAssertions, testCaseHintMessages } from './check-assertions.mjs';
 import { checkComments } from './check-comments.mjs';
 import { checkTestFirst } from './check-test-first.mjs';
 import {
+  ALWAYS_IN_SCOPE,
+  DEPENDENCY_FILES,
   acquireLock,
+  fileHashes,
   gateScope,
   git,
+  hashOfFiles,
   isIgnoredDoc,
   isMain,
   isSourceFile,
   isTestFile,
   loadConfig,
   loadExempt,
+  matchesAny,
+  readRecord,
   recordDir,
   repoFiles,
   repoRoot,
@@ -31,15 +46,26 @@ import {
 /** 判断“这是代码文件”的扩展名（配置文件、文档、脚手架数据不算）。 */
 const CODE_FILE = /\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|rb|php|cs|c|cc|cpp|h|swift|sh)$/;
 
+/** 最近一次通过的全量记录（按影响范围测试的起点）。tests.json 总是最近一次运行的记录。 */
+const FULL_RECORD = 'tests-full.json';
+
 /**
- * 两项静态检查通过后的结果行：各检查了几个本次改动的源文件、豁免了几个。两项的范围不同，各自写明：
- * 测试先行看全部改动的源文件，已删除的和没有可测导出的计入“无需测试”；注释检查不看 reviewIgnore 之内的和已删除的。
+ * 静态检查通过后的结果行：各检查了几个本次改动的文件、豁免了几个。三项的范围不同，各自写明：
+ * 测试先行看全部改动的源文件，已删除的和没有可测导出的计入“无需测试”；注释检查不看 reviewIgnore 之内的和已删除的；
+ * 断言检查看本次改动的测试文件（不含已删除的）。
  */
-function staticMessages({ testFirst, comments }) {
+function staticMessages({ testFirst, comments }, assertions) {
   return [
     `测试先行检查通过（本次改动的源文件：检查 ${testFirst.checked} 个，豁免 ${testFirst.exempt} 个，无需测试 ${testFirst.skipped} 个，含已删除的）`,
     `注释检查通过（本次改动的源文件，不含 reviewIgnore 之内的和已删除的：检查 ${comments.checked} 个，豁免 ${comments.exempt} 个）`,
+    `断言检查通过（本次改动的测试文件，不含已删除的：检查 ${assertions.checked} 个，豁免 ${assertions.exempt} 个）`,
   ];
+}
+
+/** 测试配置摘要：testCommand、testEnv、testGroups 任一变了，旧记录都不能复用、也不能当作按影响范围测试的起点。 */
+export function configDigest(config) {
+  const json = JSON.stringify({ testCommand: config.testCommand, testEnv: config.testEnv, testGroups: config.testGroups });
+  return crypto.createHash('sha256').update(json).digest('hex');
 }
 
 /**
@@ -55,11 +81,67 @@ function newArtifacts(root, beforeScope, beforeHash, afterScope) {
   return treeHash(root, beforeScope) === beforeHash ? extra : [];
 }
 
+/** 最多列出前几个文件，其余写“等 N 个”。 */
+function listSome(files, n = 5) {
+  return files.length <= n ? files.join('、') : `${files.slice(0, n).join('、')} 等 ${files.length} 个`;
+}
+
 /**
- * 运行闸门。返回 { ok, messages, record }。通过时 messages 先列两项静态检查，再列测试结果。
+ * 可以沿用的通过记录：tests.json 或全量记录中，通过、代码树、基线、测试配置摘要都与现在一致，
+ * 且模式满足要求（要全量时须是全量记录；要按影响范围时任一通过记录都行）。没有时返回 null。
+ */
+function reusable(root, { hash, baseRev, digest, affected }) {
+  for (const rec of [readRecord(root, 'tests.json'), readRecord(root, FULL_RECORD)]) {
+    if (!rec || !rec.passed || rec.treeHash !== hash || rec.base !== baseRev || rec.configDigest !== digest) continue;
+    if (!affected && rec.mode !== 'full') continue;
+    return rec;
+  }
+  return null;
+}
+
+/**
+ * 按影响范围测试的计划：返回 { mode: 'full', reason } 或 { mode: 'affected', full, changed, groups }。
+ * 改动文件 = 当前范围内文件的内容哈希与全量记录里的不同（新增、修改、删除，以及回到与基准相同而离开范围的）。
+ */
+function planAffected(root, config, { files, baseRev, digest }) {
+  if (!config.testGroups || config.testGroups.length === 0) return { mode: 'full', reason: '没有配置测试分组（modules.gate.testGroups）' };
+  const full = readRecord(root, FULL_RECORD);
+  if (!full || !full.passed || full.mode !== 'full' || !full.files) return { mode: 'full', reason: '没有可用的全量通过记录' };
+  if (full.base !== baseRev) return { mode: 'full', reason: '基线（基准提交）与全量记录不同' };
+  if (full.configDigest !== digest) return { mode: 'full', reason: '测试命令、环境变量或测试分组与全量记录不同' };
+  const keys = [...new Set([...Object.keys(full.files), ...Object.keys(files)])].sort();
+  const changed = keys.filter((f) => (full.files[f] ?? 'absent') !== (files[f] ?? 'absent'));
+  const always = changed.filter((f) => matchesAny(f, ALWAYS_IN_SCOPE));
+  if (always.length > 0) return { mode: 'full', reason: `改动涉及配置、豁免表或套件脚本：${listSome(always)}` };
+  const deps = changed.filter((f) => matchesAny(f, DEPENDENCY_FILES));
+  if (deps.length > 0) return { mode: 'full', reason: `改动涉及依赖清单或锁文件：${listSome(deps)}` };
+  const loose = changed.filter((f) => !config.testGroups.some((g) => matchesAny(f, g.paths)));
+  if (loose.length > 0) return { mode: 'full', reason: `有改动文件不属于任何分组：${listSome(loose)}` };
+  const groups = config.testGroups.filter((g) => changed.some((f) => matchesAny(f, g.paths)));
+  return { mode: 'affected', full, changed, groups };
+}
+
+/**
+ * 运行测试命令（一条或多条，按顺序，遇到失败即停）。返回 { status, log }：status 为第一条失败命令的退出码，全过为 0。
+ * 多条命令时日志里每段前面写明分组名和命令。
+ */
+function runCommands(root, config, commands) {
+  const env = { ...process.env, ...config.testEnv };
+  let log = '';
+  for (const { name, command } of commands) {
+    const r = spawnSync(command, { cwd: root, shell: true, encoding: 'utf8', env, maxBuffer: 256 * 1024 * 1024 });
+    if (name) log += `== 分组 ${name}：${command} ==\n`;
+    log += `${r.stdout || ''}${r.stderr || ''}`;
+    if (r.status !== 0) return { status: r.status, log };
+  }
+  return { status: 0, log };
+}
+
+/**
+ * 运行闸门。返回 { ok, messages, record }。通过时 messages 先列静态检查，再列测试结果。
  * 静态检查未通过时直接返回，不运行测试，也不写测试记录。记录里的 base 是基准提交，verify 与 review 核对它。
  */
-function runChecks({ root, config }) {
+function runChecks({ root, config, affected = false, force = false }) {
   const exempt = loadExempt(root);
   const release = acquireLock(root, config.lockMaxAgeMinutes);
   try {
@@ -67,17 +149,25 @@ function runChecks({ root, config }) {
     const { changed, baseRev } = before;
     const sources = changed.filter((f) => isSourceFile(f, config) && !isIgnoredDoc(f, before.reviewIgnore));
     const staticChecks = { testFirst: {}, comments: {} };
+    const asserted = checkAssertions({ root, changed, config: { ...config, reviewIgnore: before.reviewIgnore }, exempt: exempt.assertions, baseRev });
     const problems = [
       ...checkTestFirst({ root, changed, config, exempt: exempt.testFirst, stats: staticChecks.testFirst }),
       ...checkComments({ root, files: sources, config, exempt: exempt.comments, stats: staticChecks.comments }),
+      ...asserted.problems,
     ];
+    const hintLines = testCaseHintMessages(asserted.hints);
     if (problems.length > 0) {
       return {
         ok: false,
-        messages: ['静态检查未通过（未运行测试）：', ...problems.map((p) => `  - ${p.message}`)],
+        messages: ['静态检查未通过（未运行测试）：', ...problems.map((p) => `  - ${p.message}`), ...hintLines],
         record: null,
       };
     }
+    if (asserted.hints.length > 0) staticChecks.testCases = asserted.hints;
+    const passLines = [...staticMessages(staticChecks, asserted.stats), ...hintLines];
+    const digest = configDigest(config);
+    const files = fileHashes(root, before.scope);
+    const beforeHash = hashOfFiles(files);
 
     // 尚无源码与测试文件（例如只有脚手架的首次提交）：没有可运行的测试，记录为“无需测试”。
     // 一旦出现源码，上面的测试先行检查就会要求测试，所以跳过这里不会放过未测试的代码。
@@ -94,8 +184,13 @@ function runChecks({ root, config }) {
       fs.mkdirSync(recordDir(root), { recursive: true });
       const noTestRecord = {
         passed: true,
-        treeHash: treeHash(root, before.scope),
+        treeHash: beforeHash,
         base: baseRev,
+        mode: 'full',
+        groups: [],
+        fullAt: beforeHash,
+        files,
+        configDigest: digest,
         command: null,
         skipped: 'no-code',
         exitCode: null,
@@ -106,34 +201,61 @@ function runChecks({ root, config }) {
         at: new Date().toISOString(),
       };
       writeRecord(root, 'tests.json', noTestRecord);
-      return { ok: true, messages: [...staticMessages(staticChecks), '尚无源码与测试文件，未运行测试命令（写第一份源码时，测试先行检查会要求先写测试）'], record: noTestRecord };
+      return { ok: true, messages: [...passLines, '尚无源码与测试文件，未运行测试命令（写第一份源码时，测试先行检查会要求先写测试）'], record: noTestRecord };
     }
 
-    const beforeHash = treeHash(root, before.scope);
+    if (!force) {
+      const rec = reusable(root, { hash: beforeHash, baseRev, digest, affected });
+      if (rec) {
+        const cur = readRecord(root, 'tests.json');
+        if (!cur || cur.at !== rec.at || cur.treeHash !== rec.treeHash) writeRecord(root, 'tests.json', rec);
+        return {
+          ok: true,
+          messages: [...passLines, `沿用已有通过记录（${rec.at}，${rec.mode}）：代码树、基线和测试配置都与该记录一致，未重跑测试；要重跑加 --force`],
+          record: rec,
+        };
+      }
+    }
+
+    const plan = affected ? planAffected(root, config, { files, baseRev, digest }) : { mode: 'full' };
+    const messages = [...passLines];
+    if (plan.reason) messages.push(`改跑全量：${plan.reason}`);
     fs.mkdirSync(recordDir(root), { recursive: true });
     const logFile = path.join(recordDir(root), 'tests.log');
-    const env = { ...process.env, ...config.testEnv };
-    const r = spawnSync(config.testCommand, { cwd: root, shell: true, encoding: 'utf8', env, maxBuffer: 256 * 1024 * 1024 });
-    fs.writeFileSync(logFile, `${r.stdout || ''}${r.stderr || ''}`);
+    const base = { treeHash: beforeHash, base: baseRev, mode: plan.mode, files, configDigest: digest, log: logFile, sourcesChecked: sources.length, staticChecks };
+
+    if (plan.mode === 'affected' && plan.groups.length === 0) {
+      // 全量记录之后范围内没有任何改动（树哈希多半也相同，但测试配置或模式要求让复用没有命中，例如带了 --force）
+      fs.writeFileSync(logFile, '');
+      const record = { passed: true, ...base, groups: [], fullAt: plan.full.treeHash, command: null, exitCode: null, changedDuringRun: false, at: new Date().toISOString() };
+      writeRecord(root, 'tests.json', record);
+      messages.push(`全量记录（${plan.full.at}）之后范围内没有改动，未运行测试，写入沿用全量结果的记录`);
+      return { ok: true, messages, record };
+    }
+
+    const commands = plan.mode === 'full' ? [{ name: null, command: config.testCommand }] : plan.groups.map((g) => ({ name: g.name, command: g.command }));
+    if (plan.mode === 'affected') {
+      messages.push(`按影响范围测试：全量记录（${plan.full.treeHash.slice(0, 12)}）之后改动 ${plan.changed.length} 个文件，运行分组 ${plan.groups.map((g) => g.name).join('、')}`);
+    }
+    const r = runCommands(root, config, commands);
+    fs.writeFileSync(logFile, r.log);
     const after = gateScope(root, config);
     const changedDuringRun = beforeHash !== treeHash(root, after.scope) || after.baseRev !== baseRev;
     const passed = r.status === 0 && !changedDuringRun;
 
     const record = {
       passed,
-      treeHash: beforeHash,
-      base: baseRev,
-      command: config.testCommand,
+      ...base,
+      groups: plan.mode === 'full' ? [] : plan.groups.map((g) => g.name),
+      fullAt: plan.mode === 'full' ? beforeHash : plan.full.treeHash,
+      command: commands.map((c) => c.command).join(' && '),
       exitCode: r.status,
       changedDuringRun,
-      log: logFile,
-      sourcesChecked: sources.length,
-      staticChecks,
       at: new Date().toISOString(),
     };
     writeRecord(root, 'tests.json', record);
+    if (passed && plan.mode === 'full') writeRecord(root, FULL_RECORD, record);
 
-    const messages = staticMessages(staticChecks);
     if (changedDuringRun) {
       const artifacts = after.baseRev === baseRev ? newArtifacts(root, before.scope, beforeHash, after.scope) : [];
       messages.push(
@@ -142,10 +264,11 @@ function runChecks({ root, config }) {
           : '测试运行期间代码发生了变化，记录作废：请在闸门运行时不要修改代码，然后重跑。',
       );
     }
+    const what = plan.mode === 'full' ? '全量' : `分组 ${record.groups.join('、')}`;
     messages.push(
       passed
-        ? `测试通过（源文件 ${sources.length} 个，日志 ${logFile}）`
-        : `测试未通过（退出码 ${r.status}，日志 ${logFile}）`,
+        ? `测试通过（${what}，源文件 ${sources.length} 个，日志 ${logFile}）`
+        : `测试未通过（${what}，退出码 ${r.status}，日志 ${logFile}）`,
     );
     return { ok: passed, messages, record };
   } finally {
@@ -154,18 +277,19 @@ function runChecks({ root, config }) {
 }
 
 /**
- * 运行闸门（配置只读一次）。工作区配置的 base 或判定策略字段与生效值不同时，在输出最前面加提示行（不算错误）。
- * 返回值同 runChecks。
+ * 运行闸门（配置只读一次）。affected 为 true 时按影响范围测试，force 为 true 时不沿用已有记录。
+ * 工作区配置的 base 或判定策略字段与生效值不同时，在输出最前面加提示行（不算错误）。返回值同 runChecks。
  */
-export function runGate({ root }) {
+export function runGate({ root, affected = false, force = false }) {
   const config = loadConfig(root);
-  const res = runChecks({ root, config });
+  const res = runChecks({ root, config, affected, force });
   return config.notes.length > 0 ? { ...res, messages: [...config.notes, ...res.messages] } : res;
 }
 
 if (isMain(import.meta.url)) {
   try {
-    const res = runGate({ root: repoRoot() });
+    const argv = process.argv.slice(2);
+    const res = runGate({ root: repoRoot(), affected: argv.includes('--affected'), force: argv.includes('--force') });
     for (const m of res.messages) console.log(m);
     process.exit(res.ok ? 0 : 1);
   } catch (e) {

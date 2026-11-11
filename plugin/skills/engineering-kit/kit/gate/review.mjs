@@ -1,17 +1,25 @@
-// 复审记录：子代理复审通过（或不通过）后在这里登记。业务含义：复审必须由独立于写代码者的子代理完成（允许名单内）；
-// 判定策略（复审流程、复审者名单、最少字数、结论关键词）取基准提交上的配置，被审分支改了不算数（lib.mjs 的 loadConfig）。
+// 复审记录：子代理复审（代码复审 code 或一致性审 consistency）后在这里登记。业务含义：复审必须由独立于写代码者的子代理完成（允许名单内）；
+// 判定策略（复审流程、复审者名单、最少字数、结论关键词、复审轮次上限）取基准提交上的配置，被审分支改了不算数（lib.mjs 的 loadConfig）。
 // 报告要有实质内容，并且有一处明确的结论（写法见 reportVerdict）：登记 pass 要求结论是通过，登记 fail 要求结论是不通过，
-// 找不到明确结论、前后矛盾或与登记不符时拒绝。按项目的复审流程（modules.gate.reviewFlow）分两种：
-//   pre-push：推送前单项复审，绑定当前代码树哈希和基准提交（基线）；复审前必须已有与当前代码、当前基线一致的通过测试记录。
-//       闸门范围与 gate.mjs、verify.mjs 同一口径（lib.mjs 的 gateScope）。
+// 找不到明确结论、前后矛盾或与登记不符时拒绝。四种登记：
+//   pass / fail   复审结论。
+//   defer         一致性审延期（只限 consistency），须写理由。
+//   accept        用户接受风险：报告结论是不通过，但用户已知情并决定接受其中的问题、不再修改；须带 --user-decision 写明用户的决定及出处。
+// 复审轮次：一轮＝对同一 PR（pr 流程）或同一分支（pre-push 流程）登记一次 fail，两种 kind 合并计数。已有 maxReviewRounds（默认 3）次 fail 后，
+//   再登记 pass 或 fail 都拒绝，须向用户说明后带 --user-decision 重新登记；accept 与 defer 不计轮次、不受拦截。每次登记成功的输出末尾给出轮次统计。
+// 按项目的复审流程（modules.gate.reviewFlow）分两种：
+//   pre-push：推送前复审，绑定当前代码树哈希和基准提交（基线）；登记 pass、fail、accept 前必须已有与当前代码、当前基线一致的通过测试记录
+//       （全量或按影响范围的都行）。闸门范围与 gate.mjs、verify.mjs 同一口径（lib.mjs 的 gateScope）。
 //       代码树哈希不含文档（reviewIgnore），只改规则文本这类改动每一轮的树哈希都相同，所以登记另外写明分支、HEAD 提交号、
 //       文档内容哈希和登记时未提交的文件数，用来把每次登记对应到具体的分支和提交；推送核对（verify.mjs）认树哈希与基线。
-//       最新一条写 review.json（推送核对读它）；每次登记另追加到 reviews/log.jsonl，报告副本放在 reviews/branches/<分支>/ 下。
-//   pr：CI 通过后针对 PR 的最终提交登记代码复审（code）或一致性审（consistency）；登记时用 gh 读取 PR，
-//       PR 未打开或 CI 未全部通过时拒绝。记录放 git 公共目录，供 merge.mjs 核对。一致性审可延期（defer），须写理由。
-// 用法：node scripts/engineering/gate/review.mjs pass|fail --reviewer <名> --report <报告文件> --summary "<一句话>"
-//       node scripts/engineering/gate/review.mjs pass|fail --pr <编号> --kind code|consistency --reviewer <名> --report <报告文件> --summary "<一句话>"
-//       node scripts/engineering/gate/review.mjs defer --pr <编号> --kind consistency --reason "<理由>"
+//       代码复审的最新一条写 review.json（推送核对读它）；一致性审写 review-consistency.json（推送核对不要求）；
+//       每次登记另追加到 reviews/log.jsonl（轮次按分支从这里数），报告副本放在 reviews/branches/<分支>/ 下。
+//   pr：CI 通过后针对 PR 的最终提交登记；登记时用 gh 读取 PR，PR 未打开或 CI 未全部通过时拒绝。
+//       记录放 git 公共目录：每个 kind 一份最新记录（merge.mjs 核对），每次登记另追加到 pr/<编号>/log.jsonl（轮次从这里数）。
+// 用法：node scripts/engineering/gate/review.mjs pass|fail [--kind code|consistency] --reviewer <名> --report <报告文件> --summary "<一句话>" [--user-decision "<用户的决定及出处>"]
+//       node scripts/engineering/gate/review.mjs defer --kind consistency --reason "<理由>"
+//       node scripts/engineering/gate/review.mjs accept --kind code|consistency --reviewer <名> --report <报告文件> --user-decision "<用户的决定及出处>"
+//       pr 流程的同样命令加 --pr <编号>，且必须带 --kind。
 // 报告文件放在仓库之外（例如系统临时目录），它不属于被审代码。
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -23,6 +31,7 @@ import {
   headInfo,
   isMain,
   loadConfig,
+  prLogFile,
   prNumber,
   prRecordFile,
   readPr,
@@ -44,30 +53,41 @@ function plain(s) {
   return s.replace(/[*_`]/g, '').trim();
 }
 
-/** 一段文字是不是单独的结论词：通过 / 不通过 / 未通过（只认这三个中文词；允许后面跟括号说明和句末标点）。返回 pass、fail 或 null。 */
+/** 结论词后紧跟括号的写法（如“通过（待 M2 修复后）”“通过（或 不通过）”）：不认，提示里说明。 */
+const BRACKETED = /^(?:通过|不通过|未通过)\s*[（(]/;
+
+/**
+ * 一段文字是不是单独的结论词：通过 / 不通过 / 未通过（只认这三个中文词；允许句末标点）。返回 pass、fail、bracketed 或 null。
+ * 结论词后带括号的返回 bracketed（不算结论）：括号里常是“待修复后”“或 不通过”这类让结论不再确定的话。
+ */
 function verdictWord(s) {
-  const t = plain(s).replace(/[（(][^）)]*[）)]/g, '').replace(/[。.！!]+$/, '').trim();
+  const t = plain(s).replace(/[。.！!]+$/, '').trim();
   if (t === '通过') return 'pass';
   if (t === '不通过' || t === '未通过') return 'fail';
+  if (BRACKETED.test(t)) return 'bracketed';
   return null;
 }
 
 /**
- * 两种写法共用的判定规则：把结论文字按 `，,；;。` 拆成小句，去掉修饰符号后整句恰好是结论词的小句才算。
- * 返回 'pass'、'fail'、'conflict'（同一处既有通过又有不通过）或 null（没有恰好是结论词的小句）。
- * 所以“有 2 个高级问题，不通过”是不通过，“通过。一句话理由”是通过，“通过前需修复 H1”“通过与否取决于…”都不算结论。
+ * 两种写法共用的判定规则：把结论文字按 `，,；;。：:` 拆成小句，去掉修饰符号后整句恰好是结论词的小句才算。
+ * 返回 { verdict: 'pass'|'fail'|'conflict'|null, bracketed }（conflict：同一处既有通过又有不通过；bracketed：有结论词后带括号的小句）。
+ * 所以“有 2 个高级问题，不通过”是不通过，“通过。一句话理由”“不通过：H1 未修复”都认得出，
+ * “通过前需修复 H1”“通过与否取决于…”“通过（待 M2 修复后）”都不算结论。
  */
 function clauseVerdict(s) {
-  const words = new Set(s.replace(/^[\s>-]*/, '').split(/[，,；;。]/).map(verdictWord).filter(Boolean));
-  if (words.size > 1) return 'conflict';
-  return words.size === 1 ? [...words][0] : null;
+  const all = s.replace(/^[\s>-]*/, '').split(/[，,；;。：:]/).map(verdictWord);
+  const words = new Set(all.filter((w) => w === 'pass' || w === 'fail'));
+  const bracketed = all.includes('bracketed');
+  if (words.size > 1) return { verdict: 'conflict', bracketed };
+  return { verdict: words.size === 1 ? [...words][0] : null, bracketed };
 }
 
 /**
  * 从报告里找出明确的结论。认两种写法（keyword 默认是“结论”，可配置），判定规则相同（clauseVerdict）：
  *   同一行：`结论：……`，行首允许井号、引用符、列表符，词两边允许星号，判定冒号后的文字。
  *   标题行：只有关键词的一行（如 `## 结论`），判定其后第一个非空行。
- * 返回 { verdict: 'pass'|'fail'|null, conflict }：找不到时 verdict 为 null；出现多处且不一致时 conflict 为 true、verdict 为 null。
+ * 返回 { verdict: 'pass'|'fail'|null, conflict, bracketed }：找不到时 verdict 为 null；出现多处且不一致时 conflict 为 true、verdict 为 null；
+ * bracketed 表示有结论词后带括号的写法（没认作结论），提示里据此说明。
  */
 export function reportVerdict(text, keyword = '结论') {
   const k = escapeRe(keyword);
@@ -75,22 +95,27 @@ export function reportVerdict(text, keyword = '结论') {
   const inline = new RegExp(`^[\\s>#*_-]*${k}(?:[\\s*_]*[:：]|[\\s*_]+)[\\s*_]*(.+)$`);
   const lines = String(text).split(/\r?\n/);
   const found = [];
+  let bracketed = false;
   for (let i = 0; i < lines.length; i++) {
     let body = null;
     if (heading.test(lines[i])) body = lines.slice(i + 1).find((l) => l.trim() !== '') ?? null;
     else body = inline.exec(lines[i])?.[1] ?? null;
     if (body === null) continue;
     const v = clauseVerdict(body);
-    if (v === 'conflict') found.push('pass', 'fail');
-    else if (v) found.push(v);
+    if (v.bracketed) bracketed = true;
+    if (v.verdict === 'conflict') found.push('pass', 'fail');
+    else if (v.verdict) found.push(v.verdict);
   }
   const kinds = new Set(found);
-  if (kinds.size > 1) return { verdict: null, conflict: true };
-  return { verdict: kinds.size === 1 ? [...kinds][0] : null, conflict: false };
+  if (kinds.size > 1) return { verdict: null, conflict: true, bracketed };
+  return { verdict: kinds.size === 1 ? [...kinds][0] : null, conflict: false, bracketed };
 }
 
-/** pr 流程的审查种类及中文名。 */
+/** 审查种类及中文名。 */
 const KINDS = { code: '代码复审', consistency: '一致性审' };
+
+/** 登记的结论种类。 */
+const VERDICTS = ['pass', 'fail', 'defer', 'accept'];
 
 /**
  * 分支名变成一层目录名：保留各种文字的字母和数字（中文分支名照常可读），斜杠等其余字符换成连字符，不以点开头；游离 HEAD 用 _detached。
@@ -102,8 +127,11 @@ export function branchDirName(branch) {
   return safe === branch ? safe : `${safe}-${crypto.createHash('sha256').update(branch).digest('hex').slice(0, 8)}`;
 }
 
-/** 报告与复审者检查（两种流程的 pass、fail 共用）。返回 { ok, message } 或 { ok: true, text }。 */
-function checkReport(config, verdict, reviewer, reportPath) {
+/**
+ * 报告与复审者检查（pass、fail、accept 共用）。expect 是报告应有的结论（accept 要求报告结论为不通过），label 是登记的结论名。
+ * 返回 { ok, message } 或 { ok: true, text }。
+ */
+function checkReport(config, expect, reviewer, reportPath, label = expect) {
   if (!config.reviewers.includes(reviewer)) {
     return { ok: false, message: `复审者 ${reviewer} 不在允许名单（${config.reviewers.join('、')}）内；复审必须由独立子代理完成` };
   }
@@ -113,82 +141,173 @@ function checkReport(config, verdict, reviewer, reportPath) {
     return { ok: false, message: `复审报告不少于 ${config.reviewMinChars} 字（当前 ${text.trim().length} 字）` };
   }
   const kw = config.reviewKeyword;
-  const how = `写法：同一行写“${kw}：通过。理由”或“${kw}：不通过。理由”，或者单独一行“## ${kw}”、其后第一个非空行写“通过。理由”或“不通过。理由”；结论词只认中文的通过、不通过、未通过，要单独成一个小句；全文只写一处结论`;
+  const how = `写法：同一行写“${kw}：通过。理由”或“${kw}：不通过。理由”，或者单独一行“## ${kw}”、其后第一个非空行写“通过。理由”或“不通过。理由”；结论词只认中文的通过、不通过、未通过，要单独成一个小句，结论词后不要加括号；全文只写一处结论`;
   if (!text.includes(kw)) return { ok: false, message: `复审报告缺少“${kw}”一节（${how}）` };
   const found = reportVerdict(text, kw);
   if (found.conflict) return { ok: false, message: `复审报告里有多处结论且不一致，无法判定（${how}）` };
-  if (!found.verdict) return { ok: false, message: `复审报告里找不到明确的结论（${how}）` };
-  if (found.verdict !== verdict) {
+  if (!found.verdict) {
+    const why = found.bracketed ? '：结论词后带了括号（如“通过（待 M2 修复后）”），这种写法不认，结论词后不要加括号' : '';
+    return { ok: false, message: `复审报告里找不到明确的结论${why}（${how}）` };
+  }
+  if (found.verdict !== expect) {
+    if (label === 'accept') return { ok: false, message: `accept 要求报告结论为不通过（用户接受的是报告里未修复的问题），这份报告的结论是“通过”，应登记为 pass（${how}）` };
     const said = found.verdict === 'pass' ? '通过' : '不通过';
-    return { ok: false, message: `报告结论写的是“${said}”，不能记录为 ${verdict}（${how}）` };
+    return { ok: false, message: `报告结论写的是“${said}”，不能记录为 ${label}（${how}）` };
   }
   return { ok: true, text };
 }
 
+/** 读取 jsonl 历史；文件不存在时为空，坏行跳过。路径被占成目录等读不了的情况抛错（不放行）。 */
+function readLog(file) {
+  if (!fs.existsSync(file)) return [];
+  return fs
+    .readFileSync(file, 'utf8')
+    .split('\n')
+    .filter((l) => l.trim())
+    .flatMap((l) => {
+      try {
+        return [JSON.parse(l)];
+      } catch {
+        return [];
+      }
+    });
+}
+
+/** 1–10 的中文数字（拦截提示里写“已审三轮”）；更大的写阿拉伯数字。 */
+function cnNumber(n) {
+  return n >= 1 && n <= 10 ? '一二三四五六七八九十'[n - 1] : String(n);
+}
+
 /**
- * 登记复审结论。返回 { ok, message, record? }；不通过的登记也会写入（verdict=fail），核对时只认 pass（一致性审另认 defer）。
+ * 轮次核对：prior 是同一 PR 或同一分支此前的登记。已有 limit 次 fail 后，登记 pass 或 fail 须带 userDecision。
+ * 返回拒绝信息，放行时返回 null。
+ */
+function roundBlock(prior, verdict, limit, userDecision, scope) {
+  if (verdict !== 'pass' && verdict !== 'fail') return null;
+  const fails = prior.filter((e) => e.verdict === 'fail').length;
+  if (fails < limit || (userDecision && userDecision.trim())) return null;
+  return (
+    `已审${cnNumber(limit)}轮仍需再审：向用户说明剩余问题、原因和已做处置，由用户决定；用户同意继续的，带 --user-decision "<用户的决定及出处>" 重新登记` +
+    `（${scope}已登记 ${fails} 次不通过，上限 ${limit} 轮，见 modules.review.maxReviewRounds）`
+  );
+}
+
+/** 登记成功后的轮次统计行：第几轮（accept、defer 不计轮次）、累计登记次数、涉及的不同提交数。entries 含本次。 */
+function roundLine(entries, verdict, limit, scope) {
+  const fails = entries.filter((e) => e.verdict === 'fail').length;
+  const commits = new Set(entries.map((e) => e.headSha).filter(Boolean)).size;
+  const tail = `${scope}累计登记 ${entries.length} 次，涉及 ${commits} 个不同提交`;
+  if (verdict === 'pass' || verdict === 'fail') {
+    const round = verdict === 'fail' ? fails : fails + 1;
+    return `复审轮次：第 ${round} 轮（上限 ${limit} 轮），${tail}`;
+  }
+  return `复审轮次：本次${verdict === 'accept' ? '接受风险' : '延期'}不计轮次；已审 ${fails} 轮（上限 ${limit} 轮），${tail}`;
+}
+
+/** 两种流程共用的参数校验：结论种类、defer 与 accept 的必填项。返回拒绝信息或 null。 */
+function argProblem({ verdict, kind, reason, userDecision }) {
+  if (!VERDICTS.includes(verdict)) return '结论只能是 pass、fail、defer 或 accept';
+  if (!KINDS[kind]) return '--kind 只能是 code 或 consistency';
+  if (verdict === 'defer') {
+    if (kind !== 'consistency') return '只有一致性审可以延期（defer 只接受 --kind consistency），代码复审不能延期';
+    if (!reason || !reason.trim()) return '延期须用 --reason 写明理由';
+  }
+  if (verdict === 'accept' && (!userDecision || !userDecision.trim())) {
+    return 'accept 须用 --user-decision 写明用户的决定及出处（例如“用户在对话中接受 M2，不再修改（2026-11-11）”）';
+  }
+  return null;
+}
+
+/**
+ * 登记复审结论。返回 { ok, message, record? }；不通过的登记也会写入（verdict=fail），核对时只认 pass 与 accept（一致性审另认 defer）。
  * pr 流程下 gh 不存在或调用失败时抛错（不放行）；gh 可注入，测试用假的实现。
  */
-export function recordReview({ root, verdict, reviewer, reportPath, summary = '', pr, kind, reason, gh = defaultGh }) {
+export function recordReview({ root, verdict, reviewer, reportPath, summary = '', pr, kind, reason, userDecision, gh = defaultGh }) {
   const config = loadConfig(root);
-  assertPolicy(config); // reviewFlow、reviewers、reviewMinChars、reviewKeyword 取基准提交上的配置，取不到时不按工作区的值登记
-  if (config.reviewFlow === 'pr') return recordPrReview({ root, config, verdict, reviewer, reportPath, summary, pr, kind, reason, gh });
-  if (pr !== undefined || kind !== undefined) {
-    return { ok: false, message: '本项目的复审流程是 pre-push，不接受 --pr、--kind；要启用 PR 双审，在主干上把 modules.gate.reviewFlow 改为 pr（闸门按基准提交上的配置判定）' };
+  assertPolicy(config); // reviewFlow、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds 取基准提交上的配置，取不到时不按工作区的值登记
+  if (config.reviewFlow === 'pr') return recordPrReview({ root, config, verdict, reviewer, reportPath, summary, pr, kind, reason, userDecision, gh });
+  if (pr !== undefined) {
+    return { ok: false, message: '本项目的复审流程是 pre-push，不接受 --pr；要启用 PR 双审，在主干上把 modules.gate.reviewFlow 改为 pr（闸门按基准提交上的配置判定）' };
   }
-  if (verdict !== 'pass' && verdict !== 'fail') return { ok: false, message: '结论只能是 pass 或 fail' };
-  const checked = checkReport(config, verdict, reviewer, reportPath);
-  if (!checked.ok) return checked;
+  const k = kind ?? 'code'; // 不带 --kind 时等同代码复审（旧用法）
+  const bad = argProblem({ verdict, kind: k, reason, userDecision });
+  if (bad) return { ok: false, message: bad };
+  let text = null;
+  if (verdict !== 'defer') {
+    const checked = checkReport(config, verdict === 'accept' ? 'fail' : verdict, reviewer, reportPath, verdict);
+    if (!checked.ok) return checked;
+    text = checked.text;
+  }
 
   // 本次改动只取一次，分成闸门范围（scope）和文档（docs）两部分，与 gate.mjs、verify.mjs 同一口径（gateScope）
   const { baseRev, changed, scope, docs } = gateScope(root, config);
   const hash = treeHash(root, scope);
-  const tests = readRecord(root, 'tests.json');
-  if (tests && tests.passed && tests.base !== baseRev) {
-    return { ok: false, message: '测试记录的基线已变化（基准提交与跑闸门时不同，例如合入了新主干），请重跑闸门（gate.mjs）' };
-  }
-  if (!tests || !tests.passed || tests.treeHash !== hash) {
-    return { ok: false, message: '没有与当前代码一致的通过测试记录，请先运行闸门（gate.mjs）' };
+  if (verdict !== 'defer') {
+    const tests = readRecord(root, 'tests.json');
+    if (tests && tests.passed && tests.base !== baseRev) {
+      return { ok: false, message: '测试记录的基线已变化（基准提交与跑闸门时不同，例如合入了新主干），请重跑闸门（gate.mjs）' };
+    }
+    if (!tests || !tests.passed || tests.treeHash !== hash) {
+      return { ok: false, message: '没有与当前代码一致的通过测试记录，请先运行闸门（gate.mjs）' };
+    }
   }
 
   // 登记对应的位置：分支、HEAD 提交号、文档内容哈希、未提交的文件数（复审看的是工作区，未提交时 HEAD 不含这些改动，如实记下）
   const { branch, headSha } = headInfo(root);
+  const reviews = path.join(recordDir(root), 'reviews');
+  const logFile = path.join(reviews, 'log.jsonl');
+  const prior = readLog(logFile).filter((e) => (e.branch ?? null) === branch);
+  const scopeName = branch ? `分支 ${branch} ` : '游离 HEAD ';
+  const blocked = roundBlock(prior, verdict, config.maxReviewRounds, userDecision, scopeName);
+  if (blocked) return { ok: false, message: blocked };
+
   const docHash = treeHash(root, docs);
   const docsOnly = scope.length === 0;
   const uncommitted = uncommittedInScope(root, changed).length;
-
-  const reviews = path.join(recordDir(root), 'reviews');
   const dir = path.join(reviews, 'branches', branchDirName(branch));
   fs.mkdirSync(dir, { recursive: true });
   const at = new Date().toISOString();
-  const copy = path.join(dir, `${at.replace(/[:.]/g, '-')}-${verdict}.md`);
-  fs.writeFileSync(copy, checked.text);
-  const record = { verdict, reviewer, treeHash: hash, base: baseRev, branch, headSha, docHash, docFiles: docs.length, docsOnly, uncommitted, summary, report: copy, at };
+  let copy = null;
+  if (text !== null) {
+    copy = path.join(dir, `${at.replace(/[:.]/g, '-')}-${k === 'code' ? '' : `${k}-`}${verdict}.md`);
+    fs.writeFileSync(copy, text);
+  }
+  const record = {
+    kind: k, verdict, reviewer: reviewer ?? null, treeHash: hash, base: baseRev, branch, headSha, docHash, docFiles: docs.length, docsOnly, uncommitted,
+    summary, reason: reason ?? null, userDecision: userDecision ?? null, report: copy, at,
+  };
   // 先追加历史，再写最新记录：历史写不进去时这次登记整个不生效，不留下“命令报错但记录已生效”的状态
-  fs.appendFileSync(path.join(reviews, 'log.jsonl'), `${JSON.stringify(record)}\n`);
-  writeRecord(root, 'review.json', record);
+  fs.appendFileSync(logFile, `${JSON.stringify(record)}\n`);
+  writeRecord(root, k === 'code' ? 'review.json' : 'review-consistency.json', record);
 
   const where = `${branch ? `分支 ${branch}` : '游离 HEAD（不在任何分支上）'}，提交 ${headSha ? headSha.slice(0, 12) : '（尚无提交）'}`;
-  const lines = [`复审记录已写入（${verdict}，${where}，树哈希 ${hash.slice(0, 12)}，文档 ${docs.length} 个、内容哈希 ${docHash.slice(0, 12)}）`];
+  const lines = [`${KINDS[k]}记录已写入（${verdict}，${where}，树哈希 ${hash.slice(0, 12)}，文档 ${docs.length} 个、内容哈希 ${docHash.slice(0, 12)}）`];
+  if (k === 'consistency') lines.push('一致性审记录只供核对，推送核对不要求它');
+  if (verdict === 'accept') lines.push(`用户决定接受风险：${userDecision}`);
   if (docsOnly) lines.push('本次只有文档类改动（reviewIgnore 之内）：闸门范围为空，树哈希每一轮都相同，这次登记以上面的提交号和文档内容哈希为准；推送核对不要求这份记录');
   if (uncommitted > 0) lines.push(`登记时有 ${uncommitted} 个改动文件未提交：上面的提交不含这些改动，复审对应的是当时的工作区内容`);
+  lines.push(roundLine([...prior, record], verdict, config.maxReviewRounds, scopeName));
   return { ok: true, message: lines.join('\n'), record };
 }
 
-/** pr 流程的登记：校验参数与报告，读取 PR（须打开、CI 全过），把结论绑定到 PR 的最终提交。 */
-function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, pr, kind, reason, gh }) {
-  if (!['pass', 'fail', 'defer'].includes(verdict)) return { ok: false, message: '结论只能是 pass、fail 或 defer' };
+/** pr 流程的登记：校验参数与报告，核对轮次，读取 PR（须打开、CI 全过），把结论绑定到 PR 的最终提交。 */
+function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, pr, kind, reason, userDecision, gh }) {
+  if (!VERDICTS.includes(verdict)) return { ok: false, message: '结论只能是 pass、fail、defer 或 accept' };
   if (pr === undefined || !KINDS[kind]) return { ok: false, message: '本项目的复审流程是 pr：须带 --pr <编号> 与 --kind code|consistency' };
   const no = prNumber(pr);
+  const bad = argProblem({ verdict, kind, reason, userDecision });
+  if (bad) return { ok: false, message: bad };
   let text = null;
-  if (verdict === 'defer') {
-    if (kind !== 'consistency') return { ok: false, message: '只有一致性审可以延期（defer 只接受 --kind consistency），代码复审不能延期' };
-    if (!reason || !reason.trim()) return { ok: false, message: '延期须用 --reason 写明理由' };
-  } else {
-    const checked = checkReport(config, verdict, reviewer, reportPath);
+  if (verdict !== 'defer') {
+    const checked = checkReport(config, verdict === 'accept' ? 'fail' : verdict, reviewer, reportPath, verdict);
     if (!checked.ok) return checked;
     text = checked.text;
   }
+  const logFile = prLogFile(root, no);
+  const prior = readLog(logFile);
+  const scopeName = `PR #${no} `;
+  const blocked = roundBlock(prior, verdict, config.maxReviewRounds, userDecision, scopeName);
+  if (blocked) return { ok: false, message: blocked };
 
   const st = readPr(root, no, gh); // gh 失败时抛错
   if (st.state !== 'OPEN') return { ok: false, message: `PR #${no} 不是打开状态（${st.state}），不能登记` };
@@ -201,9 +320,14 @@ function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, 
     copy = path.join(path.dirname(file), `${kind}-${new Date().toISOString().replace(/[:.]/g, '-')}-${verdict}.md`);
     fs.writeFileSync(copy, text);
   }
-  const record = { pr: no, kind, verdict, reviewer: reviewer ?? null, headSha: st.head, summary, reason: reason ?? null, report: copy, at: new Date().toISOString() };
+  const record = { pr: no, kind, verdict, reviewer: reviewer ?? null, headSha: st.head, summary, reason: reason ?? null, userDecision: userDecision ?? null, report: copy, at: new Date().toISOString() };
+  // 先追加历史（轮次按它计数），再写最新记录（merge.mjs 读它）
+  fs.appendFileSync(logFile, `${JSON.stringify(record)}\n`);
   fs.writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`);
-  return { ok: true, message: `已登记 PR #${no} 的${KINDS[kind]}（${verdict}，最终提交 ${st.head.slice(0, 12)}）`, record };
+  const lines = [`已登记 PR #${no} 的${KINDS[kind]}（${verdict}，最终提交 ${st.head.slice(0, 12)}）`];
+  if (verdict === 'accept') lines.push(`用户决定接受风险：${userDecision}`);
+  lines.push(roundLine([...prior, record], verdict, config.maxReviewRounds, scopeName));
+  return { ok: true, message: lines.join('\n'), record };
 }
 
 /** 解析命令行参数：第一个位置参数是结论，其余为 --key value。 */
@@ -225,6 +349,7 @@ if (isMain(import.meta.url)) {
       pr: a.pr,
       kind: a.kind,
       reason: a.reason,
+      userDecision: a['user-decision'],
     });
     console.log(res.message);
     process.exit(res.ok ? 0 : 1);

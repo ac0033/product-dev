@@ -86,7 +86,7 @@ test('配置：reviewFlow 默认 pre-push，只认 pre-push 与 pr；扁平回�
 test('验收 2：pr 流程推送核对——有通过的测试记录、没有复审记录即通过', () => {
   const root = prRepo();
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'sorted');\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   assert.equal(runGate({ root }).ok, true);
   commitAll(root, 'feat: dedup sorted');
   assert.equal(readRecord(root, 'review.json'), null);
@@ -94,7 +94,7 @@ test('验收 2：pr 流程推送核对——有通过的测试记录、没有复
   assert.equal(res.ok, true, JSON.stringify(res.problems));
   // 测试记录仍然必需
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return items;\n}\n`);
-  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, 'plain');\n");
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'plain');\n");
   commitAll(root, 'feat: plain');
   assert.equal(verify({ root }).ok, false, '代码变化后测试记录失效，仍应拒绝');
 });

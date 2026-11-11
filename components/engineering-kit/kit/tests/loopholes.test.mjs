@@ -31,7 +31,7 @@ const PASS_REPORT = `${BODY}结论\n通过\n`;
 /** 在功能分支上做一份能过静态检查的改动（源文件与引用它的测试一起改）。 */
 function passingChange(root, tag = 'sorted') {
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort(); // ${tag}\n}\n`);
-  write(root, 'test/dedup.test.ts', `import { dedup } from '../src/dedup.ts';\nconsole.log(dedup, '${tag}');\n`);
+  write(root, 'test/dedup.test.ts', `import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, '${tag}');\n`);
 }
 
 /** 登记一次 pre-push 复审（pass，合格报告）。 */
@@ -311,11 +311,15 @@ test('漏洞 4：“结论：**未**通过”“结论：有 2 个高级问题�
 });
 
 test('漏洞 4：“结论：未通过的问题已修复，通过”是通过；报告模板的“## 结论”下一行写法照常可用', () => {
-  for (const line of ['结论：未通过的问题已修复，通过\n', '## 结论\n\n通过（或 不通过）。一句话理由；无高、中级问题。\n', '> **结论**：**通过**\n', '结论：通过\n']) {
+  // 0.6.0 起报告模板的结论一节改成不带括号的示例写法（二选一）；带括号的占位写法“通过（或 不通过）”不再认作通过
+  for (const line of ['结论：未通过的问题已修复，通过\n', '## 结论\n\n通过。一句话理由；无高、中级问题。\n', '> **结论**：**通过**\n', '结论：通过\n']) {
     const root = gatedRepo();
     const r = reviewPass(root, `${BODY}${line}`);
     assert.equal(r.ok, true, `${line} → ${r.message}`);
   }
+  const placeholder = reviewPass(gatedRepo(), `${BODY}## 结论\n\n通过（或 不通过）。一句话理由；无高、中级问题。\n`);
+  assert.equal(placeholder.ok, false, placeholder.message);
+  assert.match(placeholder.message, /括号/);
 });
 
 test('漏洞 4：登记 fail 要求结论是不通过；找不到明确结论或前后矛盾时拒绝并提示写法', () => {
@@ -536,7 +540,8 @@ test('漏洞 10：“## 结论”下一行只是以“通过”开头（通过�
 
 test('漏洞 10：带句号的写法都能认出：“结论：通过。无高、中级问题。”“## 结论 / 通过。理由”“## 结论 / 不通过。理由”', () => {
   const root = gatedRepo();
-  for (const tail of ['结论：通过。无高、中级问题。\n', '## 结论\n通过。一句话理由；无高、中级问题。\n', '## 结论\n\n通过（或 不通过）。一句话理由；高、中级问题的编号清单。\n']) {
+  // 0.6.0 起带括号的模板占位写法不认（见 mechanisms.test.mjs 的结论判定用例），这里换成模板的新写法
+  for (const tail of ['结论：通过。无高、中级问题。\n', '## 结论\n通过。一句话理由；无高、中级问题。\n', '## 结论\n\n通过。一句话理由；高、中级问题的编号清单。\n']) {
     const r = reviewPass(root, `${BODY}${tail}`);
     assert.equal(r.ok, true, `${tail} → ${r.message}`);
   }

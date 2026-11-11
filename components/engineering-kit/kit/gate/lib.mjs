@@ -2,7 +2,7 @@
 // 业务含义：闸门要回答三件事——这次改动了哪些文件（范围）、这些文件现在的内容是什么（树哈希）、
 // 测试与复审记录是不是针对这份内容、这个基准提交做的（绑定）。范围只有一个口径（gateScope）：
 // 配置、豁免表和套件脚本永远在范围内。判定依据不由被审分支决定，在 loadConfig 一处得出：基准分支设置（base）取默认主干上的配置，
-// 判定策略字段（POLICY_KEYS：reviewIgnore、reviewFlow、reviewers、reviewMinChars、reviewKeyword）取基准提交上的配置。
+// 判定策略字段（POLICY_KEYS：reviewIgnore、reviewFlow、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds）取基准提交上的配置。
 // 只读 git 与工作区，写入只发生在 git 目录下的记录目录里，
 // 不污染工作区。测试与推送前复审记录放在各工作树自己的 git 目录（互不覆盖）；全局锁与 PR 审查记录（pr 流程）
 // 放在 git 公共目录：同一仓库同时只跑一个闸门，PR 的复审与合并可以在不同工作树进行。
@@ -55,11 +55,11 @@ export function gitCommonDir(root) {
 
 /**
  * 判定策略字段：决定“这次改动要不要过闸门、怎样才算复审通过”的配置项。它们不能由被审分支自己决定，
- * 生效值取基准提交上的配置（见 loadConfig）。其余字段（testCommand、testEnv、sourceGlobs、testGlobs、commentMode、
- * layout、hygiene 等）仍用工作区的值：它们随功能分支一起变化是正常的（新加语言、改测试命令），而且配置文件
+ * 生效值取基准提交上的配置（见 loadConfig）。maxReviewRounds 是复审轮次上限（review.mjs 拦截第几轮之后的登记）。
+ * 其余字段（testCommand、testEnv、testGroups、sourceGlobs、testGlobs、commentMode、layout、hygiene 等）仍用工作区的值：它们随功能分支一起变化是正常的（新加语言、改测试命令），而且配置文件
  * 永远在闸门范围内，改了就要过测试与复审，会被复审者看到。base 另由默认主干上的配置决定（mainlineBase）。
  */
-export const POLICY_KEYS = ['reviewIgnore', 'reviewFlow', 'reviewers', 'reviewMinChars', 'reviewKeyword'];
+export const POLICY_KEYS = ['reviewIgnore', 'reviewFlow', 'reviewers', 'reviewMinChars', 'reviewKeyword', 'maxReviewRounds'];
 
 /**
  * 读取某个提交上的项目配置并展开。该提交上没有配置文件时返回 null；读不出或不合法时抛错（失败不放行），
@@ -143,12 +143,15 @@ export function mainlineBase(root) {
   return cfg ? { ref, base: cfg.base } : null;
 }
 
-/** 读取豁免表；没有则为空。豁免只放行被列出的路径，不影响其他文件。 */
+/**
+ * 读取豁免表；没有则为空。豁免只放行被列出的路径，不影响其他文件。各段：testFirst（测试先行）、comments（注释）、
+ * newFiles（新文件位置）、assertions（测试文件里没有断言痕迹，例如只验证能导入的冒烟测试）。
+ */
 export function loadExempt(root) {
   const file = path.join(root, EXEMPT_FILE);
-  if (!fs.existsSync(file)) return { testFirst: {}, comments: {}, newFiles: {} };
+  if (!fs.existsSync(file)) return { testFirst: {}, comments: {}, newFiles: {}, assertions: {} };
   const j = JSON.parse(fs.readFileSync(file, 'utf8'));
-  return { testFirst: j.testFirst || {}, comments: j.comments || {}, newFiles: j.newFiles || {} };
+  return { testFirst: j.testFirst || {}, comments: j.comments || {}, newFiles: j.newFiles || {}, assertions: j.assertions || {} };
 }
 
 /** 路径（斜杠分隔）是否匹配任一 glob。 */
@@ -296,6 +299,19 @@ export function allowedTopDirs(layout) {
  */
 export const ALWAYS_IN_SCOPE = [CONFIG_FILE, EXEMPT_FILE, 'scripts/engineering/**'];
 
+/**
+ * 依赖清单与锁文件（glob，根目录和子目录都匹配）：它们一变，任何测试的结果都可能变，按影响范围测试时一律改跑全量。
+ * 局限：只列常见语言的包管理文件；项目自定义的依赖脚本不在其中，不要把它放进任何测试分组，让它的改动触发全量。
+ */
+export const DEPENDENCY_FILES = [
+  '**/package.json', '**/package-lock.json', '**/npm-shrinkwrap.json', '**/yarn.lock', '**/pnpm-lock.yaml', '**/pnpm-workspace.yaml',
+  '**/bun.lock', '**/bun.lockb', '**/deno.json', '**/deno.lock',
+  '**/requirements*.txt', '**/constraints*.txt', '**/pyproject.toml', '**/poetry.lock', '**/uv.lock', '**/Pipfile', '**/Pipfile.lock',
+  '**/setup.py', '**/setup.cfg', '**/go.mod', '**/go.sum', '**/go.work', '**/Cargo.toml', '**/Cargo.lock',
+  '**/Gemfile', '**/Gemfile.lock', '**/composer.json', '**/composer.lock', '**/pom.xml', '**/build.gradle', '**/build.gradle.kts',
+  '**/gradle.lockfile', '**/*.csproj', '**/packages.lock.json', '**/Package.swift', '**/Package.resolved',
+];
+
 /** 是否算文档（不计入闸门范围）：匹配给定的 reviewIgnore，且不是永远在范围内的文件。 */
 export function isIgnoredDoc(rel, reviewIgnore) {
   return !matchesAny(rel, ALWAYS_IN_SCOPE) && matchesAny(rel, reviewIgnore);
@@ -359,11 +375,11 @@ function indexGitlinks(root) {
 }
 
 /**
- * 代码树哈希：对每个文件的路径与内容摘要排序后再取摘要。
- * 子模块（gitlink）按它指向的提交号计入；文件不存在（已删除）记为 deleted。只看这些文件的当前内容，与是否提交无关。
+ * 每个文件的内容摘要：路径 → git 对象名（与 git add 相同的清洗过滤器）；子模块记为 gitlink:<提交号>，文件不存在（已删除）记为 deleted。
+ * 测试记录保存它（files），以后按影响范围测试时与当前内容逐个比较，算出此后改了哪些文件。
  */
-export function treeHash(root, files) {
-  const sorted = [...files].sort();
+export function fileHashes(root, files) {
+  const sorted = [...new Set(files)].sort();
   const dirs = [];
   const present = sorted.filter((f) => {
     const p = path.join(root, f);
@@ -389,11 +405,24 @@ export function treeHash(root, files) {
     const out = r.stdout.split('\n').filter(Boolean);
     present.forEach((f, i) => hashes.set(f, out[i]));
   }
+  const out = {};
+  for (const f of sorted) out[f] = hashes.get(f) ?? links.get(f) ?? 'deleted';
+  return out;
+}
+
+/** 由 fileHashes 的结果算代码树哈希：对每个文件的路径与内容摘要排序后再取摘要。 */
+export function hashOfFiles(map) {
   const h = crypto.createHash('sha256');
-  for (const f of sorted) {
-    h.update(`${f}\t${hashes.get(f) ?? links.get(f) ?? 'deleted'}\n`);
-  }
+  for (const f of Object.keys(map).sort()) h.update(`${f}\t${map[f]}\n`);
   return h.digest('hex');
+}
+
+/**
+ * 代码树哈希：对每个文件的路径与内容摘要排序后再取摘要。
+ * 子模块（gitlink）按它指向的提交号计入；文件不存在（已删除）记为 deleted。只看这些文件的当前内容，与是否提交无关。
+ */
+export function treeHash(root, files) {
+  return hashOfFiles(fileHashes(root, files));
 }
 
 /** 记录目录：当前工作树自己的 git 目录下的 engineering-gate/（多个工作树各用各的，不互相覆盖）。 */
@@ -512,6 +541,11 @@ export function readPr(root, pr, gh) {
   if (!j || !j.headRefOid) throw new Error('gh pr view 的输出缺少最终提交（headRefOid）');
   const files = Array.isArray(j.files) ? j.files.map((f) => f.path) : [];
   return { state: j.state, head: j.headRefOid, ciProblems: ciProblems(j.statusCheckRollup), files };
+}
+
+/** PR 审查历史：git 公共目录下 engineering-gate/pr/<编号>/log.jsonl，每次登记（pass、fail、defer、accept）追加一行，复审轮次按它计数。 */
+export function prLogFile(root, pr) {
+  return path.join(gitCommonDir(root), 'engineering-gate', 'pr', pr, 'log.jsonl');
 }
 
 /** PR 审查记录文件：git 公共目录下 engineering-gate/pr/<编号>/<kind>.json（复审与合并可能在不同工作树进行，所以不放 recordDir）。 */

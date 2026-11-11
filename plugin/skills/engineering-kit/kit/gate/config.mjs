@@ -1,10 +1,11 @@
 // 项目配置（engineering.config.json）的 profile 结构与展开。业务含义：
 //   项目配置是唯一由项目自己维护的文件，结构分四段，便于升级时只改动套件认可的字段：
-//     modules  —— 模块参数：gate（基准分支、测试命令、环境变量、锁时长、复审流程 reviewFlow）、review（复审者名单、字数、结论关键词）
+//     modules  —— 模块参数：gate（基准分支、测试命令、环境变量、测试分组 testGroups、锁时长、复审流程 reviewFlow）、
+//                 review（复审者名单、字数、结论关键词、复审轮次上限 maxReviewRounds）
 //     layout   —— 目录布局：源文件与测试的 glob、阶段目录、允许的顶层目录
 //     hygiene  —— 巡检参数：禁用文件名片段、草稿超期天数、记录类目录、合法状态值
 //     rules    —— 规则：不计入闸门的文档（reviewIgnore；项目配置、豁免表、套件脚本除外，永远计入）、注释检查模式（commentMode）
-//   这里只做结构展开。闸门运行时 base 与判定策略字段（reviewIgnore、reviewFlow、reviewers、reviewMinChars、reviewKeyword）
+//   这里只做结构展开与取值校验。闸门运行时 base 与判定策略字段（reviewIgnore、reviewFlow、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds）
 //   的生效值不取工作区，而取主干或基准提交上的配置，见 lib.mjs 的 loadConfig。
 //   闸门内部只使用“扁平”字段（FLAT_KEYS），由 normalizeConfig 展开；旧版扁平配置仍可读取，便于回滚。
 // 同步器通过 toProfile / toFlat 在两种结构之间转换，保证回滚到旧版本时配置格式也随之回退。
@@ -12,7 +13,7 @@
 /** 闸门使用的扁平字段名（与旧版 engineering.config.json 相同）。 */
 export const FLAT_KEYS = [
   'base', 'sourceGlobs', 'testGlobs', 'reviewIgnore', 'commentMode', 'testCommand', 'testEnv',
-  'reviewers', 'reviewMinChars', 'reviewKeyword', 'lockMaxAgeMinutes', 'reviewFlow',
+  'reviewers', 'reviewMinChars', 'reviewKeyword', 'lockMaxAgeMinutes', 'reviewFlow', 'testGroups', 'maxReviewRounds',
 ];
 
 /** 扁平字段的缺省值。 */
@@ -29,6 +30,8 @@ export const DEFAULTS = {
   reviewKeyword: '结论',
   lockMaxAgeMinutes: 90,
   reviewFlow: 'pre-push',
+  testGroups: [],
+  maxReviewRounds: 3,
 };
 
 /** 复审流程的合法取值：pre-push（推送前单项复审）或 pr（CI 通过后对 PR 最终提交做代码复审与一致性审，经 merge.mjs 合并）。 */
@@ -67,7 +70,32 @@ export function normalizeConfig(raw) {
   if (!REVIEW_FLOWS.includes(eff.reviewFlow)) {
     throw new Error(`engineering.config.json 的 modules.gate.reviewFlow 只能是 ${REVIEW_FLOWS.join(' 或 ')}（当前 ${JSON.stringify(eff.reviewFlow)}）`);
   }
+  if (!Number.isInteger(eff.maxReviewRounds) || eff.maxReviewRounds < 1) {
+    throw new Error(`engineering.config.json 的 modules.review.maxReviewRounds 必须是正整数（当前 ${JSON.stringify(eff.maxReviewRounds)}）`);
+  }
+  checkTestGroups(eff.testGroups);
   return eff;
+}
+
+/**
+ * 校验测试分组（modules.gate.testGroups）：数组，每项 { name, paths, command }——name 是不重复的非空字符串，
+ * paths 是非空的 glob 数组（相对仓库根，斜杠分隔），command 是非空的测试命令。格式不对时抛错，不静默忽略。
+ */
+function checkTestGroups(groups) {
+  const where = 'engineering.config.json 的 modules.gate.testGroups';
+  if (!Array.isArray(groups)) throw new Error(`${where} 必须是数组`);
+  const names = new Set();
+  groups.forEach((g, i) => {
+    const at = `${where} 第 ${i + 1} 项`;
+    if (!isObject(g)) throw new Error(`${at} 必须是对象 { name, paths, command }`);
+    if (typeof g.name !== 'string' || !g.name.trim()) throw new Error(`${at} 缺少 name（非空字符串）`);
+    if (names.has(g.name)) throw new Error(`${where} 的分组名 ${g.name} 重复`);
+    names.add(g.name);
+    if (!Array.isArray(g.paths) || g.paths.length === 0 || !g.paths.every((p) => typeof p === 'string' && p.trim())) {
+      throw new Error(`${at}（${g.name}）的 paths 必须是非空的 glob 数组`);
+    }
+    if (typeof g.command !== 'string' || !g.command.trim()) throw new Error(`${at}（${g.name}）缺少 command（非空字符串）`);
+  });
 }
 
 /** 展开两种结构（取值校验由 normalizeConfig 统一做）。 */
@@ -98,9 +126,11 @@ function expand(raw) {
     testEnv: gate.testEnv ?? DEFAULTS.testEnv,
     lockMaxAgeMinutes: gate.lockMaxAgeMinutes ?? DEFAULTS.lockMaxAgeMinutes,
     reviewFlow: gate.reviewFlow ?? DEFAULTS.reviewFlow,
+    testGroups: gate.testGroups ?? DEFAULTS.testGroups,
     reviewers: review.reviewers ?? DEFAULTS.reviewers,
     reviewMinChars: review.reviewMinChars ?? DEFAULTS.reviewMinChars,
     reviewKeyword: review.reviewKeyword ?? DEFAULTS.reviewKeyword,
+    maxReviewRounds: review.maxReviewRounds ?? DEFAULTS.maxReviewRounds,
     sourceGlobs: lay.sourceGlobs ?? DEFAULTS.sourceGlobs,
     testGlobs: lay.testGlobs ?? DEFAULTS.testGlobs,
     reviewIgnore: rules.reviewIgnore ?? DEFAULTS.reviewIgnore,
@@ -112,15 +142,18 @@ function expand(raw) {
 
 /**
  * 扁平配置 → profile 结构（同步器写入新格式时使用）。扁平结构里 _profile 段保存的布局与巡检设置原样恢复。
+ * 测试分组是可选项：没有分组时不写 testGroups，迁移旧配置不凭空多出一项。
  */
 export function toProfile(flat) {
   const f = normalizeConfig(flat);
   const { sourceGlobs, testGlobs, stages, topLevelAllowed } = { ...f.layout, sourceGlobs: f.sourceGlobs, testGlobs: f.testGlobs };
+  const gate = { base: f.base, testCommand: f.testCommand, testEnv: f.testEnv, lockMaxAgeMinutes: f.lockMaxAgeMinutes, reviewFlow: f.reviewFlow };
+  if (f.testGroups.length > 0) gate.testGroups = f.testGroups;
   return {
     profile: 2,
     modules: {
-      gate: { base: f.base, testCommand: f.testCommand, testEnv: f.testEnv, lockMaxAgeMinutes: f.lockMaxAgeMinutes, reviewFlow: f.reviewFlow },
-      review: { reviewers: f.reviewers, reviewMinChars: f.reviewMinChars, reviewKeyword: f.reviewKeyword },
+      gate,
+      review: { reviewers: f.reviewers, reviewMinChars: f.reviewMinChars, reviewKeyword: f.reviewKeyword, maxReviewRounds: f.maxReviewRounds },
     },
     layout: { sourceGlobs, testGlobs, stages, topLevelAllowed },
     hygiene: { ...f.hygiene },
