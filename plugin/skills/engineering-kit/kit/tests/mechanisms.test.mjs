@@ -668,3 +668,58 @@ test('N3：本地没有 PR 最终提交而按含代码处理时，输出说明�
   assert.equal(res.ok, false);
   assert.ok(res.notes.some((n) => n.includes('本地没有') && n.includes('git fetch')), JSON.stringify(res.notes));
 });
+
+// ---------- 0.6.0 第三轮前：最近一次运行的结果说了算（同一棵树上之后的失败不能被更早的通过记录抹掉） ----------
+
+/**
+ * 测试命令看一个被 git 忽略的标记文件决定成败：标记文件不在闸门范围内，所以同一棵代码树可以先过后不过（模拟不稳定的测试）。
+ * 脚本和 .gitignore 放在主干上；command 用 node flaky.mjs。
+ */
+function addFlaky(root) {
+  git(root, ['checkout', '-q', 'main']);
+  write(root, 'flaky.mjs', "import fs from 'node:fs';\nprocess.exit(fs.existsSync('flag.txt') ? 1 : 0);\n");
+  write(root, '.gitignore', 'flag.txt\n');
+  commitAll(root, 'flaky');
+  git(root, ['checkout', '-q', 'feat']);
+  git(root, ['rebase', '-q', 'main']);
+}
+
+test('复用：全量通过后同一棵树 --force 全量失败，再跑闸门（不带 --force）必须重跑，不沿用更早的通过记录；verify 读到未通过', () => {
+  const root = featureRepo({ testCommand: 'node flaky.mjs' });
+  addFlaky(root);
+  changeDedup(root);
+  commitAll(root, 'feat');
+  assert.equal(runGate({ root }).ok, true);
+  write(root, 'flag.txt', 'x\n');
+  const failed = runGate({ root, force: true });
+  assert.equal(failed.ok, false, failed.messages.join('\n'));
+  assert.ok(verify({ root }).problems.some((p) => /最近一次测试未通过/.test(p)));
+  const again = runGate({ root });
+  assert.ok(!again.messages.some((m) => /沿用/.test(m)), again.messages.join('\n'));
+  assert.equal(again.ok, false, '重跑后仍失败');
+  assert.equal(readRecord(root, 'tests.json').passed, false);
+  assert.ok(verify({ root }).problems.some((p) => /最近一次测试未通过/.test(p)), 'verify 读到的 tests.json 必须是未通过');
+  fs.rmSync(path.join(root, 'flag.txt'));
+  const fixed = runGate({ root });
+  assert.equal(fixed.ok, true, fixed.messages.join('\n'));
+  assert.ok(!fixed.messages.some((m) => /沿用/.test(m)), '失败之后的第一次通过要真的跑出来');
+});
+
+test('复用：分组测试在某棵树上失败后，--affected 与普通运行都不沿用任何通过记录；verify 读到未通过', () => {
+  const groups = [{ name: 'dedup', paths: ['src/dedup.ts', 'test/dedup.test.ts'], command: 'node flaky.mjs' }];
+  const root = groupRepo({ testGroups: groups });
+  addFlaky(root);
+  changeDedup(root, 'v1');
+  assert.equal(runGate({ root }).ok, true);
+  changeDedup(root, 'v2');
+  assert.equal(runGate({ root, affected: true }).record.mode, 'affected');
+  write(root, 'flag.txt', 'x\n');
+  const failed = runGate({ root, affected: true, force: true });
+  assert.equal(failed.ok, false, failed.messages.join('\n'));
+  assert.equal(failed.record.mode, 'affected');
+  const again = runGate({ root, affected: true });
+  assert.ok(!again.messages.some((m) => /沿用/.test(m)), again.messages.join('\n'));
+  assert.equal(again.ok, false);
+  assert.equal(readRecord(root, 'tests.json').passed, false);
+  assert.ok(verify({ root }).problems.some((p) => /最近一次测试未通过/.test(p)));
+});

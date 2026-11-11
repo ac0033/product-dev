@@ -9,7 +9,8 @@
 //                    没有分组、没有可用的全量记录、基线或测试配置变了、改动不属于任何分组、涉及配置与套件脚本或依赖清单时，
 //                    自动改跑全量并写明原因；这份代码上次全量未通过、或全量记录之后没有改动（不带 --force 时已直接沿用全量记录）时也改跑全量。改动文件按 diffNames 取（改名算删除加新增）。
 // 结果复用：已有通过的记录且代码树、基线、测试配置摘要（testCommand、testEnv、testGroups）都一致、模式满足要求
-//   （要全量时须是全量记录）时不重跑，输出“沿用已有通过记录”；--force 强制重跑。静态检查两种模式、复用与否都照常做。
+//   （要全量时须是全量记录）时不重跑，输出“沿用已有通过记录”；--force 强制重跑。最近一次运行说了算：同一代码树、基线、测试配置上
+//   刚有过未通过的运行（全量或分组）时不沿用任何记录，全量未通过时同一棵树的全量通过记录作废。静态检查两种模式、复用与否都照常做。
 // 闸门范围的口径见 lib.mjs 的 gateScope；基准分支设置取默认主干上的配置，判定策略（reviewIgnore 等）取基准提交上的配置，
 // 工作区写的值与生效值不同时输出提示行。
 // 用法：node scripts/engineering/gate/gate.mjs [--affected] [--force]
@@ -89,9 +90,13 @@ function listSome(files, n = 5) {
 /**
  * 可以沿用的通过记录：tests.json 或全量记录中，通过、代码树、基线、测试配置摘要都与现在一致，
  * 且模式满足要求（要全量时须是全量记录；要按影响范围时任一通过记录都行）。没有时返回 null。
+ * 最近一次运行说了算：tests.json 总是最近一次运行的记录，它是同一代码树、同一基线、同一测试配置上的未通过记录时
+ * （全量或分组失败，例如不稳定的测试、带 --force 重跑失败），不沿用任何更早的通过记录。
  */
 function reusable(root, { hash, baseRev, digest, affected }) {
-  for (const rec of [readRecord(root, 'tests.json'), readRecord(root, FULL_RECORD)]) {
+  const last = readRecord(root, 'tests.json');
+  if (last && !last.passed && last.treeHash === hash && last.base === baseRev && last.configDigest === digest) return null;
+  for (const rec of [last, readRecord(root, FULL_RECORD)]) {
     if (!rec || !rec.passed || rec.treeHash !== hash || rec.base !== baseRev || rec.configDigest !== digest) continue;
     if (!affected && rec.mode !== 'full') continue;
     return rec;
@@ -254,6 +259,14 @@ function runChecks({ root, config, affected = false, force = false }) {
     };
     writeRecord(root, 'tests.json', record);
     if (passed && plan.mode === 'full') writeRecord(root, FULL_RECORD, record);
+    if (!passed) {
+      // 这棵树刚刚没通过：同一代码树、同一基线、同一测试配置的全量通过记录作废（删除），以后既不能沿用它，
+      // 也不能拿它当按影响范围测试的起点；否则 tests.json 被别的运行覆盖后，更早的通过会把这次失败抹掉
+      const full = readRecord(root, FULL_RECORD);
+      if (full && full.treeHash === beforeHash && full.base === baseRev && full.configDigest === digest) {
+        fs.rmSync(path.join(recordDir(root), FULL_RECORD), { force: true });
+      }
+    }
 
     if (changedDuringRun) {
       const artifacts = after.baseRev === baseRev ? newArtifacts(root, before.scope, beforeHash, after.scope) : [];
