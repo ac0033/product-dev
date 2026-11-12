@@ -697,7 +697,9 @@ export async function runExternalReview(opts) {
 
 /** CodeBuddy 复审时允许的工具（只读）与明确禁止的工具（写文件、执行命令、联网、派生子代理）。 */
 export const CODEBUDDY_READ_TOOLS = ['Read', 'Grep', 'Glob', 'LS'];
-export const CODEBUDDY_DENIED_TOOLS = ['Bash', 'PowerShell', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'TodoWrite', 'KillShell', 'BashOutput', 'ImageGen', 'SendUserMessage'];
+/** CodeBuddy 的模型路由别名：只表示“交给路由选”，不是实际模型（2.165.0 实测：不指定模型时 modelUsage 的键和消息里的 model 都是 auto）。 */
+export const CODEBUDDY_ROUTER_ALIASES = ['auto', 'fast-model', 'balanced-model', 'primary-model', 'deep-model'];
+export const CODEBUDDY_DENIED_TOOLS =['Bash', 'PowerShell', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'TodoWrite', 'KillShell', 'BashOutput', 'ImageGen', 'SendUserMessage'];
 
 /**
  * 给模型的提示：审查要求，加上用随机标记包住的被审数据（diff、上一轮报告、项目上下文）。
@@ -789,14 +791,18 @@ export function parseCodebuddyStream(stdout, request) {
   const byModel = isObj(resultLine?.modelUsage) ? resultLine.modelUsage : null;
   const modelKeys = byModel ? Object.keys(byModel) : [];
   const outTokens = (k) => Number(byModel[k]?.outputTokens ?? byModel[k]?.output_tokens ?? 0);
-  const actualModel = modelKeys.length > 0 ? [...modelKeys].sort((a, b) => outTokens(b) - outTokens(a))[0] : (assistantModels.length === 1 ? assistantModels[0] : null);
+  // 路由别名（auto 等）只说明“交给路由选”，不是实际模型；用了 token 的键才算调用过
+  const real = (m) => !CODEBUDDY_ROUTER_ALIASES.includes(String(m).toLowerCase());
+  const usedKeys = modelKeys.filter((k) => outTokens(k) > 0 && real(k));
+  const realAssistant = assistantModels.filter(real);
+  const actualModel = usedKeys.length > 0 ? [...usedKeys].sort((a, b) => outTokens(b) - outTokens(a))[0] : (realAssistant.length === 1 && modelKeys.every(real) ? realAssistant[0] : null);
   const credits = byModel ? modelKeys.reduce((n, k) => n + (Number(byModel[k]?.credit) || 0), 0) : null;
   const provenance = {
     executor: 'codebuddy',
     executorVersion: init?.version ?? null,
     requestedModel: request.model.id,
     actualModel,
-    modelsUsed: [...new Set([...modelKeys, ...assistantModels])],
+    modelsUsed: [...new Set([...usedKeys, ...realAssistant])],
     sessionModel: init?.model ?? null,
   };
   const usage = resultLine ? {
@@ -811,7 +817,8 @@ export function parseCodebuddyStream(stdout, request) {
   } : null;
   if (!resultLine) return { status: 'failed', error: 'CodeBuddy 没有输出 result 行（常见原因：未登录、模型不可用）', provenance, usage, review: null };
   if (resultLine.is_error || resultLine.subtype !== 'success') {
-    return { status: 'failed', error: `CodeBuddy 返回错误：${resultLine.subtype}${resultLine.result ? `，${String(resultLine.result).slice(0, 300)}` : ''}`, provenance, usage, review: null };
+    const why = [resultLine.result, ...(Array.isArray(resultLine.errors) ? resultLine.errors : [])].filter(Boolean).map(String).join('；').slice(0, 300);
+    return { status: 'failed', error: `CodeBuddy 返回错误：${resultLine.subtype}${why ? `，${why}` : ''}`, provenance, usage, review: null };
   }
   const review = extractReview(resultLine);
   if (!review) return { status: 'failed', error: '模型的回答里没有可解析的审查 JSON', provenance, usage, review: null };
