@@ -29,8 +29,9 @@
 | `modules.gate.testCommand`、`testEnv` | 本项目跑测试的命令和它需要的环境变量。Python 项目在 `testEnv` 里设 `PYTHONPATH` |
 | `modules.gate.testGroups` | 可选。测试分组，每项 `{ name, paths, command }`：`paths` 是这一组覆盖的源码和测试的 glob，`command` 只跑这一组的测试。配了才能用 `gate.mjs --affected` 按影响范围测试；分组覆盖不全、拿不准依赖关系的项目不配，照常跑全量 |
 | `layout.sourceGlobs`、`testGlobs` | 源文件和测试文件的匹配规则。Python 项目把 `sourceGlobs` 改成 `**/*.py` |
-| `rules.reviewIgnore` | 只应包含纯文档。默认值（`**/*.md`、`docs/**`）把规则、技能正文、提示词这类会改变 agent 行为的 Markdown 也算成文档：闸门不要求为它们复审，合并入口还会把只改它们的 PR 当成只改文档放行。以这类文档为主的项目，把它收窄到真正的纯文档（例如只留 `docs/**` 和说明文件）。它是判定策略字段：闸门按基准提交上的版本判定，分支里的修改合入主干后才生效；项目配置、豁免表和 `scripts/engineering/**` 永远在闸门范围内 |
+| `rules.reviewIgnore` | 只放真正的纯说明文件。套件 0.7.0 起的默认值是 `docs/**/*.md`、`README.md`、`CHANGELOG.md`；规则（AGENTS.md、CLAUDE.md）、技能正文、提示词、可执行原型会改变行为，不放进来。配置里没写这个字段的按当前默认值。更早安装的项目还留着旧默认值（`**/*.md`、`docs/**`）时，闸门不要求为这些文件复审，合并入口还会把只改它们的 PR 当成只改文档放行：按同步时的升级提示收窄。它是判定策略字段：闸门按基准提交上的版本判定，分支里的修改合入主干后才生效；项目配置、豁免表和 `scripts/engineering/**` 永远在闸门范围内 |
 | `modules.review.reviewers` | 确认名单里有 `product-dev:code-reviewer`，否则用它做的复审登记不了。套件 0.5.0 起新装的项目默认已有；更早安装的项目同步时不改项目配置，要手动加（见 [review.md](review.md) 第 1 节）；名单按基准提交上的配置判定，在功能分支里加要合入主干后才生效 |
+| `modules.gate.requiredChecks` | `pr` 流程的必需检查名，为空时每一项检查都算必需；CI 有按条件跳过的检查时列出必需的那几项。写检查运行的 job 名（含矩阵后缀，不含工作流名和事件）或提交状态的 context，不是 PR 页面上显示的“工作流名 / job 名 (事件)”。判定口径、查名字的命令和改名顺序见 [套件流程文档](../../engineering-kit/references/process.md) 第 4 节“套件闸门的两种流程”；它是判定策略字段，合入主干后才生效 |
 | `modules.gate.reviewFlow` | 默认 `pre-push`；有 GitHub 远程、已登录的 `gh` 且 PR 上有 CI 检查的项目可以改成 `pr`（建议项，由用户决定或按授权采用推荐）；闸门按基准提交上的配置判定，改动合入主干后才生效 |
 
 同一步还要定两件事，都由用户决定：要不要建远程仓库和 CI（建远程仓库是外部动作，先得到批准；不建的话“PR 与 CI”一步做不了，要如实写未执行）；`pre-push` 流程下由谁、经哪个入口合并，定了就写进项目的 AGENTS.md。安装时没加 `--profile` 的项目没有脚手架，包清单、测试框架等按选定的技术栈自己建，默认的测试命令也要相应改掉。

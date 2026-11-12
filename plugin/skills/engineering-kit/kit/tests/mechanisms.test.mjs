@@ -56,6 +56,7 @@ const logOf = (res) => fs.readFileSync(res.record.log, 'utf8');
 test('测试分组：testGroups 是工作区字段，格式校验；maxReviewRounds 是判定策略字段，默认 3；两种结构互转保留', () => {
   assert.ok(!POLICY_KEYS.includes('testGroups'));
   assert.ok(POLICY_KEYS.includes('maxReviewRounds'));
+  assert.ok(POLICY_KEYS.includes('requiredChecks'), '必需检查名决定合并能否放行，分支不能自己改');
   assert.equal(DEFAULTS.maxReviewRounds, 3);
   assert.deepEqual(DEFAULTS.testGroups, []);
   const eff = normalizeConfig({ profile: 2, modules: { gate: { testGroups: GROUPS }, review: { maxReviewRounds: 5 } } });

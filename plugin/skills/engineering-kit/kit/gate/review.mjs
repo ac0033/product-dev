@@ -1,5 +1,5 @@
 // 复审记录：子代理复审（代码复审 code 或一致性审 consistency）后在这里登记。业务含义：复审必须由独立于写代码者的子代理完成（允许名单内）；
-// 判定策略（复审流程、复审者名单、最少字数、结论关键词、复审轮次上限）取基准提交上的配置，被审分支改了不算数（lib.mjs 的 loadConfig）。
+// 判定策略（复审流程、必需检查名、复审者名单、最少字数、结论关键词、复审轮次上限）取基准提交上的配置，被审分支改了不算数（lib.mjs 的 loadConfig）。
 // 报告要有实质内容，并且有一处明确的结论（写法见 reportVerdict）：登记 pass 要求结论是通过，登记 fail 要求结论是不通过，
 // 找不到明确结论、前后矛盾或与登记不符时拒绝。四种登记：
 //   pass / fail   复审结论。
@@ -16,7 +16,8 @@
 //       文档内容哈希和登记时未提交的文件数，用来把每次登记对应到具体的分支和提交；推送核对（verify.mjs）认树哈希与基线。
 //       代码复审的最新一条写 review.json（推送核对读它）；一致性审写 review-consistency.json（推送核对不要求）；
 //       每次登记另追加到 reviews/log.jsonl（轮次按分支从这里数），报告副本放在 reviews/branches/<分支>/ 下。
-//   pr：CI 通过后针对 PR 的最终提交登记；登记时用 gh 读取 PR，PR 未打开或 CI 未全部通过时拒绝。
+//   pr：复审可以与 CI 并行开始；CI 全部通过后才针对 PR 的最终提交登记。登记时用 gh 读取 PR，PR 未打开或 CI 未全部通过
+//       （必需检查须为成功，判定见 lib.mjs 的 ciStatus）时拒绝。
 //       记录放 git 公共目录：每个 kind 一份最新记录（merge.mjs 核对），每次登记另追加到 pr/<编号>/log.jsonl（轮次从这里数）。
 // 用法：node scripts/engineering/gate/review.mjs pass|fail [--kind code|consistency] --reviewer <名> --report <报告文件> --summary "<一句话>" [--user-decision "<用户的决定及出处>"]
 //       node scripts/engineering/gate/review.mjs defer --kind consistency --reason "<理由>"
@@ -258,7 +259,7 @@ function argProblem({ verdict, kind, reason, userDecision }) {
  */
 export function recordReview({ root, verdict, reviewer, reportPath, summary = '', pr, kind, reason, userDecision, gh = defaultGh }) {
   const config = loadConfig(root);
-  assertPolicy(config); // reviewFlow、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds 取基准提交上的配置，取不到时不按工作区的值登记
+  assertPolicy(config); // reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds 取基准提交上的配置，取不到时不按工作区的值登记
   if (config.reviewFlow === 'pr') return recordPrReview({ root, config, verdict, reviewer, reportPath, summary, pr, kind, reason, userDecision, gh });
   if (pr !== undefined) {
     return { ok: false, message: '本项目的复审流程是 pre-push，不接受 --pr；要启用 PR 双审，在主干上把 modules.gate.reviewFlow 改为 pr（闸门按基准提交上的配置判定）' };
@@ -343,7 +344,7 @@ function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, 
   const prior = readLog(logFile);
   const scopeName = `PR #${no} `;
 
-  const st = readPr(root, no, gh); // gh 失败时抛错
+  const st = readPr(root, no, gh, config.requiredChecks); // gh 失败时抛错；必需检查名取基准提交上的配置
   if (st.state !== 'OPEN') return { ok: false, message: `PR #${no} 不是打开状态（${st.state}），不能登记` };
   if (st.ciProblems.length > 0) return { ok: false, message: `CI 未在最终提交 ${st.head.slice(0, 12)} 上全部通过，不能登记：\n  ${st.ciProblems.join('\n  ')}` };
   // 轮次按提交计，要先知道这次登记对应 PR 的哪个最终提交

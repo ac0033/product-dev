@@ -2,7 +2,7 @@
 // 业务含义：闸门要回答三件事——这次改动了哪些文件（范围）、这些文件现在的内容是什么（树哈希）、
 // 测试与复审记录是不是针对这份内容、这个基准提交做的（绑定）。范围只有一个口径（gateScope）：
 // 配置、豁免表和套件脚本永远在范围内。判定依据不由被审分支决定，在 loadConfig 一处得出：基准分支设置（base）取默认主干上的配置，
-// 判定策略字段（POLICY_KEYS：reviewIgnore、reviewFlow、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds）取基准提交上的配置。
+// 判定策略字段（POLICY_KEYS：reviewIgnore、reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds）取基准提交上的配置。
 // 只读 git 与工作区，写入只发生在 git 目录下的记录目录里，
 // 不污染工作区。测试与推送前复审记录放在各工作树自己的 git 目录（互不覆盖）；全局锁与 PR 审查记录（pr 流程）
 // 放在 git 公共目录：同一仓库同时只跑一个闸门，PR 的复审与合并可以在不同工作树进行。
@@ -59,7 +59,7 @@ export function gitCommonDir(root) {
  * 其余字段（testCommand、testEnv、testGroups、sourceGlobs、testGlobs、commentMode、layout、hygiene 等）仍用工作区的值：它们随功能分支一起变化是正常的（新加语言、改测试命令），而且配置文件
  * 永远在闸门范围内，改了就要过测试与复审，会被复审者看到。base 另由默认主干上的配置决定（mainlineBase）。
  */
-export const POLICY_KEYS = ['reviewIgnore', 'reviewFlow', 'reviewers', 'reviewMinChars', 'reviewKeyword', 'maxReviewRounds'];
+export const POLICY_KEYS = ['reviewIgnore', 'reviewFlow', 'requiredChecks', 'reviewers', 'reviewMinChars', 'reviewKeyword', 'maxReviewRounds'];
 
 /**
  * 读取某个提交上的项目配置并展开。该提交上没有配置文件时返回 null；读不出或不合法时抛错（失败不放行），
@@ -530,25 +530,69 @@ export function prNumber(pr) {
   return String(pr);
 }
 
-/** 视为通过的检查结论：成功、跳过、中性。 */
-const CI_OK = new Set(['SUCCESS', 'SKIPPED', 'NEUTRAL']);
+/** 非必需检查另外放行的结论：跳过、中性。必需检查只认成功（SUCCESS）。 */
+const CI_SOFT_OK = new Set(['SKIPPED', 'NEUTRAL']);
 
 /**
- * CI 是否全部通过：每一项检查都是成功、跳过或中性；一项检查都没有视为未通过。返回未通过的原因（空数组表示全过）。
- * 检查运行（CheckRun）看 conclusion，未完成时为空；提交状态（StatusContext）看 state。
+ * 一项检查的显示名、所属工作流与结论：检查运行（CheckRun）看 name、workflowName 与 conclusion（未完成时为空），
+ * 提交状态（StatusContext）看 context 与 state（没有工作流，记为空串）。
  */
-export function ciProblems(checks) {
-  if (!Array.isArray(checks) || checks.length === 0) return ['PR 上没有任何 CI 检查（视为未通过；没有 CI 的项目应使用 pre-push 流程）'];
-  return checks
-    .filter((c) => !CI_OK.has(String(c.conclusion || c.state || '').toUpperCase()))
-    .map((c) => `CI 检查未通过：${c.name || c.context || '（未命名）'}（${c.conclusion || c.state || c.status || '运行中'}）`);
+function checkInfo(c) {
+  return { name: c.name || c.context || '（未命名）', workflow: c.workflowName || '', result: String(c.conclusion || c.state || '').toUpperCase(), shown: c.conclusion || c.state || c.status || '运行中' };
+}
+
+/**
+ * CI 结果分类。requiredChecks 是必需检查名（modules.gate.requiredChecks，取基准提交上的配置），按检查运行的 name（job 名，含矩阵后缀，
+ * 不含工作流名和事件）或提交状态的 context 比对，与 GitHub 分支保护里必需检查的写法相同；为空时 PR 上报告的每一项都算必需。
+ * 同一工作流里同名的检查合在一起判定（同一个 job 可能因 push 与 pull_request 各跑一份，一份成功、一份跳过）：同组各份里有失败、取消、
+ * 运行中等结论就不通过；至少一份成功、其余只有跳过或中性的算成功；全是跳过或中性的，必需检查不通过，非必需检查放行。
+ * 不同工作流里的同名检查各算一组，不互相抵：必需检查名出现在几个工作流里，每一组都要满足。
+ * 列出的必需检查在 PR 上一项都找不到（没有运行或改了名）按未通过，提示里列出本次看到的检查名，便于改正配置。一项检查都没有视为未通过。
+ * 返回 { problems, passed, skipped }：problems 是未通过的原因（空数组表示通过），passed 是成功的检查（{ name, required }），
+ * skipped 是被放行的跳过或中性的非必需检查（{ name, result }），供合并入口分开报告。
+ */
+export function ciStatus(checks, requiredChecks = []) {
+  if (!Array.isArray(checks) || checks.length === 0) {
+    return { problems: ['PR 上没有任何 CI 检查（视为未通过；没有 CI 的项目应使用 pre-push 流程）'], passed: [], skipped: [] };
+  }
+  const listed = requiredChecks.length > 0;
+  const groups = new Map(); // 工作流名加检查名 → 同组的各份检查，保持首次出现的顺序
+  for (const c of checks) {
+    const info = checkInfo(c);
+    const key = `${info.workflow}\u0000${info.name}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(info);
+  }
+  const problems = [];
+  const passed = [];
+  const skipped = [];
+  for (const runs of groups.values()) {
+    const { name } = runs[0];
+    const required = !listed || requiredChecks.includes(name);
+    const bad = runs.filter((r) => r.result !== 'SUCCESS' && !CI_SOFT_OK.has(r.result));
+    if (bad.length > 0) {
+      for (const r of bad) problems.push(`CI 检查未通过：${name}（${r.shown}）`);
+    } else if (runs.some((r) => r.result === 'SUCCESS')) {
+      passed.push({ name, required });
+    } else if (required) {
+      problems.push(`必需检查没有成功：${name}（${runs.map((r) => r.shown).join('、')}；必需检查须为成功，跳过、中性只放行非必需检查${listed ? '' : '。未配置 modules.gate.requiredChecks 时每一项检查都算必需'}）`);
+    } else {
+      skipped.push({ name, result: [...new Set(runs.map((r) => r.result))].join('、') });
+    }
+  }
+  const names = [...new Set(checks.map((c) => checkInfo(c).name))];
+  const seen = names.join('、');
+  for (const n of requiredChecks) {
+    if (!names.includes(n)) problems.push(`必需检查没有出现在 PR 上：${n}（没有运行，或检查改了名；按检查运行的 job 名或提交状态的 context 比对，本次 PR 上的检查名：${seen}）`);
+  }
+  return { problems, passed, skipped };
 }
 
 /**
  * 读取 PR 的状态、最终提交与 CI 结果（gh pr view；statusCheckRollup 是最终提交上的检查）。
- * 返回 { state, head, ciProblems }；gh 失败或输出不合法时抛错。不取 PR 的文件列表：改名时它可能只给新路径，且最多 100 个，“只改文档”由 merge.mjs 按本地差异判定。
+ * requiredChecks 是生效的必需检查名（见 ciStatus）。返回 { state, head, ciProblems, ci }（ci 是 ciStatus 的完整结果）；gh 失败或输出不合法时抛错。不取 PR 的文件列表：改名时它可能只给新路径，且最多 100 个，“只改文档”由 merge.mjs 按本地差异判定。
  */
-export function readPr(root, pr, gh) {
+export function readPr(root, pr, gh, requiredChecks = []) {
   const out = runGh(gh, ['pr', 'view', pr, '--json', 'state,headRefOid,statusCheckRollup'], root);
   let j;
   try {
@@ -557,7 +601,8 @@ export function readPr(root, pr, gh) {
     throw new Error(`gh pr view 的输出不是合法 JSON：${e.message}`);
   }
   if (!j || !j.headRefOid) throw new Error('gh pr view 的输出缺少最终提交（headRefOid）');
-  return { state: j.state, head: j.headRefOid, ciProblems: ciProblems(j.statusCheckRollup) };
+  const ci = ciStatus(j.statusCheckRollup, requiredChecks);
+  return { state: j.state, head: j.headRefOid, ciProblems: ci.problems, ci };
 }
 
 /** PR 审查历史：git 公共目录下 engineering-gate/pr/<编号>/log.jsonl，每次登记（pass、fail、defer、accept）追加一行，复审轮次按它计数。 */

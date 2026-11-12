@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { runHygiene } from '../gate/hygiene.mjs';
 import { newFileProblems } from '../gate/verify.mjs';
-import { normalizeConfig } from '../gate/config.mjs';
+import { DEFAULTS, normalizeConfig } from '../gate/config.mjs';
+import { isIgnoredDoc } from '../gate/lib.mjs';
 import { syncKit } from '../sync.mjs';
 import { commitAll, git, read, tmpRepo, write } from './helpers.mjs';
 
@@ -80,6 +81,86 @@ test('升级：旧配置的复审者名单缺少新默认名字时给出升级�
   write(root, 'engineering.config.json', JSON.stringify(cfg, null, 2));
   const slim = syncKit({ target: root, hooks: false });
   assert.ok(!slim.messages.some((m) => /modules\.review\.reviewers/.test(m)), JSON.stringify(slim.messages));
+});
+
+test('默认免审范围只含纯说明文件：规则、技能正文、提示词、可执行原型都要审', () => {
+  const root = installedProject();
+  const { reviewIgnore } = normalizeConfig(JSON.parse(read(root, 'engineering.config.json')));
+  assert.deepEqual(reviewIgnore, DEFAULTS.reviewIgnore, '模板与缺省值一致');
+  for (const f of ['docs/01-需求/PRD.md', 'docs/_templates/plan.md', 'README.md', 'CHANGELOG.md']) assert.ok(isIgnoredDoc(f, reviewIgnore), f);
+  for (const f of ['AGENTS.md', 'CLAUDE.md', 'skills/x/SKILL.md', 'prompts/system.md', 'agents/reviewer.md', 'docs/02-原型/prototype/index.html', 'docs/02-原型/prototype/app.js', 'PRODUCT.md', 'DESIGN.md']) {
+    assert.ok(!isIgnoredDoc(f, reviewIgnore), f);
+  }
+});
+
+test('impeccable 的落位：.impeccable/ 在默认白名单里，根目录的 PRODUCT.md、DESIGN.md 巡检与推送核对都不拦', () => {
+  const root = installedProject();
+  write(root, '.impeccable/config.json', '{}\n');
+  write(root, 'PRODUCT.md', '# 产品摘要\n\n产品权威是 docs/01-需求/PRD.md。\n');
+  write(root, 'DESIGN.md', '# 设计系统\n');
+  commitAll(root, 'impeccable');
+  const config = normalizeConfig(JSON.parse(read(root, 'engineering.config.json')));
+  assert.deepEqual(newFileProblems(root, config, { newFiles: {} }), []);
+  const errors = runHygiene(root).findings.error;
+  assert.ok(!errors.some((e) => /顶层目录不在白名单/.test(e)), JSON.stringify(errors));
+});
+
+test('升级：旧的宽免审范围、pr 流程未列必需检查、根目录有 .impeccable/ 而白名单缺它时给出升级提示，不改项目配置', () => {
+  const root = installedProject();
+  const cfg = JSON.parse(read(root, 'engineering.config.json'));
+  cfg.rules.reviewIgnore = ['**/*.md', 'docs/**'];
+  cfg.modules.gate.reviewFlow = 'pr';
+  delete cfg.modules.gate.requiredChecks;
+  cfg.layout.topLevelAllowed = cfg.layout.topLevelAllowed.filter((d) => d !== '.impeccable');
+  const before = `${JSON.stringify(cfg, null, 2)}\n`;
+  write(root, 'engineering.config.json', before);
+  write(root, '.impeccable/config.json', '{}\n');
+  const res = syncKit({ target: root, hooks: false });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const has = (re) => res.messages.some((m) => /升级提示/.test(m) && re.test(m));
+  assert.ok(res.messages.some((m) => /升级提示/.test(m) && m.includes('rules.reviewIgnore（**/*.md、docs/**）把 AGENTS.md、CLAUDE.md、skills/x/SKILL.md、prompts/x.md、docs/02-原型/x.html')), JSON.stringify(res.messages));
+  assert.ok(has(/modules\.gate\.requiredChecks/), JSON.stringify(res.messages));
+  assert.ok(res.messages.some((m) => /升级提示/.test(m) && m.includes('layout.topLevelAllowed') && m.includes('.impeccable/')), JSON.stringify(res.messages));
+  assert.equal(read(root, 'engineering.config.json'), before);
+  // 收窄免审范围、列出必需检查名、白名单加上 .impeccable 后不再提示
+  cfg.rules.reviewIgnore = ['docs/**/*.md'];
+  cfg.modules.gate.requiredChecks = ['test'];
+  cfg.layout.topLevelAllowed.push('.impeccable');
+  write(root, 'engineering.config.json', JSON.stringify(cfg, null, 2));
+  const fixed = syncKit({ target: root, hooks: false });
+  assert.ok(!fixed.messages.some((m) => /升级提示/.test(m)), JSON.stringify(fixed.messages));
+  // 有意保持空列表（每一项都必需）的 pr 项目：写了这个键就不再提示
+  cfg.modules.gate.requiredChecks = [];
+  write(root, 'engineering.config.json', JSON.stringify(cfg, null, 2));
+  const empty = syncKit({ target: root, hooks: false });
+  assert.ok(!empty.messages.some((m) => /requiredChecks/.test(m)), JSON.stringify(empty.messages));
+  // 宽免审范围按匹配结果判断：等价的另一种写法同样提示，只免审 docs 下 Markdown 的不提示
+  for (const [ignore, warned] of [[['*.md'], true], [['docs/**/*'], true], [['docs/**/*.md', 'README.md'], false]]) {
+    cfg.rules.reviewIgnore = ignore;
+    write(root, 'engineering.config.json', JSON.stringify(cfg, null, 2));
+    const r = syncKit({ target: root, hooks: false });
+    assert.equal(r.messages.some((m) => /升级提示/.test(m) && /rules\.reviewIgnore/.test(m)), warned, `${JSON.stringify(ignore)}：${JSON.stringify(r.messages)}`);
+  }
+});
+
+test('升级：旧版扁平配置按顶层键判断——没写 requiredChecks、reviewIgnore 时提示，写了（含空数组）就不提示', () => {
+  const root = installedProject();
+  const template = JSON.parse(read(root, 'engineering.config.json'));
+  const flat = { base: 'main', reviewFlow: 'pr', sourceGlobs: ['src/**/*.ts'], testGlobs: ['test/**/*.ts'] };
+  const hints = (cfg) => {
+    write(root, 'engineering.config.json', JSON.stringify(cfg, null, 2));
+    return syncKit({ target: root, hooks: false, dryRun: true }).messages.filter((m) => /升级提示/.test(m));
+  };
+  const bare = hints(flat);
+  assert.ok(bare.some((m) => /modules\.gate\.requiredChecks/.test(m)), JSON.stringify(bare));
+  assert.ok(bare.some((m) => /没有写 rules\.reviewIgnore/.test(m)), JSON.stringify(bare));
+  const set = hints({ ...flat, requiredChecks: [], reviewIgnore: ['docs/**/*.md'] });
+  assert.deepEqual(set, [], '扁平配置写了这两个键就不提示');
+  // profile 配置看 rules.reviewIgnore：模板写了就不提示“没有写”，删掉才提示
+  assert.ok(!hints(template).some((m) => /没有写 rules\.reviewIgnore/.test(m)));
+  const { reviewIgnore, ...rules } = template.rules;
+  assert.ok(reviewIgnore);
+  assert.ok(hints({ ...template, rules }).some((m) => /没有写 rules\.reviewIgnore/.test(m)));
 });
 
 test('升级：配置已是当前默认时不给升级提示', () => {
