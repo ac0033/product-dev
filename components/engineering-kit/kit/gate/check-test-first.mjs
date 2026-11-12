@@ -59,7 +59,9 @@ function jsReferences(text, testRel, srcRel) {
     // 别名前缀（@/、~/、#）明确表示“从某个源码根起算”，去掉后按后缀匹配，允许单段（@/util）；不带前缀的单段名（util）不算
     const aliased = /^(?:[@~]\/|#)/.test(base);
     const p = base.replace(/^(?:[@~]\/|#)/, '');
-    return targets.some((t) => t === p || ((aliased || p.includes('/')) && t.endsWith(`/${p}`)) || (t.includes('/') && p.endsWith(`/${t}`)));
+    // 单段别名（@/util）只认源码根下一层（src/util），不认任意深度的同名文件；多段路径按后缀匹配
+    const suffix = (t) => (p.includes('/') ? t.endsWith(`/${p}`) : aliased && t.split('/').length === 2 && t.endsWith(`/${p}`));
+    return targets.some((t) => t === p || suffix(t) || (t.includes('/') && p.endsWith(`/${t}`)));
   });
 }
 

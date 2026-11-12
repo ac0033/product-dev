@@ -91,7 +91,7 @@ test('相对路径按测试文件所在目录解析：深层测试目录、去�
   assert.equal(referencesFile("import { x } from '../src/b';", 'test/x.test.js', 'src/a/index.js'), false);
 });
 
-test('非相对路径（别名、包名）：写出的路径必须是源文件路径的后缀，单段名不算', () => {
+test('非相对路径（别名、包名）：多段路径必须是源文件路径的后缀；单段名只有别名前缀的才认，且只认源码根下一层', () => {
   const src = 'src/a/util.js';
   assert.equal(referencesFile("import { x } from '@/a/util';", 'test/x.test.js', src), true);
   assert.equal(referencesFile("import { x } from 'src/a/util';", 'test/x.test.js', src), true);
@@ -102,6 +102,10 @@ test('非相对路径（别名、包名）：写出的路径必须是源文件�
   assert.equal(referencesFile("import { f } from '~/util';", 'test/x.test.ts', 'src/util.ts'), true);
   assert.equal(referencesFile("import { f } from '#src/a/util.js';", 'test/x.test.js', src), true);
   assert.equal(referencesFile("import { f } from '@/other';", 'test/x.test.ts', 'src/util.ts'), false);
+  // 单段别名不放行更深目录里的同名文件
+  assert.equal(referencesFile("import { f } from '@/util';", 'test/x.test.ts', 'src/a/util.ts'), false);
+  assert.equal(referencesFile("import { f } from '@/util';", 'test/x.test.ts', 'src/views/deep/util.ts'), false);
+  assert.equal(referencesFile("import { f } from '@/utils';", 'test/x.test.ts', 'src/utils/index.ts'), true);
   assert.equal(referencesFile("import util from 'util';", 'test/x.test.js', src), false, 'Node 内置的 util 不是本文件');
   assert.equal(referencesFile("import util from 'node:util';", 'test/x.test.js', src), false);
 });
