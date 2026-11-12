@@ -4,11 +4,10 @@
 //   非 git 目录的显式初始化，以及尚无代码时闸门不空跑测试命令。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { git, tmpRepo, write, read } from './helpers.mjs';
+import { git, tmpRepo, write, read, tmpDir, trackTmp } from './helpers.mjs';
 import { resolveBase, changedFiles, EMPTY_TREE } from '../gate/lib.mjs';
 import { runGate } from '../gate/gate.mjs';
 import { runHygiene } from '../gate/hygiene.mjs';
@@ -121,7 +120,7 @@ test('预设：应用到模板后只改技术栈相关字段，其余保持模�
 });
 
 test('--init：非 git 目录不加 --init 时拒绝安装且不写任何文件', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-plain-'));
+  const dir = tmpDir('ekit-plain-');
   const r = syncKit({ target: dir });
   assert.equal(r.ok, false);
   assert.ok(r.messages.some((m) => m.includes('--init')), r.messages.join('\n'));
@@ -130,7 +129,7 @@ test('--init：非 git 目录不加 --init 时拒绝安装且不写任何文件'
 });
 
 test('--init：加上后自动 git init（分支 main），并完成安装', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-init-'));
+  const dir = tmpDir('ekit-init-');
   const r = syncKit({ target: dir, init: true, preset: PRESETS.ts });
   assert.equal(r.ok, true, r.messages.join('\n'));
   assert.ok(fs.existsSync(path.join(dir, '.git')));
@@ -138,7 +137,7 @@ test('--init：加上后自动 git init（分支 main），并完成安装', () 
 });
 
 test('--profile python：首次安装写入技术栈配置与脚手架，安装后整包检查一致', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-py-'));
+  const dir = tmpDir('ekit-py-');
   const r = syncKit({ target: dir, init: true, preset: PRESETS.python });
   assert.equal(r.ok, true, r.messages.join('\n'));
   const cfg = JSON.parse(read(dir, 'engineering.config.json'));
@@ -153,7 +152,7 @@ test('--profile python：首次安装写入技术栈配置与脚手架，安装�
 });
 
 test('--profile：配置已存在时不改写配置，并提示技术栈需手动修改', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-keep-'));
+  const dir = tmpDir('ekit-keep-');
   syncKit({ target: dir, init: true, preset: PRESETS.ts });
   const before = read(dir, 'engineering.config.json');
   const r = syncKit({ target: dir, preset: PRESETS.python });
@@ -183,14 +182,13 @@ test('树哈希：同一份提交内容在 CRLF 与 LF 的工作区下哈希相�
 test('命令行入口：经由目录连接（junction/符号链接）调用时也要执行，不能静默什么都不做', () => {
   // Windows 上安装目录可能是指向另一个目录的连接，Node 会把模块路径解析为真实路径；
   // 若入口判断只比较字符串，就会出现“退出码 0、什么输出也没有”。
-  const real = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-real-'));
-  const link = `${real}-link`;
+  const real = tmpDir('ekit-real-');
+  const link = trackTmp(`${real}-link`); // 登记在 real 之后，清理时先删
   fs.symlinkSync(real, link, 'junction');
   const kit = path.resolve(BUNDLE_ROOT, 'kit');
   fs.cpSync(kit, path.join(real, 'kit'), { recursive: true });
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-target-'));
+  const dir = tmpDir('ekit-target-');
   git(dir, ['init', '-q', '-b', 'main']);
   const r = spawnSync(process.execPath, [path.join(link, 'kit', 'sync.mjs'), '--target', dir, '--check'], { encoding: 'utf8' });
   assert.ok(r.stdout.includes('整包'), `入口未执行：stdout=${r.stdout} stderr=${r.stderr}`);
-  fs.rmSync(link, { recursive: true, force: true });
 });

@@ -180,19 +180,35 @@ export function runHygiene(root) {
   }
   for (const group of byHash.values()) if (group.length > 1) warn(`内容重复：${group.join('、')}`);
 
-  // 6. 记录类文档只追加：已跟踪的记录文件出现修改即报错
-  // 工作区里的修改，加上相对基准分支已提交的修改（提交后也要查得到）；基准解析不了时只查工作区。
+  // 6. 记录类文档只追加：已跟踪的记录文件出现修改、删除或改名即报错
+  // 工作区里的改动，加上相对基准分支已提交的改动（提交后也要查得到）；基准解析不了时只查工作区。
+  // 改名一律按“旧路径删除 + 新路径新增”计：已提交的经 diffNames（--no-renames），工作区的取 status 改名条目的旧路径（from），
+  // 不依赖 git 的改名检测——否则 git mv 走旧记录只剩新路径，看起来像新增。新路径是新增，不报。
   const base = baseOrNull(root, cfg.base);
   const isRecord = (f) => hygiene.recordDirs.some((d) => f.startsWith(`${d}/`));
   const modified = new Set();
-  const status = git(root, ['status', '--porcelain', '-uall', '-z']);
-  // 改名、复制条目的旧路径（from）不是“修改”，不计；改名后的新路径带 M 时照常计
-  if (status.ok) for (const { code, file: f, from } of parseStatusZ(status.out)) if (code.includes('M') && !from) modified.add(f);
+  const removed = new Set();
   const mb = base ? git(root, ['merge-base', base, 'HEAD']) : null;
+  // 工作区里删除、改名走的是不是“旧文件”：有基准提交时以它为准（功能分支上自己新加、还没进基准的不算）；没有基准时都算
+  const atBase = (f) => !mb?.ok || git(root, ['cat-file', '-e', `${mb.out.trim()}:${f}`]).ok;
+  const status = git(root, ['status', '--porcelain', '-uall', '-z']);
+  if (status.ok) {
+    for (const { code, file: f, from } of parseStatusZ(status.out)) {
+      if (from) {
+        if (code.includes('R') && atBase(f)) removed.add(f); // 改名的旧路径；复制（C）的来源没有变，不计
+      } else if (code[0] === 'D' || (code[1] === 'D' && (code[0] === ' ' || code[0] === 'M'))) {
+        if (atBase(f)) removed.add(f); // 已跟踪的文件被删除（暂存或未暂存）；刚暂存新增又删掉的（AD）和改名后又删掉新路径的（RD）不是旧文件
+      } else if (code.includes('M') && code[0] !== 'R' && code[0] !== 'C') {
+        modified.add(f); // 改名、复制得到的新路径（RM、CM）是新文件，改它不算改旧记录（旧路径已按删除计）
+      }
+    }
+  }
   if (mb?.ok) {
     for (const f of diffNames(root, ['--diff-filter=M', mb.out.trim(), 'HEAD']).files) modified.add(f);
+    for (const f of diffNames(root, ['--diff-filter=D', mb.out.trim(), 'HEAD']).files) removed.add(f);
   }
-  for (const f of [...modified].sort()) if (isRecord(f)) err(`记录类文档不得修改旧文件（请追加新文件）：${f}`);
+  for (const f of [...modified].sort()) if (isRecord(f) && !removed.has(f)) err(`记录类文档不得修改旧文件（请追加新文件）：${f}`);
+  for (const f of [...removed].sort()) if (isRecord(f)) err(`记录类文档不得删除或改名旧文件（旧记录原样保留，请追加新文件）：${f}`);
 
   // 7. 已合并的分支与残留的工作树
   const branches = git(root, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']);

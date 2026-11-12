@@ -15,7 +15,7 @@ import { runSmoke } from '../gate/smoke.mjs';
 import { verify } from '../gate/verify.mjs';
 import { classify } from '../hooks/pre-bash.mjs';
 import { BUNDLE_ROOT, extractTag, syncKit } from '../sync.mjs';
-import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, tmpRepo, write } from './helpers.mjs';
+import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, tmpRepo, trackTmp, write } from './helpers.mjs';
 
 /** 一个合格的复审报告：字数够、含“结论”、结论为通过。 */
 const GOOD_REPORT = `发现：无高、中级问题。\n已逐条核对 PR 的最终提交，dedup 函数与测试用例的边界条件（空数组、重复项）均有覆盖。\n处置：无需处理。\n结论\n通过\n`;
@@ -147,7 +147,7 @@ test('验收 5：两项审查都 pass、提交一致、CI 全过时合并，并�
   assert.ok(fs.existsSync(rec.report), '报告副本应已保存');
   assert.ok(rec.at);
 
-  const wt = `${root}-wt`;
+  const wt = trackTmp(`${root}-wt`);
   git(root, ['worktree', 'add', '-q', '-b', 'merge-from-here', wt]);
   const res = mergePr({ root: wt, pr: '7', gh });
   assert.equal(res.ok, true, JSON.stringify(res.problems));
@@ -257,13 +257,9 @@ test('验收 10：pr 流程项目同步后有 merge.mjs、冒烟通过；回滚�
 
   const tag = 'engineering-kit-v0.2.2';
   if (spawnSync('git', ['-C', BUNDLE_ROOT, 'rev-parse', '--verify', '--quiet', `${tag}^{commit}`]).status !== 0) return; // 没有该标签的克隆里跳过回滚部分
-  const old = extractTag(tag);
-  try {
-    const back = syncKit({ target: root, bundleRoot: old });
-    assert.equal(back.ok, true, back.messages.join('\n'));
-  } finally {
-    fs.rmSync(old, { recursive: true, force: true });
-  }
+  const old = trackTmp(extractTag(tag)); // 本文件的测试结束后统一删除
+  const back = syncKit({ target: root, bundleRoot: old });
+  assert.equal(back.ok, true, back.messages.join('\n'));
   assert.equal(fs.existsSync(path.join(root, 'scripts/engineering/gate/merge.mjs')), false, '旧版本没有合并入口');
   assert.equal(JSON.parse(read(root, 'engineering.config.json')).modules.gate.reviewFlow, 'pr', '项目配置取值保留');
   // 旧流程：推送核对要求复审记录

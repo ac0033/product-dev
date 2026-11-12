@@ -2,7 +2,6 @@
 // 每个用例都在临时仓库里跑真实同步，失败注入只影响测试本身。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
@@ -11,7 +10,7 @@ import { applyBlock, findBlock, checkBundle, validateBundle, loadBundle, LOCK_RE
 
 /** 当前整包版本从清单读取（不写死），发布新版本时测试不需要跟着改。 */
 const CURRENT = loadBundle(BUNDLE_ROOT).bundleVersion;
-import { commitAll, read, tmpRepo, write } from './helpers.mjs';
+import { commitAll, git, read, tmpRepo, write, tmpDir, trackTmp } from './helpers.mjs';
 
 /** 一个带用户内容的 AGENTS.md（块外内容必须原样保留）。 */
 const USER_AGENTS = '# 项目指导\n\n这是项目自己的规则，不能被同步改动。\n';
@@ -27,7 +26,7 @@ function targetRepo() {
 
 /** 复制整包到临时目录，并把 bundleVersion 改为 version（模拟新版本）。 */
 function bundleCopy(version) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-bundle-'));
+  const dir = tmpDir('ekit-bundle-');
   fs.cpSync(BUNDLE_ROOT, dir, { recursive: true, filter: (src) => !src.includes(`${path.sep}tests`) });
   const bj = path.join(dir, 'bundle.json');
   const j = JSON.parse(fs.readFileSync(bj, 'utf8'));
@@ -60,7 +59,7 @@ test('标记块：标记不成对或重复时拒绝改写', () => {
 });
 
 test('清单校验：版本号非法、组件缺源、JSON 源不合法，都在写入前报错', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-val-'));
+  const dir = tmpDir('ekit-val-');
   fs.mkdirSync(path.join(dir, 'kit'));
   fs.writeFileSync(path.join(dir, 'kit', 'bad.json'), '{ 不是 json');
   const base = { name: 'x', bundleVersion: '1.0.0', configFormat: 'profile' };
@@ -164,7 +163,7 @@ test('按标签回滚：旧版本（0.1.0，扁平配置、无标记块）能装
   const root = targetRepo();
   syncKit({ target: root });
   assert.equal(JSON.parse(read(root, 'engineering.config.json')).profile, 2);
-  const old = extractTag('engineering-kit-v0.1.0');
+  const old = trackTmp(extractTag('engineering-kit-v0.1.0'));
   const r = syncKit({ target: root, bundleRoot: old });
   assert.equal(r.ok, true, r.messages.join('\n'));
   const cfg = JSON.parse(read(root, 'engineering.config.json'));
@@ -197,7 +196,7 @@ test('清单外的旧套件文件有本地修改时：提示冲突并说明原�
 
 test('--from-tag：用完删除导出的临时目录', () => {
   const root = targetRepo();
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-tmpdir-'));
+  const tmp = tmpDir('ekit-tmpdir-');
   const r = spawnSync(process.execPath, [path.join(BUNDLE_ROOT, 'kit', 'sync.mjs'), '--target', root, '--check', '--from-tag', 'engineering-kit-v0.2.0'], {
     encoding: 'utf8',
     env: { ...process.env, TEMP: tmp, TMP: tmp, TMPDIR: tmp },
@@ -212,7 +211,51 @@ test('仓库根的 .gitattributes 与模板一致（同步按字节复制，CRLF
 });
 
 test('历史目录移动：独立仓库仍可导出旧 engineering-kit 标签的真实内容', () => {
-  const exported = extractTag('engineering-kit-v0.2.0');
-  try { assert.equal(read(exported, 'kit/VERSION').trim(), '0.2.0'); }
-  finally { fs.rmSync(exported, { recursive: true, force: true }); }
+  const exported = trackTmp(extractTag('engineering-kit-v0.2.0'));
+  assert.equal(read(exported, 'kit/VERSION').trim(), '0.2.0');
+});
+
+/** 只看换行风格的工作区：core.autocrlf=true、项目自己的 .gitattributes 只写 text=auto（没有 eol=lf），装好套件并提交，再重新检出一遍。 */
+function crlfCheckout() {
+  const root = tmpRepo();
+  git(root, ['config', 'core.autocrlf', 'true']);
+  write(root, '.gitattributes', '* text=auto\n');
+  write(root, 'README.md', '# 项目\n');
+  commitAll(root, 'base');
+  const first = syncKit({ target: root });
+  assert.equal(first.ok, true, first.messages.join('\n'));
+  commitAll(root, '安装套件');
+  // 模拟重新克隆 / 切换分支后的检出：git 按 autocrlf 把文本文件写成 CRLF
+  git(root, ['rm', '-rq', '--cached', '.']);
+  git(root, ['reset', '-q', '--hard']);
+  return root;
+}
+
+test('换行（autocrlf）：重新检出后套件文件是 CRLF，再同步不报本地修改冲突，漂移检查一致，工作区不出现只差换行的改动', () => {
+  const root = crlfCheckout();
+  assert.ok(read(root, 'scripts/engineering/gate/lib.mjs').includes('\r\n'), '前提：检出后套件文件是 CRLF');
+  const again = syncKit({ target: root });
+  assert.equal(again.ok, true, again.messages.join('\n'));
+  assert.deepEqual(again.conflicts, []);
+  const bad = checkBundle({ root, bundleRoot: BUNDLE_ROOT }).items.filter((i) => i.state !== 'ok');
+  assert.deepEqual(bad, [], JSON.stringify(bad));
+  assert.equal(git(root, ['status', '--porcelain']).trim(), '', '同步后工作区应没有改动');
+});
+
+test('换行（autocrlf）：升级时只有换行不同的套件文件照常更新；真有本地修改的仍报冲突', () => {
+  const root = crlfCheckout();
+  const upgraded = bundleCopy('0.9.0');
+  const verifyFile = path.join(upgraded, 'kit', 'gate', 'verify.mjs');
+  fs.writeFileSync(verifyFile, `${fs.readFileSync(verifyFile, 'utf8')}// 新版本追加的一行\n`);
+  const r = syncKit({ target: root, bundleRoot: upgraded });
+  assert.equal(r.ok, true, r.messages.join('\n'));
+  assert.deepEqual(r.conflicts, []);
+  assert.match(read(root, 'scripts/engineering/gate/verify.mjs'), /新版本追加的一行/);
+  // 对照：真的改了内容（不只是换行）的套件文件仍报冲突
+  const root2 = crlfCheckout();
+  const f = path.join(root2, 'scripts', 'engineering', 'gate', 'verify.mjs');
+  fs.writeFileSync(f, `${fs.readFileSync(f, 'utf8')}// 本地改动\r\n`);
+  const r2 = syncKit({ target: root2, bundleRoot: upgraded });
+  assert.equal(r2.ok, false);
+  assert.ok(r2.conflicts.includes('scripts/engineering/gate/verify.mjs'), JSON.stringify(r2.conflicts));
 });

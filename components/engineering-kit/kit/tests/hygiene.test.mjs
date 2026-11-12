@@ -233,3 +233,94 @@ test('阶段内登记（R6）：记录目录设在阶段目录之内时，其中
   commitAll(root, 'base');
   assert.deepEqual(runHygiene(root).findings.error, []);
 });
+
+test('记录类文档只追加：删除或改名旧记录同样报错——工作区删除、暂存的 git mv、已提交（相对基准分支）的删除与改名', () => {
+  const recs = { 'docs/acceptance/2026-11-01.md': '记录一\n', 'docs/acceptance/2026-11-02.md': '记录二\n', 'docs/acceptance/2026-11-03.md': '记录三\n' };
+  const deleted = (rep, f) => rep.findings.error.some((e) => e.includes('不得删除或改名') && e.includes(f));
+  // 工作区：直接删除（未暂存）、git mv 改名（只暂存）
+  const root = repoWith(recs);
+  fs.rmSync(path.join(root, 'docs/acceptance/2026-11-01.md'));
+  git(root, ['mv', 'docs/acceptance/2026-11-02.md', 'docs/acceptance/2026-11-02-改.md']);
+  const rep = runHygiene(root);
+  assert.ok(deleted(rep, 'docs/acceptance/2026-11-01.md'), JSON.stringify(rep.findings.error));
+  assert.ok(deleted(rep, 'docs/acceptance/2026-11-02.md'), JSON.stringify(rep.findings.error));
+  assert.ok(!rep.findings.error.some((e) => e.includes('2026-11-03')), '未动的记录不报');
+  assert.ok(!rep.findings.error.some((e) => e.includes('2026-11-02-改')), '改名后的新路径是新增，不报');
+  // 已提交：功能分支上删除一份、改名一份（git 的改名检测会把它们配成一对，巡检不能因此漏掉旧路径）
+  const root2 = repoWith(recs);
+  git(root2, ['checkout', '-q', '-b', 'feat']);
+  fs.rmSync(path.join(root2, 'docs/acceptance/2026-11-01.md'));
+  git(root2, ['mv', 'docs/acceptance/2026-11-02.md', 'docs/acceptance/2026-11-02-改.md']);
+  commitAll(root2, '删改记录');
+  const rep2 = runHygiene(root2);
+  assert.ok(deleted(rep2, 'docs/acceptance/2026-11-01.md'), JSON.stringify(rep2.findings.error));
+  assert.ok(deleted(rep2, 'docs/acceptance/2026-11-02.md'), JSON.stringify(rep2.findings.error));
+  assert.equal(rep2.ok, false);
+});
+
+test('记录类文档只追加：记录目录之外的文件删除不报；记录目录里删除自己刚加、还没提交过的文件也不报', () => {
+  const root = repoWith({ 'docs/acceptance/2026-11-01.md': '记录一\n', 'docs/04-开发/old.md': '状态：active\n' });
+  git(root, ['checkout', '-q', '-b', 'feat']);
+  fs.rmSync(path.join(root, 'docs/04-开发/old.md'));
+  write(root, 'docs/acceptance/2026-11-09.md', '草稿\n');
+  commitAll(root, '加一份');
+  fs.rmSync(path.join(root, 'docs/acceptance/2026-11-09.md'));
+  commitAll(root, '又删掉');
+  const rep = runHygiene(root);
+  assert.ok(!rep.findings.error.some((e) => e.includes('不得删除或改名')), JSON.stringify(rep.findings.error));
+});
+
+test('记录类文档只追加（L2）：功能分支上提交的新记录、再在工作区删掉（未提交），基准上没有它，不报', () => {
+  const root = repoWith({ 'docs/acceptance/2026-11-01.md': '记录一\n' });
+  git(root, ['checkout', '-q', '-b', 'feat']);
+  write(root, 'docs/acceptance/new.md', '新记录\n');
+  commitAll(root, '加一份');
+  fs.rmSync(path.join(root, 'docs/acceptance/new.md'));
+  git(root, ['mv', 'docs/acceptance/2026-11-01.md', 'docs/acceptance/keep.md']); // 对照：基准上有的旧记录改名照常报
+  const rep = runHygiene(root);
+  assert.ok(!rep.findings.error.some((e) => e.includes('docs/acceptance/new.md')), JSON.stringify(rep.findings.error));
+  assert.ok(rep.findings.error.some((e) => e.includes('不得删除或改名') && e.includes('2026-11-01.md')), JSON.stringify(rep.findings.error));
+});
+
+test('记录类文档只追加（L3）：git mv 旧记录后再改新路径（RM），新路径不报“修改”，旧路径报“删除或改名”', () => {
+  const root = repoWith({ 'docs/acceptance/old.md': '记录\n' });
+  git(root, ['mv', 'docs/acceptance/old.md', 'docs/acceptance/old2.md']);
+  write(root, 'docs/acceptance/old2.md', '记录\n改了一行\n');
+  const rep = runHygiene(root);
+  assert.ok(!rep.findings.error.some((e) => e.includes('不得修改旧文件') && e.includes('old2.md')), JSON.stringify(rep.findings.error));
+  assert.ok(rep.findings.error.some((e) => e.includes('不得删除或改名') && e.includes('docs/acceptance/old.md')), JSON.stringify(rep.findings.error));
+});
+
+test('记录类文档只追加：记录目录里 git add 新文件再在工作区删掉（AD）不报——有基准提交、基准分支解析不了时都一样', () => {
+  for (const noBase of [false, true]) {
+    const root = repoWith({ 'docs/acceptance/2026-11-01.md': '记录一\n' });
+    if (noBase) {
+      // 主干上的配置把基准改成不存在的分支：巡检拿不到基准提交，只按工作区状态判断
+      const cfg = JSON.parse(fs.readFileSync(path.join(root, 'engineering.config.json'), 'utf8'));
+      cfg.modules.gate.base = 'no-such-branch';
+      write(root, 'engineering.config.json', JSON.stringify(cfg, null, 2));
+      commitAll(root, '基准改成不存在的分支');
+    }
+    write(root, 'docs/acceptance/tmp.md', '临时\n');
+    git(root, ['add', 'docs/acceptance/tmp.md']);
+    fs.rmSync(path.join(root, 'docs/acceptance/tmp.md'));
+    assert.match(git(root, ['status', '--porcelain']), /^AD docs\/acceptance\/tmp\.md/m, '前提：状态是 AD');
+    fs.rmSync(path.join(root, 'docs/acceptance/2026-11-01.md')); // 对照：旧记录删除照常报
+    const rep = runHygiene(root);
+    const errs = JSON.stringify(rep.findings.error);
+    assert.ok(!rep.findings.error.some((e) => e.includes('tmp.md')), `noBase=${noBase}：${errs}`);
+    assert.ok(rep.findings.error.some((e) => e.includes('不得删除或改名') && e.includes('2026-11-01.md')), `noBase=${noBase}：${errs}`);
+  }
+});
+
+test('记录类文档只追加：已提交修改、之后又删除的旧记录只报一条“删除或改名”，不再另报“修改”', () => {
+  const root = repoWith({ 'docs/acceptance/2026-11-01.md': '记录一\n' });
+  git(root, ['checkout', '-q', '-b', 'feat']);
+  write(root, 'docs/acceptance/2026-11-01.md', '改写\n');
+  commitAll(root, '改');
+  fs.rmSync(path.join(root, 'docs/acceptance/2026-11-01.md'));
+  const rep = runHygiene(root);
+  const about = rep.findings.error.filter((e) => e.includes('2026-11-01.md'));
+  assert.equal(about.length, 1, JSON.stringify(about));
+  assert.match(about[0], /不得删除或改名/);
+});

@@ -1,6 +1,6 @@
 # Product Dev
 
-**面向 Claude Code、Codex、DeepSeek Harness 及其他支持 Agent Skills 的 Agent 的产品开发插件（0.3.0）。** 把一个产品想法或现有项目的改进目标，逐步变成可核对的设计、代码和交付结果。既能从零做产品、加功能、修 bug，也能只做设计、文档修改、复审、验收或工程套件维护。
+**面向 Claude Code、Codex、DeepSeek Harness 及其他支持 Agent Skills 的 Agent 的产品开发插件（0.3.1）。** 把一个产品想法或现有项目的改进目标，逐步变成可核对的设计、代码和交付结果。既能从零做产品、加功能、修 bug，也能只做设计、文档修改、复审、验收或工程套件维护。
 
 内置三组协作能力：**产品设计**（需求梳理、PRD、原型与界面设计、架构与图表）、**工程实现**（代码探索、方案对比、任务拆解、开发测试与调试）、**质量与交付**（检查闸门、独立审查、PR 与合并、验收与获授权的发布）。一个入口按任务选择需要的阶段，沿用项目规则，保留阶段产物与验证证据，帮助你减少遗漏、反复解释和交接断层。各阶段执行依赖[宿主提供的工具](INSTALL.md)。
 
@@ -19,7 +19,7 @@
 **让 Agent 替你装。** 把下面这段话原样发给你正在用的 Agent。读到本仓库的 Agent 也可以直接照做。
 
 ```text
-安装 Product Dev 插件，只用下面写明的命令和来源。先用你所在宿主的 list 命令查一下：已经装了 product-dev@ac0033-skills 就不要重复安装，只告诉我版本号。Claude Code：运行 `claude plugin marketplace add ac0033/skills`，再运行 `claude plugin install product-dev@ac0033-skills`，然后用 `claude plugin list` 确认 product-dev@ac0033-skills 的 Status 是 enabled。Codex：运行 `codex plugin marketplace add ac0033/skills`，再运行 `codex plugin add product-dev@ac0033-skills`，然后用 `codex plugin list` 确认它的状态是 `installed, enabled`（`not installed` 不算）。DeepSeek Harness、OpenCode 等其他 Agent：读取 https://raw.githubusercontent.com/ac0033/product-dev/main/INSTALL.md，按其中“给 Agent 的安装步骤”一节安装。add 或 install 提示已存在时，以 list 的结果为准，不算失败。其余命令失败时把命令和输出原样告诉我。装完告诉我版本号，并提醒我新开会话后用 product-dev 入口开始。
+安装 Product Dev 插件，只用下面写明的命令和来源。先用你所在宿主的 list 命令查一下：已经装了 product-dev@ac0033-skills 就不要重复安装，只告诉我版本号；装了但没启用的也不重装，Claude Code 运行 `claude plugin enable product-dev@ac0033-skills`，其他宿主告诉我去插件设置里启用。Claude Code：运行 `claude plugin marketplace add ac0033/skills`，再运行 `claude plugin install product-dev@ac0033-skills`，然后用 `claude plugin list` 确认 product-dev@ac0033-skills 的 Status 是 enabled。Codex：运行 `codex plugin marketplace add ac0033/skills`，再运行 `codex plugin add product-dev@ac0033-skills`，然后用 `codex plugin list` 确认它的状态是 `installed, enabled`（`not installed` 不算）。DeepSeek Harness、OpenCode 等其他 Agent：读取 https://raw.githubusercontent.com/ac0033/product-dev/main/INSTALL.md，按其中“给 Agent 的安装步骤”一节安装。add 或 install 提示已存在时，以 list 的结果为准，不算失败。其余命令失败时把命令和输出原样告诉我。装完告诉我版本号，并提醒我新开会话后用 product-dev 入口开始。
 ```
 
 每一步的验证办法和注意事项见[给 Agent 的安装步骤](INSTALL.md#agent-install)。想自己动手，按下面对应的宿主安装。
@@ -57,7 +57,7 @@ codex plugin add product-dev@ac0033-skills
 在网页版或桌面版打开 **Plugins → Add plugin**，输入下面的包名和版本号，安装后启用。
 
 ```text
-dsh-product-dev@0.3.0
+dsh-product-dev@0.3.1
 ```
 
 在输入框用 `/product-dev` 加上你的任务。命令行安装和不装插件的用法见[其他 Agent 安装指南](INSTALL.md#deepseek-harness)。

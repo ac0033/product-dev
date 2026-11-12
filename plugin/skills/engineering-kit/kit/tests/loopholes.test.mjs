@@ -10,7 +10,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -19,7 +18,7 @@ import { loadConfig, readRecord, scopeFiles, treeHash, writeRecord } from '../ga
 import { mergePr } from '../gate/merge.mjs';
 import { recordReview } from '../gate/review.mjs';
 import { verify } from '../gate/verify.mjs';
-import { commitAll, featureRepo, git, reportFile, SRC_HEADER, TEST_CONFIG, tmpRepo, write } from './helpers.mjs';
+import { commitAll, featureRepo, git, reportFile, SRC_HEADER, TEST_CONFIG, tmpRepo, write, tmpDir } from './helpers.mjs';
 
 const KIT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -211,11 +210,27 @@ function gitTry(cwd, args) {
   return { status: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
 }
 
+/** pushRepo 的模板（本文件第一次用到时建一次）：{ root, remote }。 */
+let pushTemplate = null;
+
 /**
  * 装好闸门脚本与 pre-push 钩子、带一个裸远端的仓库：main 已推送；当前在 feat 上，feat 的改动已过闸门与复审并提交。
  * 另有分支 other：在 main 上加了一个没过闸门的提交。
+ * 建这样一个仓库要跑一次带钩子的推送、一次闸门和一次复审登记（Windows 上约 5 秒），所以只建一次模板，
+ * 每个用例复制一份（仓库与远端都复制，远端地址改指向副本），用例之间互不影响。
  */
 function pushRepo() {
+  if (!pushTemplate) pushTemplate = buildPushRepo();
+  const root = tmpDir('ekit-push-');
+  const remote = tmpDir('ekit-remote-');
+  fs.cpSync(pushTemplate.root, root, { recursive: true });
+  fs.cpSync(pushTemplate.remote, remote, { recursive: true });
+  git(root, ['remote', 'set-url', 'origin', remote]);
+  return root;
+}
+
+/** 真正建出 pushRepo 描述的仓库，返回 { root, remote }。 */
+function buildPushRepo() {
   const root = featureRepo();
   git(root, ['checkout', '-q', 'main']);
   const gateDir = path.join(root, 'scripts', 'engineering', 'gate');
@@ -225,7 +240,7 @@ function pushRepo() {
   const hook = path.join(root, '.git', 'hooks', 'pre-push');
   fs.copyFileSync(path.join(KIT, 'hooks', 'pre-push.sh'), hook);
   fs.chmodSync(hook, 0o755);
-  const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-remote-'));
+  const remote = tmpDir('ekit-remote-');
   git(remote, ['init', '-q', '--bare']);
   git(root, ['remote', 'add', 'origin', remote]);
   const first = gitTry(root, ['push', '-q', 'origin', 'main']);
@@ -240,7 +255,7 @@ function pushRepo() {
   commitAll(root, 'feat');
   assert.equal(runGate({ root }).ok, true);
   assert.equal(reviewPass(root).ok, true);
-  return root;
+  return { root, remote };
 }
 
 test('漏洞 3：在已过闸门的 feat 上 git push origin other（未过闸门的分支）被 pre-push 钩子拒绝', () => {
