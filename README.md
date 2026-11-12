@@ -16,6 +16,14 @@
 
 ## 快速开始
 
+**让 Agent 替你装。** 把下面这段话原样发给你正在用的 Agent。读到本仓库的 Agent 也可以直接照做。
+
+```text
+安装 Product Dev 插件，只用下面写明的命令和来源。先用你所在宿主的 list 命令查一下：已经装了 product-dev@ac0033-skills 就不要重复安装，只告诉我版本号。Claude Code：运行 `claude plugin marketplace add ac0033/skills`，再运行 `claude plugin install product-dev@ac0033-skills`，然后用 `claude plugin list` 确认 product-dev@ac0033-skills 的 Status 是 enabled。Codex：运行 `codex plugin marketplace add ac0033/skills`，再运行 `codex plugin add product-dev@ac0033-skills`，然后用 `codex plugin list` 确认它的状态是 `installed, enabled`（`not installed` 不算）。DeepSeek Harness、OpenCode 等其他 Agent：读取 https://raw.githubusercontent.com/ac0033/product-dev/main/INSTALL.md，按其中“给 Agent 的安装步骤”一节安装。add 或 install 提示已存在时，以 list 的结果为准，不算失败。其余命令失败时把命令和输出原样告诉我。装完告诉我版本号，并提醒我新开会话后用 product-dev 入口开始。
+```
+
+每一步的验证办法和注意事项见[给 Agent 的安装步骤](INSTALL.md#agent-install)。想自己动手，按下面对应的宿主安装。
+
 ### Claude Code
 
 在终端安装。
@@ -61,6 +69,8 @@ dsh-product-dev@0.3.0
 ### 试一句
 
 > 我想做一个给读书会用的活动报名工具。先梳理参与者和组织者的需求，给出第一版范围和验收标准。等我确认需求后再做原型。
+
+<a id="upgrade"></a>
 
 <details>
 <summary><strong>升级已有的 GitHub 市场安装</strong></summary>
