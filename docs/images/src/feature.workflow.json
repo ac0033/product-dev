@@ -1,0 +1,35 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "加功能：从现状到选定方案",
+    "output": "feature.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "status", "label": "弄清现状" },
+    { "id": "plan", "label": "定方案" }
+  ],
+  "mainPath": ["start", "explore", "clarify", "behavior", "contract", "compare", "choose"],
+  "nodes": [
+    { "id": "start", "lane": "status", "col": 0, "type": "external", "label": "开工检查", "sublabel": "小新增：走第 6 节简化路线" },
+    { "id": "explore", "lane": "status", "col": 1, "type": "backend", "label": "探索代码库" },
+    { "id": "clarify", "lane": "status", "col": 2, "type": "backend", "label": "澄清问题" },
+    { "id": "behavior", "lane": "status", "col": 3, "type": "backend", "icon": "decision", "label": "改产品行为?" },
+    { "id": "revise", "lane": "plan", "col": 2, "type": "frontend", "label": "回设计段修订" },
+    { "id": "contract", "lane": "plan", "col": 3, "type": "backend", "label": "功能契约" },
+    { "id": "compare", "lane": "plan", "col": 4, "type": "backend", "label": "方案对比", "sublabel": "三种做法各派一次" },
+    { "id": "choose", "lane": "plan", "col": 5, "type": "external", "label": "用户选定方案" }
+  ],
+  "edges": [
+    { "from": "start", "to": "explore" },
+    { "from": "explore", "to": "clarify" },
+    { "from": "clarify", "to": "behavior" },
+    { "from": "behavior", "to": "contract", "label": "否" },
+    { "from": "behavior", "to": "revise", "label": "是" },
+    { "from": "revise", "to": "contract" },
+    { "from": "contract", "to": "compare" },
+    { "from": "compare", "to": "choose", "variant": "emphasis" }
+  ]
+}

@@ -18,8 +18,8 @@ const read = (rel) => fs.readFileSync(path.join(PLUGIN, rel), 'utf8').replace(/\
 const ENTRY = read(`${ENTRY_DIR}/SKILL.md`);
 
 /**
- * 流程导图里的步骤清单（来源：流程导图的四张流程图，共 31 步；2026-11-12 起交付段在任务拆解与逐片开发之间加了“测试设计”，
- * 共 32 步，docs/images/delivery.png 还没重画）。键是入口里的节标题开头。导图改了步骤，这里和入口要一起改。
+ * 流程导图里的步骤清单（来源：docs/images 的四张流程图，共 32 步；2026-11-12 起交付段在任务拆解与逐片开发之间加了“测试设计”，
+ * delivery.png、feature.png 已按此重画，源文件在 docs/images/src/）。键是入口里的节标题开头。导图改了步骤，这里和入口要一起改。
  */
 export const STEPS = {
   '0. 恢复现场': ['恢复现场'],
@@ -121,7 +121,7 @@ test('步骤齐全：导图里的步骤入口里都有，次序一致，四栏�
       count += 1;
     }
   }
-  assert.equal(count, 32, '步骤总数不是 32 步（导图的 31 步加测试设计）');
+  assert.equal(count, 32, '步骤总数不是 32 步（与四张流程导图一致）');
   assert.equal([...rows.keys()].length, Object.keys(STEPS).length, '入口里有清单之外的步骤表');
 });
 
@@ -155,7 +155,9 @@ test('工具落地：入口点名的方法文档小节和步骤号都存在，�
     for (const n of m[1].split('、')) if (!read(`${ENTRY_DIR}/references/debugging.md`).includes(`### 第 ${n} 步`)) bad.push(`debugging.md 没有第 ${n} 步`);
   }
   assert.deepEqual(bad, []);
-  assert.ok([...ENTRY.matchAll(/\]\(references\/[\w-]+\.md\)[^“|\n]{0,3}“/g)].length >= 8, '没有解析到对方法文档小节的引用');
+  assert.ok([...ENTRY.matchAll(/\]\(references\/[\w-]+\.md\)[^“|\n]{0,3}“/g)].length >= 5, '没有解析到对方法文档小节的引用');
+  // 通用流程小节（开工、需求与方案、收工等）已搬到套件版，入口指向它们的链接改成“第 N 节”形式，由“process.md 不复述套件流程文档”和“章节引用”两条检查；
+  // 这里剩下的是指向入口自己的方法文档里有标题的小节的引用：原要求至少 8 处，现有 6 处，降为 5 处，只防止解析不到
   const steps = [...stepRows(ENTRY).values()].flat().map((c) => c[3]).join('\n');
   for (const name of REFS) assert.ok(steps.includes(`(references/${name}.md)`), `没有哪一步用到 ${name}.md`);
   assert.deepEqual(fs.readdirSync(path.join(PLUGIN, ENTRY_DIR, 'references')).sort(), REFS.map((n) => `${n}.md`).sort());
@@ -180,7 +182,8 @@ test('授权口径：分流和装工程底座写明受 R2 约束，可选加强�
 
 test('受控的值：方法文档里的默认值与套件配置一致，常规动作一句没有丢', () => {
   const review = read(`${ENTRY_DIR}/references/review.md`);
-  const proc = read(`${ENTRY_DIR}/references/process.md`);
+  // 通用流程细则只写在套件版 process.md（入口版链接过去，见“process.md 不复述套件流程文档”一条），所以查两份合起来的内容
+  const proc = [read(`${ENTRY_DIR}/references/process.md`), read('skills/engineering-kit/references/process.md')].join('\n');
   assert.ok(review.includes(`默认 ${DEFAULTS.reviewMinChars}`), '复审报告最短字数与套件默认值不一致');
   assert.ok(review.includes(`不少于 ${DEFAULTS.reviewMinChars} 字`), '任务书里的最短字数与套件默认值不一致');
   assert.ok(review.includes(`默认是“${DEFAULTS.reviewKeyword}”`) && review.includes(`## ${DEFAULTS.reviewKeyword}`), '报告格式里没有套件要求的关键词一节');
@@ -264,8 +267,8 @@ test('分流与次序：授权的实质句子、缩短路线的步骤、两种�
   // 两种复审流程的次序
   assert.ok(ENTRY.includes('独立复审排在机械闸门之后、推送之前'), '入口没有写对 pre-push 流程的次序');
   assert.ok(ENTRY.includes('小改动的独立复审排在闸门之后、推送之前'), '缩短路线没有写对 pre-push 流程的次序');
-  const proc = read(`${ENTRY_DIR}/references/process.md`);
-  assert.ok(proc.includes('`gate.mjs` 通过后由独立子代理复审') && proc.includes('`gate.mjs` 通过后即可推送'), 'process.md 里两种流程的次序走样了');
+  const proc = read('skills/engineering-kit/references/process.md'); // 两种流程的次序写在套件版第 4 节，入口版链接过去
+  assert.ok(proc.includes('`gate.mjs` 通过后由独立子代理复审') && proc.includes('`gate.mjs` 通过后即可推送'), '套件版 process.md 里两种流程的次序走样了');
 });
 
 test('命令参数：文档里给脚本写的参数，脚本里都有', () => {
@@ -333,26 +336,39 @@ test('不复述规则：入口和方法文档里没有 R1–R10 的原句', () =
   assert.deepEqual(bad, []);
 });
 
-test('原文保留：process.md 由套件流程文档重组而来，各节的句子大多数还在', () => {
-  // 局限：只比句子是否原样保留。个别句子因章节号、文件位置不同而改写是正常的，所以按比例判断；
-  // 少量句子被删或被改弱查不出来，靠独立复审。套件那份改了而这里没跟着改时，比例下降，同样会报出来。
-  const original = fs.readFileSync(path.join(ROOT, 'components/engineering-kit/references/process.md'), 'utf8').replace(/\r\n/g, '\n');
-  const mine = norm(read(`${ENTRY_DIR}/references/process.md`));
-  let total = 0;
-  let kept = 0;
-  const low = [];
-  for (const section of original.split(/^## /m).slice(1)) {
-    const title = section.split('\n')[0];
-    const all = sentences(section.slice(title.length));
-    const here = all.filter((s) => mine.includes(s)).length;
-    total += all.length;
-    kept += here;
-    // 每节最多缺三成；句子少的节至少容许缺两句
-    if (all.length - here > Math.max(2, all.length * 0.3)) low.push(`${title}：${here}/${all.length}`);
+test('process.md 不复述套件流程文档：入口版只留入口独有的内容，通用细则链接到套件版、不再保留原文', () => {
+  // 反转旧的“原文保留”：入口版 process.md 原先由套件流程文档重组而来，要求保留 80% 以上的原句；
+  // 现在同一内容只写一处（套件版），入口版保留原句反而是重复。口径改为三条：
+  // (a) 入口版指向套件版的链接都落在插件内、指到的节存在，且入口点名的每个通用小节都有链接；
+  // (b) 两份文件之间没有同一长句（与 consistency 的重复检查同一口径，那条不查插件手写部分与组件之间）；
+  // (c) 原来在入口版里检查的具体内容（复审命令、次序、默认值、阶段目录）改查套件版，见“受控的值”“分流与次序”两条。
+  // 局限：只能查原句重复，换一种说法的同义复述查不出来，靠独立复审。
+  const KIT_LINK = '../../engineering-kit/references/process.md';
+  const mine = read(`${ENTRY_DIR}/references/process.md`);
+  const kitRel = 'skills/engineering-kit/references/process.md';
+  assert.ok(has(kitRel), '插件里没有套件版 process.md');
+  const kit = read(kitRel);
+  const kitHeadings = kit.split('\n').filter((l) => /^#{2,3} /.test(l)).map((l) => l.replace(/^#+ /, ''));
+  // (a) 链接与节
+  const links = [...mine.matchAll(/\]\(([^)\s#]+)\)/g)].map((m) => m[1]);
+  assert.ok(links.filter((l) => l === KIT_LINK).length >= 8, '入口版指向套件版 process.md 的链接太少，通用小节没有链接');
+  const numbered = new Set([...mine.matchAll(/\]\(\.\.\/\.\.\/engineering-kit\/references\/process\.md\) 第 (\d+) 节/g)].map((m) => m[1]));
+  for (const n of ['1', '2', '3', '4', '5', '6', '7', '8', '10']) {
+    assert.ok(numbered.has(n), `入口版没有指向套件版第 ${n} 节`);
+    assert.ok(kitHeadings.some((h) => h.startsWith(`${n}. `)), `套件版没有第 ${n} 节`);
   }
-  assert.ok(total >= 100, '没有从套件流程文档里解析到句子');
-  assert.deepEqual(low, [], '这些节缺的句子太多');
-  assert.ok(kept / total >= 0.8, `整体只保留了 ${kept}/${total}`);
+  for (const m of mine.matchAll(/\]\(\.\.\/\.\.\/engineering-kit\/references\/process\.md\)“([^”]+)”/g)) assert.ok(kitHeadings.some((h) => h.replace(/^\d+\. /, '') === m[1]), `套件版没有“${m[1]}”这一节`);
+  // 入口 SKILL.md 与其他方法文档里指向套件版的链接也要落在插件内、指到的节存在
+  for (const doc of DOCS) {
+    for (const m of read(doc).matchAll(/\]\(((?:\.\.\/)+engineering-kit\/references\/process\.md)\) 第 (\d+) 节/g)) {
+      assert.ok(has(path.posix.normalize(path.posix.join(path.posix.dirname(doc), m[1]))), `${doc} 指向的套件版 process.md 不存在`);
+      assert.ok(kitHeadings.some((h) => h.startsWith(`${m[2]}. `)), `${doc} 指向套件版第 ${m[2]} 节，但没有这一节`);
+    }
+  }
+  // (b) 无同一长句；入口版本身不应变成套件版的缩写本
+  const kitSents = new Set(sentences(kit));
+  assert.deepEqual(sentences(mine).filter((x) => kitSents.has(x)), [], '入口版 process.md 与套件版出现同一句：只写一处');
+  assert.ok(sentences(mine).length >= 15, '入口版没有解析到句子（配置闸门、测试的四个阶段应当还在）');
 });
 
 test('第三方版本：声明里的提交号与组件清单一致', () => {
@@ -394,7 +410,7 @@ test('模型分档、测试阶段与复审循环：R9 写明分档，入口和�
   for (const text of ['测试设计不低于实施者', '首轮代码复审、安全专项', '一致性审和范围明确的修后复核可以用中档模型', '升档重审', '优先用脚本']) assert.ok(r9.includes(text), `R9 缺：${text}`);
   assert.ok(!r9.includes('复审模型不弱于被复审内容的作者'), 'R9 还是不分档的旧说法');
   const review = read(`${ENTRY_DIR}/references/review.md`);
-  const proc = read(`${ENTRY_DIR}/references/process.md`);
+  const proc = read(`${ENTRY_DIR}/references/process.md`); // 测试的四个阶段是入口版独有的，写在入口版
   assert.ok(ENTRY.includes('测试设计和各种复审按 R9 的分档') && !ENTRY.includes('方案设计和复审用不弱于主对话的模型'), '入口“约定”的模型一句没有改成引用 R9 的分档');
   assert.ok(review.includes('模型：按 R9 的分档') && !review.includes('复审用的模型不弱于被复审内容的作者'), 'review.md 第 1 节的模型一段没有改成按 R9 分档');
   for (const h of ['### 首轮任务书', '### 修后复核任务书', '## 8. 一轮与修复循环']) assert.ok(review.includes(h), `review.md 缺“${h}”`);
