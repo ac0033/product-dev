@@ -16,6 +16,14 @@
 
 ## 快速开始
 
+**让 Agent 替你装。** 把下面这句话发给你正在用的 Agent。读到本仓库的 Agent 也可以直接照[给 Agent 的安装步骤](INSTALL.md#agent-install)执行。
+
+```text
+请按 https://github.com/ac0033/product-dev/blob/main/INSTALL.md 的“给 Agent 的安装步骤”一节，为我正在使用的这个 Agent 安装 Product Dev，装完按该节的办法验证，并告诉我版本号和调用方式。
+```
+
+想自己动手，按下面对应的宿主安装。
+
 ### Claude Code
 
 在终端安装。
@@ -61,6 +69,8 @@ dsh-product-dev@0.3.0
 ### 试一句
 
 > 我想做一个给读书会用的活动报名工具。先梳理参与者和组织者的需求，给出第一版范围和验收标准。等我确认需求后再做原型。
+
+<a id="upgrade"></a>
 
 <details>
 <summary><strong>升级已有的 GitHub 市场安装</strong></summary>
