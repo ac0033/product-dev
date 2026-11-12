@@ -549,6 +549,74 @@ test('测试用例数比基准提交上的同一文件减少时不拦，在输�
   assert.deepEqual(res.record.staticChecks.testCases, [{ file: 'test/dedup.test.ts', before: 3, after: 1, removed: 2 }]);
 });
 
+/** 测试文件的公共开头：导入和几行说明，使改名前后的文件足够相似，git 的改名检测能配上对。 */
+const CASE_HEAD = `import { dedup } from '../src/dedup.ts';\n${'// 去重测试：覆盖空数组、重复项、顺序保持等边界情况，供改名检测比对相似度。\n'.repeat(6)}`;
+
+/** 主干上的 test/dedup.test.ts 改成 3 个用例（之后的改名、删除都以它为基准），回到 feat 并变基。 */
+function threeCases(root) {
+  git(root, ['checkout', '-q', 'main']);
+  write(root, 'test/dedup.test.ts', `${CASE_HEAD}test('a', () => assert.ok(dedup));\ntest('b', () => assert.ok(dedup));\ntest('c', () => assert.ok(dedup));\n`);
+  commitAll(root, '三个用例');
+  git(root, ['checkout', '-q', 'feat']);
+  git(root, ['rebase', '-q', 'main']);
+}
+
+/** 只剩一个用例的测试文件内容（与原文件大体相同，git 能把改名配上对）。 */
+const ONE_CASE = `${CASE_HEAD}test('a', () => assert.ok(dedup));\n`;
+
+test('用例数减少（改名）：测试文件 git mv 后用例变少，暂存或已提交都按改名前的文件比较并提示', () => {
+  for (const commit of [false, true]) {
+    const root = featureRepo();
+    threeCases(root);
+    git(root, ['mv', 'test/dedup.test.ts', 'test/dedup-renamed.test.ts']);
+    write(root, 'test/dedup-renamed.test.ts', `${ONE_CASE}// 改名并删掉两个用例\n`);
+    git(root, ['add', '-A']);
+    if (commit) commitAll(root, '改名');
+    const res = runGate({ root });
+    assert.equal(res.ok, true, res.messages.join('\n'));
+    const hint = res.messages.find((m) => /用例/.test(m) && /减少 2 个/.test(m));
+    assert.ok(hint, `commit=${commit}：${res.messages.join('\n')}`);
+    assert.match(hint, /test\/dedup-renamed\.test\.ts/);
+    assert.match(hint, /test\/dedup\.test\.ts/, '提示里写明改名前的路径');
+    assert.equal(res.record.staticChecks.testCases.length, 1);
+    assert.equal(res.record.staticChecks.testCases[0].before, 3);
+    assert.equal(res.record.staticChecks.testCases[0].after, 1);
+    assert.equal(res.record.staticChecks.testCases[0].from, 'test/dedup.test.ts', '按 git 配上的改名对比较，不是按总数');
+    assert.match(hint, /由 test\/dedup\.test\.ts 改名/);
+  }
+});
+
+test('用例数减少（配不上对）：删除旧测试文件、另写内容不同的新测试文件（或只在工作区 mv、没 git add）时按总数比较并提示', () => {
+  // 内容完全不同：git 的改名检测配不上对
+  const root = featureRepo();
+  threeCases(root);
+  fs.rmSync(path.join(root, 'test/dedup.test.ts'));
+  write(root, 'test/other.test.ts', "import { dedup } from '../src/dedup.ts';\n// 全新写法\nit('只剩一个', () => expect(dedup([1, 1])).toEqual([1]));\n");
+  const res = runGate({ root });
+  assert.equal(res.ok, true, res.messages.join('\n'));
+  const hint = res.messages.find((m) => /用例/.test(m) && /减少 2 个/.test(m));
+  assert.ok(hint, res.messages.join('\n'));
+  assert.match(hint, /test\/dedup\.test\.ts/);
+  assert.match(hint, /test\/other\.test\.ts/);
+  // 只在工作区改名（mv，未 git add）：新路径未跟踪，同样提示
+  const root2 = featureRepo();
+  threeCases(root2);
+  fs.renameSync(path.join(root2, 'test/dedup.test.ts'), path.join(root2, 'test/moved.test.ts'));
+  write(root2, 'test/moved.test.ts', ONE_CASE);
+  const res2 = runGate({ root: root2 });
+  assert.ok(res2.messages.some((m) => /用例/.test(m) && /减少 2 个/.test(m) && m.includes('test/moved.test.ts')), res2.messages.join('\n'));
+});
+
+test('用例数（改名对照）：改名后用例数不变或变多时不提示', () => {
+  const root = featureRepo();
+  threeCases(root);
+  git(root, ['mv', 'test/dedup.test.ts', 'test/dedup-renamed.test.ts']);
+  const res = runGate({ root });
+  assert.equal(res.ok, true, res.messages.join('\n'));
+  assert.ok(!res.messages.some((m) => /用例数/.test(m)), res.messages.join('\n'));
+  assert.equal(res.record.staticChecks.testCases, undefined);
+});
+
 // ---------- 5. pre-push 流程的一致性审与延期 ----------
 
 test('pre-push 一致性审：--kind consistency 只写 log 与 review-consistency.json；defer 须写理由；推送核对不要求它', () => {
@@ -662,12 +730,19 @@ test('结论判定：冒号也拆小句；结论词后带括号的不认，提�
   assert.match(r.message, /括号/);
 });
 
-test('基准分支解析不了时，合并入口与 pr 流程的复审登记都抛错（不按工作区的判定策略放行）', () => {
+test('基准分支解析不了时，合并入口抛错：不调用 gh、不合并（不按工作区的判定策略放行）', () => {
   const root = featureRepo({ reviewFlow: 'pr', base: 'no-such-branch' });
   const gh = ghFor({ head: 'a'.repeat(40) });
   assert.throws(() => mergePr({ root, pr: '7', gh }), /无法取得基准提交上的判定策略/);
+  assert.equal(gh.calls.length, 0, '判定策略取不到时一次 gh 调用都不该有（更不会执行 gh pr merge）');
+});
+
+test('基准分支解析不了时，pr 流程的复审登记抛错：不调用 gh、不写任何 PR 审查记录', () => {
+  const root = featureRepo({ reviewFlow: 'pr', base: 'no-such-branch' });
+  const gh = ghFor({ head: 'a'.repeat(40) });
   assert.throws(() => prReg(root, gh, 'code', 'pass'), /无法取得基准提交上的判定策略/);
   assert.equal(gh.calls.length, 0);
+  assert.equal(fs.existsSync(path.join(root, '.git', 'engineering-gate', 'pr')), false, '不应写下 PR 审查记录');
 });
 
 // ---------- 0.6.0 首轮复审：改名检测让旧路径从改动列表消失（H1、M1、T1）及低级问题（L1、L2、L4、L5） ----------

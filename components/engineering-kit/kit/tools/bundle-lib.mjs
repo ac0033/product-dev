@@ -29,6 +29,21 @@ export function sha(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
 
+/**
+ * 套件文件的内容哈希：先把 CRLF 换成 LF 再算。业务含义：项目的 .gitattributes 没写 eol=lf、又开着 core.autocrlf 时，
+ * 重新检出后套件文件是 CRLF，内容并没有变；按字节比会被当成“本地修改”，升级时报冲突、漂移检查报 modified。
+ * 套件源文件本身是 LF，所以对已有的锁文件记录（按字节算的 LF 内容）结果不变。
+ */
+export function contentSha(buf) {
+  // latin1 一字节对一个字符，换完再按 latin1 编回字节：只去掉 CR LF 里的 CR，其余字节原样（UTF-8 中文不受影响）
+  return sha(Buffer.from(Buffer.from(buf).toString('latin1').replace(/\r\n/g, '\n'), 'latin1'));
+}
+
+/** 两段文本除换行风格（CRLF / LF）外是否相同。 */
+export function sameText(a, b) {
+  return a.replace(/\r\n/g, '\n') === b.replace(/\r\n/g, '\n');
+}
+
 /** 标记块的开始标记（带版本）。 */
 export function beginMark(version) {
   return `<!-- engineering-kit:begin v${version} -->`;
@@ -323,7 +338,7 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
       const before = readJsonFile(abs, rel);
       const text = `${JSON.stringify(mergeClaudeSettings(before ?? {}), null, 2)}\n`;
       const curText = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null;
-      if (text === curText) actions.push({ type: 'skip', file: rel });
+      if (curText !== null && sameText(text, curText)) actions.push({ type: 'skip', file: rel }); // 只差换行风格不重写
       else {
         ops.push({ rel, abs, content: text, action: curText === null ? 'create' : 'update' });
         actions.push({ type: curText === null ? 'create' : 'update', file: rel });
@@ -376,8 +391,9 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
       }
 
       // kind 为 gate / hooks：套件拥有的文件
-      const want = sha(srcBuf);
-      const cur = fs.existsSync(abs) ? sha(fs.readFileSync(abs)) : null;
+      // 比较内容哈希（不计换行风格，见 contentSha）：只差 CRLF 的不算本地修改，也不重写文件
+      const want = contentSha(srcBuf);
+      const cur = fs.existsSync(abs) ? contentSha(fs.readFileSync(abs)) : null;
       if (cur === want) {
         newLock.files[rel] = want;
         actions.push({ type: 'skip', file: rel });
@@ -403,7 +419,7 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
     if (rel in newLock.files) continue;
     const abs = path.join(root, rel);
     if (!fs.existsSync(abs)) continue;
-    const cur = sha(fs.readFileSync(abs));
+    const cur = contentSha(fs.readFileSync(abs));
     if (cur === lock.files[rel] || force) {
       ops.push({ rel, abs, del: true, action: 'delete' });
       actions.push({ type: 'delete', file: rel });
@@ -493,7 +509,11 @@ export function executePlan({ root, bundleRoot, bundle, plan, opts = {} }) {
       files: plan.newLock.files,
       blocks: plan.newLock.blocks,
     };
-    write(path.join(root, LOCK_REL), `${JSON.stringify(lock, null, 2)}\n`);
+    // 锁文件内容没变（只差换行风格，例如 autocrlf 检出成了 CRLF）时不重写：重写成 LF 会让工作区多出一处只差换行的改动
+    const lockAbs = path.join(root, LOCK_REL);
+    const lockText = `${JSON.stringify(lock, null, 2)}\n`;
+    const curLock = readOrNull(lockAbs);
+    if (curLock === null || !sameText(curLock.toString('utf8'), lockText)) write(lockAbs, lockText);
   } catch (e) {
     rollback();
     throw e;
@@ -571,9 +591,9 @@ export function checkBundle({ root, bundleRoot }) {
         push(comp.id, rel, exists ? 'ok' : 'missing');
         continue;
       }
-      // gate / hooks：与源文件逐字节比较
+      // gate / hooks：与源文件比较内容（不计换行风格，见 contentSha）
       if (!exists) push(comp.id, rel, 'missing');
-      else push(comp.id, rel, sha(fs.readFileSync(abs)) === sha(fs.readFileSync(srcAbs)) ? 'ok' : 'modified');
+      else push(comp.id, rel, contentSha(fs.readFileSync(abs)) === contentSha(fs.readFileSync(srcAbs)) ? 'ok' : 'modified');
     }
   }
   if (lock.bundleVersion !== bundle.bundleVersion) {

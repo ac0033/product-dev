@@ -2,7 +2,7 @@
 
 Product Dev 也提供一个可独立导入的 **Agent Skills 包**。整个包只注册 `product-dev` 入口，工作流需要的内部技能、子代理任务书、工程脚本和模板都在包里。不同宿主可以使用同一个包。
 
-[下载 Product Dev 技能包](https://github.com/ac0033/product-dev/releases/download/v0.3.0/product-dev-skill.zip)
+[下载 Product Dev 技能包](https://github.com/ac0033/product-dev/releases/download/v0.3.1/product-dev-skill.zip)
 
 ## 按宿主安装
 
@@ -10,10 +10,10 @@ Product Dev 也提供一个可独立导入的 **Agent Skills 包**。整个包�
 
 ### DeepSeek Harness
 
-推荐安装 npm 包 `dsh-product-dev`，不需要下载 ZIP。在 **Plugins → Add plugin** 输入 `dsh-product-dev@0.3.0`，或在终端运行下面的命令，然后启用插件。
+推荐安装 npm 包 `dsh-product-dev`，不需要下载 ZIP。在 **Plugins → Add plugin** 输入 `dsh-product-dev@0.3.1`，或在终端运行下面的命令，然后启用插件。
 
 ```bash
-dsh plugin --profile web add dsh-product-dev@0.3.0
+dsh plugin --profile web add dsh-product-dev@0.3.1
 ```
 
 不想装插件时，解压 ZIP，将整个 `product-dev` 文件夹放到项目的 `.dsh/skills/`，或放到用户目录的 `~/.dsh/skills/`。DSH 只识别技能目录下第一层的 `product-dev/SKILL.md`，不要再套一层文件夹。两种方式都在输入框用 `/product-dev` 加任务来调用。

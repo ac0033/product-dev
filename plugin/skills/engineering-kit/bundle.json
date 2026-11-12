@@ -1,6 +1,6 @@
 {
   "name": "engineering-kit",
-  "bundleVersion": "0.6.1",
+  "bundleVersion": "0.6.2",
   "configFormat": "profile",
   "description": "工程能力包：规则（标记块）、闸门脚本、钩子、巡检、目录与文档模板，整包安装、整包更新、可回滚。",
   "components": [

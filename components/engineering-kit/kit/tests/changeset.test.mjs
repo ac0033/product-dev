@@ -2,13 +2,12 @@
 // 每个用例都在临时副本里操作，不改动真正的整包源码。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { applyChangeset, listPending, proposeChangeset, validateChangeset } from '../tools/changeset.mjs';
 import { releaseBundle } from '../tools/release.mjs';
-import { git, tmpRepo, write, read, commitAll } from './helpers.mjs';
+import { git, tmpRepo, write, read, commitAll, tmpDir } from './helpers.mjs';
 import { BUNDLE_ROOT } from '../sync.mjs';
 import { loadBundle } from '../tools/bundle-lib.mjs';
 
@@ -17,7 +16,7 @@ const CURRENT = loadBundle(BUNDLE_ROOT).bundleVersion;
 
 /** 临时副本的整包（去掉 changesets 与 .git），返回路径。 */
 function bundleCopy() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-cs-'));
+  const dir = tmpDir('ekit-cs-');
   fs.cpSync(BUNDLE_ROOT, dir, { recursive: true, filter: (src) => !src.includes(`${path.sep}changesets`) && !src.includes(`${path.sep}.git`) });
   return dir;
 }
@@ -114,7 +113,7 @@ test('发布：提交整包目录并打版本标签；同一版本不能重复�
 });
 
 test('命令行入口：list / propose / apply 能运行，未知子命令用法退出码 2，出错退出码 1', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-cli-'));
+  const dir = tmpDir('ekit-cli-');
   fs.cpSync(path.join(BUNDLE_ROOT, 'kit', 'gate'), path.join(dir, 'kit', 'gate'), { recursive: true });
   fs.cpSync(path.join(BUNDLE_ROOT, 'kit', 'tools', 'changeset.mjs'), path.join(dir, 'kit', 'tools', 'changeset.mjs'));
   const run = (...args) => spawnSync(process.execPath, [path.join(dir, 'kit', 'tools', 'changeset.mjs'), ...args], { encoding: 'utf8' });

@@ -233,3 +233,39 @@ test('阶段内登记（R6）：记录目录设在阶段目录之内时，其中
   commitAll(root, 'base');
   assert.deepEqual(runHygiene(root).findings.error, []);
 });
+
+test('记录类文档只追加：删除或改名旧记录同样报错——工作区删除、暂存的 git mv、已提交（相对基准分支）的删除与改名', () => {
+  const recs = { 'docs/acceptance/2026-11-01.md': '记录一\n', 'docs/acceptance/2026-11-02.md': '记录二\n', 'docs/acceptance/2026-11-03.md': '记录三\n' };
+  const deleted = (rep, f) => rep.findings.error.some((e) => e.includes('不得删除或改名') && e.includes(f));
+  // 工作区：直接删除（未暂存）、git mv 改名（只暂存）
+  const root = repoWith(recs);
+  fs.rmSync(path.join(root, 'docs/acceptance/2026-11-01.md'));
+  git(root, ['mv', 'docs/acceptance/2026-11-02.md', 'docs/acceptance/2026-11-02-改.md']);
+  const rep = runHygiene(root);
+  assert.ok(deleted(rep, 'docs/acceptance/2026-11-01.md'), JSON.stringify(rep.findings.error));
+  assert.ok(deleted(rep, 'docs/acceptance/2026-11-02.md'), JSON.stringify(rep.findings.error));
+  assert.ok(!rep.findings.error.some((e) => e.includes('2026-11-03')), '未动的记录不报');
+  assert.ok(!rep.findings.error.some((e) => e.includes('2026-11-02-改')), '改名后的新路径是新增，不报');
+  // 已提交：功能分支上删除一份、改名一份（git 的改名检测会把它们配成一对，巡检不能因此漏掉旧路径）
+  const root2 = repoWith(recs);
+  git(root2, ['checkout', '-q', '-b', 'feat']);
+  fs.rmSync(path.join(root2, 'docs/acceptance/2026-11-01.md'));
+  git(root2, ['mv', 'docs/acceptance/2026-11-02.md', 'docs/acceptance/2026-11-02-改.md']);
+  commitAll(root2, '删改记录');
+  const rep2 = runHygiene(root2);
+  assert.ok(deleted(rep2, 'docs/acceptance/2026-11-01.md'), JSON.stringify(rep2.findings.error));
+  assert.ok(deleted(rep2, 'docs/acceptance/2026-11-02.md'), JSON.stringify(rep2.findings.error));
+  assert.equal(rep2.ok, false);
+});
+
+test('记录类文档只追加：记录目录之外的文件删除不报；记录目录里删除自己刚加、还没提交过的文件也不报', () => {
+  const root = repoWith({ 'docs/acceptance/2026-11-01.md': '记录一\n', 'docs/04-开发/old.md': '状态：active\n' });
+  git(root, ['checkout', '-q', '-b', 'feat']);
+  fs.rmSync(path.join(root, 'docs/04-开发/old.md'));
+  write(root, 'docs/acceptance/2026-11-09.md', '草稿\n');
+  commitAll(root, '加一份');
+  fs.rmSync(path.join(root, 'docs/acceptance/2026-11-09.md'));
+  commitAll(root, '又删掉');
+  const rep = runHygiene(root);
+  assert.ok(!rep.findings.error.some((e) => e.includes('不得删除或改名')), JSON.stringify(rep.findings.error));
+});

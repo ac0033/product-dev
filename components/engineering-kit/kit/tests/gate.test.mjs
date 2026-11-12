@@ -10,7 +10,7 @@ import { acquireLock, changedFiles, loadConfig, readRecord, recordDir, scopeFile
 import { runGate } from '../gate/gate.mjs';
 import { branchDirName, recordReview } from '../gate/review.mjs';
 import { newFileProblems, verify } from '../gate/verify.mjs';
-import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, TEST_CONFIG, tmpRepo, write } from './helpers.mjs';
+import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, TEST_CONFIG, tmpRepo, trackTmp, write } from './helpers.mjs';
 
 /** 测试直接使用测试配置对象（不经过 loadConfig 读文件）。 */
 const cfg = { ...TEST_CONFIG };
@@ -259,7 +259,7 @@ test('测试先行：模块名必须是完整的导入文件名，user-service �
 
 test('记录目录：各工作树各用自己的 git 目录，记录互不覆盖', () => {
   const root = featureRepo();
-  const wt = `${root}-wt`;
+  const wt = trackTmp(`${root}-wt`);
   git(root, ['worktree', 'add', '-q', '-b', 'other', wt]);
   assert.notEqual(recordDir(root), recordDir(wt));
   writeRecord(root, 'tests.json', { who: 'main' });

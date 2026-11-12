@@ -6,13 +6,12 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { classify } from '../hooks/pre-bash.mjs';
 import { checkComments } from '../gate/check-comments.mjs';
-import os from 'node:os';
 import { changedFiles, loadConfig, uncommittedInScope } from '../gate/lib.mjs';
 import { verify } from '../gate/verify.mjs';
-import { featureRepo, git as gitIn, tmpRepo, write, TEST_CONFIG } from './helpers.mjs';
+import { featureRepo, git as gitIn, tmpRepo, write, TEST_CONFIG, tmpDir } from './helpers.mjs';
 
 test('未提交检查：git 失败时抛错，绝不返回空列表（失败不放行）', () => {
-  const notRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ekit-norepo-'));
+  const notRepo = tmpDir('ekit-norepo-');
   assert.throws(() => uncommittedInScope(notRepo, ['src/a.ts']), /git status 失败/);
 });
 
