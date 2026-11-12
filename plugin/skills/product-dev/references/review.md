@@ -23,11 +23,11 @@
 
 外部复审者（其他厂商的模型，不消耗宿主的模型额度）：由套件的 `external-review.mjs` 调用。它与厂商无关，内置执行器是 Codex CLI（按 Codex 当前的登录计费，ChatGPT 登录即用订阅额度），别的厂商写一个遵守其协议的命令接入。接入和使用分三步：
 
-1. 配置。项目在主干的配置里把执行器名加进 `modules.review.externalExecutors`（如 `["codex"]`），把 `external:codex` 这样的真实名字加进 `modules.review.reviewers`；两处都是判定策略，合入主干后才生效。套件默认名单不加，改它要用户同意（R2）。本机在仓库之外写 `~/.engineering-kit/external-review.json`，记执行器的命令、默认模型和推理强度，例如 `{"executors":{"codex":{"type":"codex","command":["codex"],"defaultModel":"gpt-6.1-sol","defaultEffort":"medium"}}}`。密钥和登录留在执行器自己那里，不写进任何配置。
-2. 调用。在被审分支上运行 `node scripts/engineering/gate/external-review.mjs run --executor codex --kind code --round first --pr <编号> --model <模型> --model-chosen-by user|agent --model-reason "<依据>"`（一致性审用 `--kind consistency`，修后复核用 `--round followup --prior-report <上一轮报告>`）。它只外发去掉密钥类文件的被审提交，在仓库之外的只读副本里运行，跑完核对副本、仓库工作区和 PR 最终提交都没变；结论由代码按发现判定，并渲染成第 7 节的报告格式；执行失败、超时、拿不到实际模型时不出可登记的报告。模型同样按 R9 选；跨厂商比不出强弱时，把依据和不确定性写进 `--model-reason`，它会进报告。
-3. 登记。加 `--register --summary "<一句话>"` 直接登记，登记前再核对一次最终提交仍是被审的那个；或者照它输出的 `review.mjs` 命令手动登记。报告同样由主对话打开核对（R9），PR 里的复审摘要写明是外部复审、实际模型和局限。
+1. 配置。项目在主干的配置里把执行器名加进 `modules.review.externalExecutors`（如 `["codex"]`），把 `external:codex` 这样的真实名字加进 `modules.review.reviewers`；两处都是判定策略，合入主干后才生效。套件默认名单不加，改它要用户同意（R2）。本机在仓库之外写 `~/.engineering-kit/external-review.json`，记执行器的命令、默认模型和推理强度，例如 `{"executors":{"codex":{"type":"codex","command":["codex"],"defaultModel":"gpt-6.1-sol","defaultEffort":"medium"}}}`。命令不经 shell 启动：Windows 上要写可执行文件（如 `codex.exe` 的完整路径），不能写 `.cmd`。密钥和登录留在执行器自己那里，不写进任何配置；执行器只拿到系统运行所需的环境变量和本机配置里显式写的 `env`。
+2. 调用。在被审分支上运行 `node scripts/engineering/gate/external-review.mjs run --executor codex --kind code --round first --pr <编号> --model <模型> --model-chosen-by user|agent --model-reason "<依据>"`。一致性审用 `--kind consistency`；修后复核用 `--round followup --prior-report <上一轮报告>`；`pre-push` 流程不带 `--pr`，审的是本地 HEAD；不写 `--model` 时用本机配置的默认模型，选择者记为 `config`。它只外发去掉密钥类文件的被审提交，在仓库之外的只读副本里运行，跑完核对副本、仓库工作区和最终提交都没变；结论由代码按发现判定，并渲染成第 7 节的报告格式；执行失败、超时、拿不到实际模型时不出可登记的报告。模型同样按 R9 选；跨厂商比不出强弱时，把依据和不确定性写进 `--model-reason`，它会进报告。
+3. 登记。`pr` 流程等 CI 全部通过后再登记：运行 `node scripts/engineering/gate/external-review.mjs register --run-dir <运行目录> --pr <编号> --summary "<一句话>"`（运行目录和这条命令都在上一步的输出里），不必重跑模型；CI 已经全过时，上一步也可以直接加 `--register --summary "<一句话>"`。两种写法登记前都再核对一次最终提交仍是被审的那个；`pre-push` 流程另外要求本地 HEAD 是被审提交、工作区没有未提交的改动。报告同样由主对话打开核对（R9），PR 里的复审摘要写明是外部复审、实际模型和局限。
 
-外部执行器不得带联网工具（网页抓取、联网搜索）：被审代码会经它们发给第三方。内置的 Codex 执行器已关闭联网搜索、子代理、记忆、钩子和外部应用，并用只读沙箱；自己写的协议执行器要做到同样的限制。
+外部执行器不得带联网工具（网页抓取、联网搜索）：被审代码会经它们发给第三方。内置的 Codex 执行器已关闭联网搜索、子代理、记忆、钩子和外部应用，不给执行工具，只依据提示里的 diff 审：它的只读沙箱只挡写入、能读全盘，给了工具，被审内容里的提示注入就能让它去读本机的密钥。自己写的协议执行器要做到同样的限制。
 
 ## 2. 任务书
 

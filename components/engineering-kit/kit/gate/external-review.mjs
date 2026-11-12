@@ -2,7 +2,8 @@
 // 业务含义：复审不必都用宿主 agent 的模型；任何厂商的模型都能接，只要它的执行器遵守本文件定义的协议。
 // 协议（版本 1）：执行器从标准输入读一份任务 JSON（REQUEST），向标准输出写一份结果 JSON（RESULT），日志写标准错误。
 // 调用器（本文件的 run）负责执行器不可信时也要守住的部分：
-//   - 被审内容只取被审提交（git 对象），排除密钥类文件，放到仓库之外的临时只读副本里；记下输入 SHA 与输入哈希。
+//   - 被审内容只取被审提交（git 对象），按文件名排除密钥类文件（由 git 匹配，diff 与副本同一口径），放到仓库之外的临时只读副本里；
+//     记下输入 SHA 与输入哈希。执行器只拿到环境变量允许清单（ENV_ALLOW）里的变量。
 //   - 硬超时，超时或取消时结束整个进程树；原始输出、任务、结果全部落盘到仓库之外。
 //   - 返回后核对：副本和仓库工作区没有被改动、PR 最终提交（或本地 HEAD）没有变化；变了就作废。
 //   - 退出码 0、JSON 合法、发现为空都不单独算通过；结论由代码按 verdict 与发现定出并渲染成 review.mjs 认可的报告，
@@ -16,14 +17,17 @@
 //         [--pr <编号>] [--base <修订>] [--head <提交>] [--model <模型> --model-chosen-by user|agent|config --model-reason "<依据>"]
 //         [--effort low|medium|high|...] [--timeout-sec 900] [--max-turns 40] [--context <文件>] [--prior-report <文件>] [--out-dir <仓库外目录>]
 //         [--register --summary "<一句话>"]
+//       node scripts/engineering/gate/external-review.mjs register --run-dir <运行目录> [--pr <编号>] --summary "<一句话>"
+//         （补登：pr 流程 CI 全部通过后再登记，不必重跑模型；同样核对最终提交仍是被审的那个）
 //       node scripts/engineering/gate/external-review.mjs executor codex   （执行器本身：标准输入任务 JSON → 标准输出结果 JSON）
+// limits.maxTurns 交给执行器自己执行；内置 Codex 执行器不给工具、只有一轮回答，没有轮次参数，只靠硬超时。
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { baseRevision, CONFIG_FILE, defaultGh, EMPTY_TREE, git, isMain, loadConfig, readPr, repoRoot } from './lib.mjs';
+import { baseRevision, defaultGh, EMPTY_TREE, git, isMain, loadConfig, readPr, repoRoot } from './lib.mjs';
 import { recordReview, reportVerdict } from './review.mjs';
 
 /** 协议版本：任务与结果 JSON 的 version 字段。 */
@@ -55,8 +59,18 @@ export const SENSITIVE_GLOBS = [
  */
 export const AGENT_CONFIG_GLOBS = ['.claude/**', '.codex/**', '.codebuddy/**', '**/CODEBUDDY.md', '.mcp.json', '.cursor/**', '.vscode/**'];
 
-/** 不传给执行器的环境变量：推送、发布用的令牌，复审用不到。 */
-const STRIPPED_ENV = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'NPM_TOKEN', 'NODE_AUTH_TOKEN'];
+/**
+ * 传给执行器的环境变量只取这份允许清单（不分大小写），外加本机配置里显式写的 env：
+ * 系统运行所需的路径与区域设置、用户目录、临时目录、代理与证书、Codex 的配置目录。
+ * 数据库地址、各家 API 密钥、推送令牌这类变量一律不传：被审内容里的提示注入可能让模型去读环境变量。
+ */
+export const ENV_ALLOW = [
+  'PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'OS', 'PROCESSOR_ARCHITECTURE', 'NUMBER_OF_PROCESSORS',
+  'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)',
+  'USER', 'USERNAME', 'LOGNAME', 'SHELL', 'TERM', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TEMP', 'TMP', 'TMPDIR',
+  'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS', 'CODEX_HOME',
+];
 
 /** 默认限制：硬超时、最多轮次、diff 与只读副本的大小上限。 */
 export const DEFAULT_LIMITS = { timeoutMs: 15 * 60 * 1000, maxTurns: 40, maxDiffBytes: 512 * 1024, maxCopyBytes: 200 * 1024 * 1024 };
@@ -98,10 +112,28 @@ const SEVERITY_NAMES = { high: '高级', medium: '中级', low: '低级' };
 
 // ───────────────────────────── 配置 ─────────────────────────────
 
-/** 路径 p 是否在目录 dir 之内（含 dir 本身）。用来拒绝把本机配置、运行目录放进仓库。 */
-function inside(dir, p) {
-  const rel = path.relative(path.resolve(dir), path.resolve(p));
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+/** 解析符号链接与目录连接后的真实路径；路径还不存在时，解析最近一层存在的上级目录再接上余下部分。 */
+function realish(p) {
+  let cur = path.resolve(p);
+  const rest = [];
+  while (!fs.existsSync(cur)) {
+    const up = path.dirname(cur);
+    if (up === cur) break;
+    rest.unshift(path.basename(cur));
+    cur = up;
+  }
+  try {
+    cur = fs.realpathSync.native(cur);
+  } catch {
+    // 解析不了就按原路径比较
+  }
+  return path.join(cur, ...rest);
+}
+
+/** 路径 p 是否在目录 dir 之内（含 dir 本身），两边都先解析真实路径。用来拒绝把本机配置、运行目录放进仓库，以及挡住写出副本目录的文件名。 */
+export function inside(dir, p) {
+  const rel = path.relative(realish(dir), realish(p));
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }
 
 /** 本机配置文件的位置：环境变量 EK_EXTERNAL_REVIEW_CONFIG，否则 ~/.engineering-kit/external-review.json。 */
@@ -141,31 +173,34 @@ function checkExecutorConfig(name, ex) {
 }
 
 /**
- * 基准提交上的外部复审策略：允许的执行器名（modules.review.externalExecutors，扁平结构为 externalExecutors）
- * 和追加的排除 glob（modules.review.externalExclude）。和 review.mjs 的判定策略一样不由被审分支决定；
- * 基准提交上没有配置文件（首次安装）时取工作区的值。返回 { executors, exclude, baseRev }。
+ * 外部复审策略，取自 loadConfig（与 review.mjs 同一口径，判定策略取基准提交上的配置）：
+ * 允许的执行器名只认基准提交上的 externalExecutors；追加排除的 glob 取基准与工作区 externalExclude 的并集
+ * （排除只会让外发变少，分支新加的排除当轮生效，分支删掉的排除不生效）。返回 { executors, exclude, baseRev, config }。
  */
 export function projectPolicy(root) {
   const config = loadConfig(root);
   const { rev } = baseRevision(root, config.base);
-  let raw = null;
-  if (rev !== EMPTY_TREE && git(root, ['cat-file', '-e', `${rev}:${CONFIG_FILE}`]).ok) {
-    raw = JSON.parse(git(root, ['show', `${rev}:${CONFIG_FILE}`]).out);
-  } else {
-    raw = JSON.parse(fs.readFileSync(path.join(root, CONFIG_FILE), 'utf8'));
-  }
-  const review = raw.profile === undefined ? raw : (raw.modules?.review ?? {});
-  const executors = Array.isArray(review.externalExecutors) ? review.externalExecutors.filter((x) => typeof x === 'string') : [];
-  const exclude = Array.isArray(review.externalExclude) ? review.externalExclude.filter((x) => typeof x === 'string') : [];
-  return { executors, exclude, baseRev: rev, config };
+  const exclude = [...new Set([...config.externalExclude, ...(config.worktree?.externalExclude ?? [])])];
+  return { executors: config.externalExecutors, exclude, baseRev: rev, config };
 }
 
 // ───────────────────────────── 组包 ─────────────────────────────
 
-/** 斜杠路径是否匹配任一 glob；顶层文件也匹配 **\/ 开头的模式。 */
-function matches(rel, globs) {
-  return globs.some((g) => path.matchesGlob(rel, g) || (g.startsWith('**/') && path.matchesGlob(rel, g.slice(3))));
+/**
+ * 排除一组 glob 的 git pathspec。匹配一律交给 git（:(glob) 语义，`**` 也匹配以点开头的目录）：
+ * Node 的 path.matchesGlob 不匹配点目录（.ssh/id_rsa 漏网），diff 和只读副本用同一口径才不会一边排除、一边漏掉。
+ */
+function excludeSpec(globs) {
+  return ['--', '.', ...globs.flatMap((g) => [`:(exclude,glob)${g}`, ...(g.startsWith('**/') ? [`:(exclude,glob)${g.slice(3)}`] : [])])];
 }
+
+/** 两个修订之间、按 pathspec 过滤后的文件名（不认改名，改名按删加两个路径算）。 */
+function namesBetween(root, from, to, spec, what) {
+  return gitOk(root, ['diff', '--name-only', '-z', '--no-renames', from, to, ...spec], what).split('\0').filter(Boolean);
+}
+
+/** 写进只读副本前的路径核对：不含反斜杠、冒号、NUL，没有空段、`.`、`..`，不是 Windows 保留名，段尾不是点或空格。 */
+const UNSAFE_PATH = /[\\:\0]|(^|\/)\.{0,2}(\/|$)|(^|\/)(con|prn|aux|nul|com\d|lpt\d)(\.[^/]*)?(\/|$)|[. ](\/|$)/i;
 
 /** 运行 git，失败时抛错。 */
 function gitOk(root, args, what) {
@@ -182,10 +217,10 @@ export function buildRequest({ root, baseSha, headSha, kind, round, model, limit
   for (const [label, rev] of [['基准', baseSha], ['最终提交', headSha]]) {
     if (rev !== EMPTY_TREE && !git(root, ['cat-file', '-e', `${rev}^{commit}`]).ok) throw new Error(`${label} ${rev} 不在本地，请先 git fetch`);
   }
-  const sensitive = [...SENSITIVE_GLOBS, ...extraExclude];
-  const names = gitOk(root, ['diff', '--name-only', '-z', '--no-renames', baseSha, headSha], '读取改动文件').split('\0').filter(Boolean);
-  const excluded = names.filter((f) => matches(f, sensitive));
-  const pathspec = ['--', '.', ...sensitive.map((g) => `:(exclude,glob)${g}`), ...sensitive.filter((g) => g.startsWith('**/')).map((g) => `:(exclude,glob)${g.slice(3)}`)];
+  const pathspec = excludeSpec([...SENSITIVE_GLOBS, ...extraExclude]);
+  const names = namesBetween(root, baseSha, headSha, [], '读取改动文件');
+  const kept = new Set(namesBetween(root, baseSha, headSha, pathspec, '筛选改动文件'));
+  const excluded = names.filter((f) => !kept.has(f));
   const diff = gitOk(root, ['diff', '--no-color', '--no-ext-diff', '-M', baseSha, headSha, ...pathspec], '生成 diff');
   if (Buffer.byteLength(diff) > limits.maxDiffBytes) {
     throw new Error(`diff 有 ${Buffer.byteLength(diff)} 字节，超过上限 ${limits.maxDiffBytes}；拆小改动，或用 --max-diff-kb 放宽（不截断，截断的输入审不完整）`);
@@ -223,11 +258,12 @@ export function reviewInstructions(kind, round) {
 }
 
 /**
- * 把被审提交展开成仓库之外的只读副本（只取 git 对象，不碰仓库工作区；去掉敏感文件和 agent 设置）。
- * 子模块与符号链接不展开，记进返回的 skipped。总大小超过上限时抛错。
+ * 把被审提交展开成仓库之外的只读副本（只取 git 对象，不碰仓库工作区；去掉敏感文件和 agent 设置，口径同 diff，由 git 匹配）。
+ * 子模块与符号链接不展开，记进返回的 skipped；路径不安全的条目（见 UNSAFE_PATH，例如在别的系统上造的含反斜杠的名字，
+ * 在 Windows 上会写出副本目录）不写，记进 unsafe。总大小超过上限时抛错。
  */
 export function materialize(root, headSha, dir, { exclude = [], maxBytes = DEFAULT_LIMITS.maxCopyBytes } = {}) {
-  const drop = [...SENSITIVE_GLOBS, ...AGENT_CONFIG_GLOBS, ...exclude];
+  const keep = new Set(namesBetween(root, EMPTY_TREE, headSha, excludeSpec([...SENSITIVE_GLOBS, ...AGENT_CONFIG_GLOBS, ...exclude]), '筛选被审提交的文件'));
   const entries = gitOk(root, ['ls-tree', '-r', '-z', '-l', '--full-tree', headSha], '列出被审提交的文件')
     .split('\0').filter(Boolean).map((line) => {
       const tab = line.indexOf('\t');
@@ -235,12 +271,18 @@ export function materialize(root, headSha, dir, { exclude = [], maxBytes = DEFAU
       return { mode, type, oid, size: Number(size) || 0, file: line.slice(tab + 1) };
     });
   const skipped = [];
+  const unsafe = [];
   const blobs = entries.filter((e) => {
     if (e.type !== 'blob' || e.mode === '120000') {
       skipped.push(e.file);
       return false;
     }
-    return !matches(e.file, drop);
+    if (!keep.has(e.file)) return false;
+    if (UNSAFE_PATH.test(e.file) || !inside(dir, path.join(dir, ...e.file.split('/')))) {
+      unsafe.push(e.file);
+      return false;
+    }
+    return true;
   });
   const total = blobs.reduce((n, e) => n + e.size, 0);
   if (total > maxBytes) throw new Error(`被审提交有 ${total} 字节的文件，超过只读副本上限 ${maxBytes}`);
@@ -261,7 +303,7 @@ export function materialize(root, headSha, dir, { exclude = [], maxBytes = DEFAU
       fs.chmodSync(target, 0o444);
     }
   }
-  return { files: blobs.length, bytes: total, skipped };
+  return { files: blobs.length, bytes: total, skipped, unsafe };
 }
 
 /** 目录内容的哈希：所有文件（含新建的）的相对路径和内容。复审前后各算一次，不同说明副本被改过。 */
@@ -282,11 +324,18 @@ export function dirHash(dir) {
   return h.digest('hex');
 }
 
-/** 仓库工作区状态的指纹：HEAD 与 git status（含未跟踪文件）。复审前后不同说明有东西写进了仓库。 */
+/**
+ * 仓库状态的指纹：HEAD、git status（含未跟踪文件），以及 git 钩子目录和 git 配置的内容。复审前后不同说明有东西写进了仓库。
+ * 被 .gitignore 忽略的文件不在内（逐个哈希代价太大），这一点核对不到。
+ */
 export function repoState(root) {
   const head = git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).out.trim();
   const status = gitOk(root, ['status', '--porcelain=v1', '-z', '-uall'], '读取工作区状态');
-  return { head, clean: status === '', hash: sha256(`${head}\0${status}`) };
+  const gitPath = (p) => path.resolve(root, git(root, ['rev-parse', '--git-path', p]).out.trim());
+  const hooks = gitPath('hooks');
+  const config = gitPath('config');
+  const extra = `${fs.existsSync(hooks) ? dirHash(hooks) : '-'}\0${fs.existsSync(config) ? sha256(fs.readFileSync(config)) : '-'}`;
+  return { head, clean: status === '', hash: sha256(`${head}\0${status}\0${extra}`) };
 }
 
 /** 删除只读副本：先恢复可写再删（Windows 上只读文件删不掉）。 */
@@ -324,20 +373,26 @@ export function killTree(child) {
   }
 }
 
-/** 传给执行器的环境变量：当前环境去掉推送与发布令牌，加上本机配置的 env 和 extra。 */
-function executorEnv(localEnv = {}, extra = {}) {
-  const env = { ...process.env, ...localEnv, ...extra };
-  for (const k of STRIPPED_ENV) delete env[k];
-  return env;
+/** 传给执行器的环境变量：当前环境里在 ENV_ALLOW 之内的（含小写写法），加上本机配置的 env 和调用器给的 extra。 */
+export function executorEnv(localEnv = {}, extra = {}, base = process.env) {
+  const allow = new Set(ENV_ALLOW);
+  const env = {};
+  for (const [k, v] of Object.entries(base)) if (allow.has(k.toUpperCase())) env[k] = v;
+  return { ...env, ...localEnv, ...extra };
 }
 
 /**
  * 运行一个子进程：标准输入写 input，收集标准输出与标准错误（各有上限），硬超时或 signal 取消时结束整个进程树。
- * 返回 { exitCode, timedOut, cancelled, stdout, stderr, durationMs, spawnError }。不抛错。
+ * 结束进程树后最多再等 graceMs：脱离进程树的后代仍握着输出管道、迟迟不关时，断开管道直接返回，不挂住调用器。
+ * 开始前 signal 已取消的不启动。返回 { exitCode, timedOut, cancelled, stdout, stderr, durationMs, spawnError }。不抛错。
  */
-export function runProcess({ command, args = [], cwd, env, input = '', timeoutMs, signal, maxOutput = 64 * 1024 * 1024 }) {
+export function runProcess({ command, args = [], cwd, env, input = '', timeoutMs, signal, maxOutput = 64 * 1024 * 1024, graceMs = 5000 }) {
   return new Promise((resolve) => {
     const started = Date.now();
+    if (signal?.aborted) {
+      resolve({ exitCode: null, timedOut: false, cancelled: true, stdout: '', stderr: '', durationMs: 0, spawnError: null });
+      return;
+    }
     let child;
     try {
       child = spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32', windowsHide: true });
@@ -364,17 +419,13 @@ export function runProcess({ command, args = [], cwd, env, input = '', timeoutMs
     child.on('error', (e) => {
       spawnError = e.message;
     });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killTree(child);
-    }, timeoutMs);
-    const onAbort = () => {
-      cancelled = true;
-      killTree(child);
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
-    child.on('close', (code) => {
+    let done = false;
+    let grace = null;
+    const finish = (code) => {
+      if (done) return;
+      done = true;
       clearTimeout(timer);
+      clearTimeout(grace);
       signal?.removeEventListener('abort', onAbort);
       resolve({
         exitCode: code,
@@ -385,7 +436,25 @@ export function runProcess({ command, args = [], cwd, env, input = '', timeoutMs
         durationMs: Date.now() - started,
         spawnError,
       });
-    });
+    };
+    const stop = () => {
+      killTree(child);
+      grace = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish(child.exitCode);
+      }, graceMs);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      stop();
+    }, timeoutMs);
+    const onAbort = () => {
+      cancelled = true;
+      stop();
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    child.on('close', (code) => finish(code));
     child.stdin.end(input);
   });
 }
@@ -421,17 +490,24 @@ export function validateResult(res) {
   }
   const pv = res.provenance;
   if (!isObj(pv) || typeof pv.executor !== 'string' || !pv.executor) p.push('provenance.executor 必须是非空字符串');
-  else if (pv.actualModel !== null && pv.actualModel !== undefined && typeof pv.actualModel !== 'string') p.push('provenance.actualModel 只能是字符串或 null');
+  else {
+    if (pv.actualModel !== null && pv.actualModel !== undefined && typeof pv.actualModel !== 'string') p.push('provenance.actualModel 只能是字符串或 null');
+    if (pv.modelsUsed !== undefined && (!Array.isArray(pv.modelsUsed) || !pv.modelsUsed.every((m) => typeof m === 'string'))) p.push('provenance.modelsUsed 只能是字符串数组');
+    if (pv.actualModelSource !== undefined && pv.actualModelSource !== null && typeof pv.actualModelSource !== 'string') p.push('provenance.actualModelSource 只能是字符串或 null');
+  }
   if (res.usage !== undefined && res.usage !== null && !isObj(res.usage)) p.push('usage 必须是对象或 null');
   return p;
 }
 
-/** 实际模型与请求模型是否相符：相同，或实际模型是请求模型加版本后缀（如 deepseek-v4-pro-0901）。 */
+/**
+ * 实际模型与请求模型是否相符：相同，或实际模型是请求模型加纯数字的版本或日期后缀（如 -0901、-2026-09-01、-20260901）。
+ * 其他后缀不算（请求 gpt-5，实际 gpt-5-mini 是另一个更弱的模型）。
+ */
 export function modelMatches(requested, actual) {
   if (!requested || !actual) return false;
   const a = actual.toLowerCase();
   const r = requested.toLowerCase();
-  return a === r || a.startsWith(`${r}-`);
+  return a === r || (a.startsWith(`${r}-`) && /^-\d+(-\d+)*$/.test(a.slice(r.length)));
 }
 
 /**
@@ -492,9 +568,9 @@ export function renderReport({ request, result, assessment, meta, keyword = '结
     `- 请求模型：${request.model.id}（来源 ${request.model.source}，由 ${request.model.chosenBy} 选择${request.model.reason ? `；依据：${oneLine(request.model.reason)}` : ''}）`,
     `- 实际模型：${oneLine(result.provenance.actualModel)}${result.provenance.actualModelSource === 'executor-settings' ? '（来源：执行器记录的生效设置，执行器不提供服务端回传的模型名）' : ''}${request.model.effort ? `，推理强度 ${request.model.effort}` : ''}`,
     `- 执行：${STATUS_NAMES[result.execution.status]}，耗时 ${Math.round(meta.durationMs / 1000)} 秒；只读副本与仓库工作区未改动，最终提交未变化`,
-    `- 用量：${meta.usageLine}`,
+    `- 用量：${oneLine(meta.usageLine)}`,
   ];
-  if (request.target.excludedFiles.length > 0) lines.push(`- 未外发的敏感文件：${request.target.excludedFiles.join('、')}（未经本次复审）`);
+  if (request.target.excludedFiles.length > 0) lines.push(`- 未外发的敏感文件：${oneLine(request.target.excludedFiles.join('、'))}（未经本次复审）`);
   lines.push('', '## 发现', '');
   for (const sev of SEVERITIES) {
     const list = r.findings.filter((f) => f.severity === sev);
@@ -506,8 +582,9 @@ export function renderReport({ request, result, assessment, meta, keyword = '结
     if (list.length === 0) lines.push('无', '');
   }
   lines.push('## 复审说明（复审者原文）', '', quoted(r.report), '');
-  const limits = [...r.limitations.map(oneLine), ...assessment.notes];
-  lines.push('## 局限', '', ...(limits.length > 0 ? limits.map((l) => `- ${l}`) : ['- 无']), '');
+  // 局限里有执行器写的文字（模型的 limitations、执行器报的模型名），每条都压成一行并加“｜”，不能冒充结论行
+  const limits = [...r.limitations, ...assessment.notes].map(oneLine);
+  lines.push('## 局限', '', ...(limits.length > 0 ? limits.map((l) => `- ｜${l}`) : ['- 无']), '');
   const serious = r.findings.filter((f) => f.severity !== 'low').length;
   const why = verdict === 'pass'
     ? `没有高、中级问题（低级 ${r.findings.length} 个），执行器结论为通过，完整性核对全部满足。`
@@ -619,12 +696,9 @@ export async function runExternalReview(opts) {
   const headBefore = currentHead(root, pr, gh);
   const headSha = opts.head ? gitOk(root, ['rev-parse', '--verify', `${opts.head}^{commit}`], '解析 --head').trim() : headBefore;
   if (headSha !== headBefore) throw new Error(`--head ${headSha.slice(0, 12)} 不是${pr !== undefined ? ` PR #${pr} ` : '本地 HEAD '}的最终提交 ${headBefore.slice(0, 12)}`);
-  const baseSha = opts.base
-    ? gitOk(root, ['rev-parse', '--verify', `${opts.base}^{commit}`], '解析 --base').trim()
-    : (() => {
-      const mb = git(root, ['merge-base', policy.baseRev, headSha]);
-      return mb.ok ? mb.out.trim() : policy.baseRev;
-    })();
+  const mb = git(root, ['merge-base', policy.baseRev, headSha]);
+  const forkPoint = mb.ok ? mb.out.trim() : policy.baseRev;
+  const baseSha = opts.base ? gitOk(root, ['rev-parse', '--verify', `${opts.base}^{commit}`], '解析 --base').trim() : forkPoint;
 
   const { request } = buildRequest({ root, baseSha, headSha, kind, round, model, limits, extraExclude: policy.exclude, contextText: opts.contextText ?? null, priorReport: opts.priorReport ?? null });
   const requestText = JSON.stringify(request);
@@ -655,7 +729,10 @@ export async function runExternalReview(opts) {
   removeCopy(copy);
 
   let { result, problems } = parseResult(proc.stdout);
-  if (proc.spawnError) problems = [`执行器启动失败：${proc.spawnError}`, ...problems];
+  if (proc.spawnError) {
+    const hint = /ENOENT|EINVAL/.test(proc.spawnError) ? '（命令不经 shell 启动：Windows 上 command 写可执行文件的完整路径，如 codex.exe，不能写 .cmd 或 .ps1）' : '';
+    problems = [`执行器启动失败：${proc.spawnError}${hint}`, ...problems];
+  }
   if (proc.timedOut || proc.cancelled) {
     // 调用器的硬超时或取消优先：不管执行器写了什么，这次都不算完成
     const status = proc.timedOut ? 'timeout' : 'cancelled';
@@ -664,7 +741,11 @@ export async function runExternalReview(opts) {
   }
   const integrity = { copyUnchanged, repoUnchanged, headUnchanged: headNow === headSha, headNow, exitCode: proc.exitCode };
   const assessment = assess({ result, problems, request, integrity });
-  const meta = { reviewer, inputHash, durationMs: proc.durationMs, usageLine: usageLine(result?.usage) };
+  if (copied.unsafe.length > 0) assessment.notes.push(`只读副本里没写入 ${copied.unsafe.length} 个路径不安全的文件（${copied.unsafe.join('、')}），复审者只能从 diff 看到它们`);
+  if (round === 'first' && baseSha !== forkPoint) {
+    assessment.notes.push(`首轮用 --base 收窄了被审范围：基准是 ${baseSha.slice(0, 12)}，不是与主干的分叉点 ${forkPoint.slice(0, 12)}；登记仍绑定整个最终提交，范围之外的改动没有经过这次复审`);
+  }
+  const meta = { reviewer, inputHash, durationMs: proc.durationMs, usageLine: usageLine(result?.usage), pr: pr === undefined ? null : String(pr) };
   fs.writeFileSync(path.join(runDir, 'assessment.json'), `${JSON.stringify({ assessment, integrity, copied, meta, provenance: result?.provenance ?? null, usage: result?.usage ?? null }, null, 2)}\n`);
 
   const base = { runDir, result, assessment, reportPath: null, registration: null };
@@ -679,32 +760,76 @@ export async function runExternalReview(opts) {
   const reportPath = path.join(runDir, 'report.md');
   fs.writeFileSync(reportPath, report);
   const lines = [`外部${KIND_NAMES[kind]}完成：${assessment.verdict === 'pass' ? '通过' : '不通过'}（复审者 ${reviewer}，实际模型 ${result.provenance.actualModel}，被审 ${headSha.slice(0, 12)}）`, `报告：${reportPath}`];
+  const later = registerCommand(runDir, pr);
   if (!opts.register) {
-    lines.push(`登记：node scripts/engineering/gate/review.mjs ${assessment.verdict} --kind ${kind} --reviewer ${reviewer} --report "${reportPath}" --summary "<一句话>"${pr !== undefined ? ` --pr ${pr}` : ''}（或本命令加 --register，登记时再核对一次最终提交）`);
+    lines.push(`登记（${pr !== undefined ? 'pr 流程等 CI 全部通过后再登记；' : ''}登记时再核对一次最终提交）：${later}`);
     return { ...base, reportPath, ok: true, message: lines.join('\n') };
   }
-  // 登记：pr 流程核对 PR 最终提交仍是被审的那个；pre-push 流程要求本地 HEAD 是被审提交且工作区干净（登记绑定工作区内容）
+  const registration = registerReport({ root, headSha, kind, verdict: assessment.verdict, reviewer, reportPath, summary: opts.summary || `外部复审（${result.provenance.actualModel}）`, pr, gh });
+  lines.push(registration.message);
+  if (!registration.ok) lines.push(`没有登记成功；报告已留在运行目录，条件满足后用这条命令补登，不必重跑模型：${later}`);
+  return { ...base, reportPath, registration, ok: registration.ok, message: lines.join('\n') };
+}
+
+/** 补登命令：读运行目录里的任务、判定和报告再登记。 */
+function registerCommand(runDir, pr) {
+  return `node scripts/engineering/gate/external-review.mjs register --run-dir "${runDir}"${pr !== undefined ? ` --pr ${pr}` : ''} --summary "<一句话>"`;
+}
+
+/**
+ * 登记一份外部复审报告，绑定复审者实际看过的最终提交 headSha：
+ * pr 流程用 guardedGh，PR 最终提交不是 headSha 就拒绝；pre-push 流程要求本地 HEAD 是 headSha 且工作区干净（登记绑定工作区内容）。
+ * recordReview 抛错（gh 失败、最终提交已变）时不往外抛，返回 { ok: false, message }。
+ */
+export function registerReport({ root, headSha, kind, verdict, reviewer, reportPath, summary, pr, gh = defaultGh }) {
   if (pr === undefined) {
     const st = repoState(root);
     if (st.head !== headSha || !st.clean) {
-      return { ...base, reportPath, ok: false, message: `${lines.join('\n')}\n不登记：pre-push 流程登记绑定当前工作区，须本地 HEAD 是被审提交 ${headSha.slice(0, 12)} 且工作区没有未提交的改动` };
+      return { ok: false, message: `不登记：pre-push 流程登记绑定当前工作区，须本地 HEAD 是被审提交 ${headSha.slice(0, 12)} 且工作区没有未提交的改动（现在 HEAD ${st.head.slice(0, 12)}${st.clean ? '' : '，有未提交的改动'}）` };
     }
   }
-  const registration = recordReview({
-    root, verdict: assessment.verdict, reviewer, reportPath, summary: opts.summary || `外部复审（${result.provenance.actualModel}）`,
-    pr: pr === undefined ? undefined : String(pr), kind, gh: guardedGh(gh, headSha),
+  try {
+    return recordReview({ root, verdict, reviewer, reportPath, summary, pr: pr === undefined ? undefined : String(pr), kind, gh: guardedGh(gh, headSha) });
+  } catch (e) {
+    return { ok: false, message: `登记出错：${e.message}` };
+  }
+}
+
+/**
+ * 补登：从一次外部复审的运行目录读回任务（被审提交、审查种类）、判定和报告后登记，不重跑模型。
+ * 运行目录必须在仓库之外，判定必须是可登记的；--pr 不写时用运行时记下的 PR 编号。返回 { ok, message, registration? }。
+ */
+export function registerRun({ root, runDir, pr, summary, gh = defaultGh }) {
+  const dir = path.resolve(runDir);
+  if (inside(root, dir)) return { ok: false, message: `运行目录 ${dir} 在仓库里，不是外部复审的运行目录` };
+  const read = (f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+  let request;
+  let saved;
+  try {
+    request = read('request.json');
+    saved = read('assessment.json');
+  } catch (e) {
+    return { ok: false, message: `读不到运行目录里的 request.json 或 assessment.json：${e.message}` };
+  }
+  const reportPath = path.join(dir, 'report.md');
+  if (!saved.assessment?.registrable || !fs.existsSync(reportPath)) return { ok: false, message: '这次外部复审没有产生可登记的报告，不能补登' };
+  const usePr = pr ?? saved.meta?.pr ?? undefined;
+  const registration = registerReport({
+    root, headSha: request.target.headSha, kind: request.review.kind, verdict: saved.assessment.verdict, reviewer: saved.meta.reviewer,
+    reportPath, summary: summary || `外部复审（${saved.provenance?.actualModel ?? '未知模型'}）`, pr: usePr === null ? undefined : usePr, gh,
   });
-  lines.push(registration.message);
-  return { ...base, reportPath, registration, ok: registration.ok, message: lines.join('\n') };
+  return { ...registration, message: registration.message };
 }
 
 // ───────────────────────────── 内置执行器：Codex ─────────────────────────────
 
 /**
  * Codex 复审时关闭的功能：会调用其他模型的（multi_agent 子代理）、会带入本机私有材料的（memories、goals）、
- * 会运行外部代码的（hooks、apps、plugin_discovery_prefetch）、与复审无关的（image_generation）。
+ * 会运行外部代码的（hooks、apps、plugin_discovery_prefetch）、与复审无关的（image_generation），
+ * 以及执行工具的宿主（code_mode_host）：Codex 的只读沙箱只挡写入、能读全盘，被审内容里的提示注入可以让模型去读本机的密钥，
+ * 所以复审时不给工具，只依据提示里的 diff 审（codex-cli 0.167 实测：关掉它后所有工具调用失败即关闭）。
  */
-export const CODEX_DISABLED_FEATURES = ['apps', 'goals', 'hooks', 'image_generation', 'memories', 'multi_agent', 'plugin_discovery_prefetch'];
+export const CODEX_DISABLED_FEATURES = ['apps', 'code_mode_host', 'goals', 'hooks', 'image_generation', 'memories', 'multi_agent', 'plugin_discovery_prefetch'];
 
 /** 推理强度只认这些词（拼进 Codex 的 -c 配置，不能带任意字符）。 */
 export const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -860,7 +985,12 @@ export function parseCodex(stdout, rollout, request) {
       if (isObj(f) && f.line === null) delete f.line;
     }
   }
-  if (Array.isArray(review.limitations)) for (const t of toolErrors) review.limitations.push(`执行器报告的工具错误：${t}`);
+  if (Array.isArray(review.limitations)) {
+    // 关掉 code_mode_host 后每次都有这条错误：是按设计不给工具，换成固定说明；其他工具错误原样记下
+    const byDesign = toolErrors.filter((t) => /code-mode host is disabled/i.test(t));
+    if (byDesign.length > 0) review.limitations.push('执行器按设计不给工具（关闭了 code_mode_host），复审只依据提示里的 diff，没有查看仓库里的其他文件');
+    for (const t of toolErrors.filter((x) => !byDesign.includes(x))) review.limitations.push(`执行器报告的工具错误：${t}`);
+  }
   return { status: 'completed', error: null, provenance, usage, review };
 }
 
@@ -951,16 +1081,33 @@ if (isMain(import.meta.url)) {
     }));
     process.stdout.write(`${JSON.stringify(res)}\n`);
     process.exit(res.execution.status === 'completed' ? 0 : 1);
+  } else if (cmd === 'register') {
+    const a = parseArgs([sub, ...rest].filter((x) => x !== undefined));
+    try {
+      if (!a['run-dir']) throw new Error('register 须带 --run-dir <运行目录>');
+      const res = registerRun({ root: repoRoot(), runDir: a['run-dir'], pr: a.pr, summary: a.summary });
+      console.log(res.message);
+      process.exit(res.ok ? 0 : 1);
+    } catch (e) {
+      console.error(`外部复审登记出错：${e.message}`);
+      process.exit(1);
+    }
   } else if (cmd === 'run') {
     const a = parseArgs([sub, ...rest].filter((x) => x !== undefined));
     const ac = new AbortController();
     for (const s of ['SIGINT', 'SIGTERM']) process.on(s, () => ac.abort());
     try {
       const read = (f) => (f ? fs.readFileSync(f, 'utf8') : null);
+      // 数值参数必须是正数：NaN 会让上限静默失效（diff 上限）或立刻超时
+      const num = (k) => {
+        const v = Number(a[k]);
+        if (!Number.isFinite(v) || v <= 0) throw new Error(`--${k} 必须是正数（当前 ${JSON.stringify(a[k])}）`);
+        return v;
+      };
       const limits = {};
-      if (a['timeout-sec']) limits.timeoutMs = Number(a['timeout-sec']) * 1000;
-      if (a['max-turns']) limits.maxTurns = Number(a['max-turns']);
-      if (a['max-diff-kb']) limits.maxDiffBytes = Number(a['max-diff-kb']) * 1024;
+      if (a['timeout-sec'] !== undefined) limits.timeoutMs = num('timeout-sec') * 1000;
+      if (a['max-turns'] !== undefined) limits.maxTurns = Math.floor(num('max-turns'));
+      if (a['max-diff-kb'] !== undefined) limits.maxDiffBytes = num('max-diff-kb') * 1024;
       const res = await runExternalReview({
         root: repoRoot(), executor: a.executor, kind: a.kind, round: a.round, pr: a.pr, base: a.base, head: a.head,
         model: a.model, modelChosenBy: a['model-chosen-by'], modelReason: a['model-reason'], effort: a.effort, limits,
@@ -973,7 +1120,7 @@ if (isMain(import.meta.url)) {
       process.exit(1);
     }
   } else {
-    console.error('用法：external-review.mjs run --executor <名> [...]，或 external-review.mjs executor codex（见文件头）');
+    console.error('用法：external-review.mjs run --executor <名> [...]、external-review.mjs register --run-dir <目录> [...]，或 external-review.mjs executor codex（见文件头）');
     process.exit(2);
   }
 }
