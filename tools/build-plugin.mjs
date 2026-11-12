@@ -150,21 +150,45 @@ export const IMPECCABLE_ENGINE_GAPS = [
 ];
 const gapNote = (gap, version) => `<!-- Modified by the product-dev plugin build: removed "${gap.heading.replace(/^#+\s*/, '')}" because the pinned engine ${version} has no \`${gap.verb}\` command. See THIRD_PARTY_NOTICES.md at the plugin root. -->`;
 
-/** 从引擎 Rust 源码的 match 分支里取出命令名（如 `"a" | "b" =>`），以及 `v.starts_with("live")` 这类前缀分派。 */
+/**
+ * 从引擎 Rust 源码的分派函数 `pub fn run(` 的函数体里，取出 match 分支的命令名（如 `"a" | "b" =>`），
+ * 以及 `v.starts_with("live")` 这类前缀分派。只看 run 的函数体，文件里别处的字符串 match 不算命令。
+ */
 export function parseEngineVerbs(source) {
+  const start = source.search(/^pub fn run\(/m);
+  if (start < 0) throw new Error('引擎源码里没有找到 pub fn run(');
+  const close = source.slice(start).search(/^\}/m);
+  const body = source.slice(start, close < 0 ? undefined : start + close);
   const verbs = new Set();
   const prefixes = new Set();
-  for (const m of source.matchAll(/^\s*("[a-z][a-z0-9-]*"(?:\s*\|\s*"[a-z][a-z0-9-]*")*)\s*=>/gm)) for (const v of m[1].matchAll(/"([^"]+)"/g)) verbs.add(v[1]);
-  for (const m of source.matchAll(/^\s*\w+ if \w+\.starts_with\("([a-z0-9-]+)"\)\s*=>/gm)) prefixes.add(m[1]);
+  for (const m of body.matchAll(/^\s*("[a-z][a-z0-9-]*"(?:\s*\|\s*"[a-z][a-z0-9-]*")*)\s*=>/gm)) for (const v of m[1].matchAll(/"([^"]+)"/g)) verbs.add(v[1]);
+  for (const m of body.matchAll(/^\s*\w+ if \w+\.starts_with\("([a-z0-9-]+)"\)\s*=>/gm)) prefixes.add(m[1]);
   return { verbs, prefixes };
 }
 
-/** 技能文本里调用引擎的命令名：`"<skill-base-dir>/scripts/impeccable" <命令>`，返回 命令 → 出现的文件。 */
+/**
+ * 合并顶层命令与前缀分派的子模块命令：顶层只把以该前缀开头的命令交给子模块，
+ * 子模块里不带前缀的别名（如 live 的 "poll"）从命令行调不到，不算支持。
+ */
+export function mergeEngineVerbs(router, modules) {
+  const verbs = new Set(router.verbs);
+  for (const [prefix, mod] of Object.entries(modules)) {
+    if (!router.prefixes.has(prefix)) continue;
+    for (const v of mod.verbs) if (v.startsWith(prefix)) verbs.add(v);
+  }
+  return verbs;
+}
+
+/**
+ * 文本里调用引擎的命令名，返回 命令 → 出现的文件。认两种写法：
+ * `"<skill-base-dir>/scripts/impeccable" <命令>`（含 .cmd），以及行内代码里的 `impeccable <命令>` / `npx impeccable <命令>`。
+ * `/impeccable polish` 这类技能子命令前面带斜杠，不算。
+ */
 export function referencedVerbs(files) {
   const out = new Map();
   for (const [rel, buf] of files) {
     if (!rel.endsWith('.md')) continue;
-    for (const m of buf.toString('utf8').matchAll(/scripts\/impeccable"?\s+([a-z][a-z0-9-]*)/g)) {
+    for (const m of buf.toString('utf8').matchAll(/(?:scripts\/impeccable(?:\.cmd)?"?|`(?:npx )?impeccable)[ \t]+([a-z][a-z0-9-]*)/g)) {
       if (!out.has(m[1])) out.set(m[1], new Set());
       out.get(m[1]).add(rel);
     }
@@ -172,23 +196,34 @@ export function referencedVerbs(files) {
   return out;
 }
 
-/** 固定引擎是否支持某个命令（engine.verbs 已含 live 子模块的命令）。 */
+/** 固定引擎是否支持某个命令（engine.verbs 已含前缀分派到子模块、能从命令行调到的命令）。 */
 const engineSupports = (engine, verb) => engine.verbs.has(verb);
 
-/** 去掉 Markdown 里以 heading 开头的一整节（到下一个同级或更高级标题为止），在原位置留一行改动说明。 */
+/**
+ * 去掉 Markdown 里以 heading 开头的一整节（到下一个同级或更高级标题为止，``` 代码块里的 # 行不算标题），
+ * 在原位置留一行改动说明。保留原文件的换行符和末尾是否有换行。
+ */
 export function dropSection(buf, heading, note) {
   const text = buf.toString('utf8');
-  const lines = text.split('\n');
-  const start = lines.findIndex((l) => l.replace(/\r$/, '') === heading);
-  if (start < 0) throw new Error(`没有找到要去掉的一节：${heading}`);
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const trailing = text.endsWith(eol);
+  const lines = (trailing ? text.slice(0, -eol.length) : text).split(eol);
   const level = heading.match(/^#+/)[0].length;
-  let end = lines.findIndex((l, i) => i > start && /^#+\s/.test(l) && l.match(/^#+/)[0].length <= level);
+  let fenced = false;
+  const isHeading = lines.map((l) => {
+    if (/^\s*(```|~~~)/.test(l)) { fenced = !fenced; return false; }
+    return !fenced && /^#+\s/.test(l);
+  });
+  const start = lines.findIndex((l, i) => isHeading[i] && l === heading);
+  if (start < 0) throw new Error(`没有找到要去掉的一节：${heading}`);
+  let end = lines.findIndex((l, i) => i > start && isHeading[i] && l.match(/^#+/)[0].length <= level);
   if (end < 0) end = lines.length;
   let from = start;
   while (from > 0 && lines[from - 1].trim() === '') from -= 1;
+  const head = lines.slice(0, from);
   const tail = lines.slice(end);
-  const kept = [...lines.slice(0, from), '', note, ...(tail.length && tail.join('') !== '' ? ['', ...tail] : [''])];
-  return Buffer.from(kept.join('\n'), 'utf8');
+  const kept = [...head, ...(head.length ? [''] : []), note, ...(tail.length ? ['', ...tail] : [])];
+  return Buffer.from(kept.join(eol) + (trailing ? eol : ''), 'utf8');
 }
 
 /**
@@ -198,15 +233,13 @@ export function dropSection(buf, heading, note) {
 function pinnedEngine(repo) {
   if (!fs.existsSync(path.join(repo, '.git'))) throw new Error(`${repo} 不是 git 检出，无法核对固定引擎支持的命令`);
   const version = fs.readFileSync(path.join(repo, 'plugin/skills/impeccable/scripts/VERSION'), 'utf8').trim();
+  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`impeccable 的 scripts/VERSION 不是 x.y.z 格式：${version}`);
   const tag = `engine-v${version}`;
-  const show = (file) => {
-    try { return git(repo, 'show', `${tag}:${file}`); } catch { throw new Error(`${repo} 里没有 ${tag}:${file}，先 git fetch --tags`); }
-  };
-  const router = parseEngineVerbs(show('crates/cli/src/router.rs'));
-  const live = parseEngineVerbs(show('crates/live/src/lib.rs'));
-  // 前缀分派（live*）交给 live 子模块，子模块里的命令名才算支持
-  const verbs = new Set([...router.verbs, ...(router.prefixes.has('live') ? live.verbs : [])]);
-  return { version, verbs };
+  let tagCommit;
+  try { tagCommit = git(repo, 'rev-parse', '--verify', '--quiet', `${tag}^{commit}`).trim(); } catch { throw new Error(`${repo} 里没有标签 ${tag}，先 git fetch --tags`); }
+  const show = (file) => git(repo, 'show', `${tagCommit}:${file}`);
+  const verbs = mergeEngineVerbs(parseEngineVerbs(show('crates/cli/src/router.rs')), { live: parseEngineVerbs(show('crates/live/src/lib.rs')) });
+  return { version, tagCommit, verbs };
 }
 
 /**
@@ -222,7 +255,7 @@ export function adaptToEngine(files, engine, gaps = IMPECCABLE_ENGINE_GAPS) {
     }
   }
   assertEngineVerbs(files, engine);
-  return { version: engine.version, verbs: [...engine.verbs].sort() };
+  return { version: engine.version, ...(engine.tagCommit ? { tagCommit: engine.tagCommit } : {}), verbs: [...engine.verbs].sort() };
 }
 
 /** 文本引用的引擎命令都要在固定引擎里，否则报错并列出命令和所在文件。 */

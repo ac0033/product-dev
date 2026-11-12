@@ -7,7 +7,7 @@
 ## 1. impeccable
 
 - 来源：<https://github.com/pbakaus/impeccable>
-- 版本：4.8.2（提交 ec229b4）
+- 版本：4.8.2（`skill-v4.8.2` 之后的 main 提交 ec229b4；固定引擎 0.1.22）
 - 原许可：Apache-2.0
 - 版权声明：Copyright 2025 Paul Bakaus
 - 收录位置与取自：
