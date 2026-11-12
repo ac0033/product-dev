@@ -6,4 +6,4 @@
 4. 发布 dist/dsh-product-dev-<版本>.tgz 到 npm；GitHub Release 附 product-dev-plugin.zip、product-dev-skill.zip、npm tarball 和 SHA256SUMS.txt。
 5. 在 ac0033/skills 的两份市场清单同步版本和 git-subdir ref，回读公开标签、资产、npm 和市场并做隔离新装及旧版升级验收。
 
-发布记录：[独立仓库迁移](2026-11-11-migration.md)。历史验证保留在 evals/runs/；其中旧仓库路径和链接描述记录时的现场。
+发布记录：[0.3.0](2026-11-12-0.3.0.md)、[独立仓库迁移](2026-11-11-migration.md)。历史验证保留在 evals/runs/；其中旧仓库路径和链接描述记录时的现场。
