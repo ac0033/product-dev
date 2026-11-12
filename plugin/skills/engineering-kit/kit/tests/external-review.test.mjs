@@ -26,7 +26,7 @@ import {
   runProcess,
   validateResult,
 } from '../gate/external-review.mjs';
-import { recordReview, reportVerdict } from '../gate/review.mjs';
+import { missingSections, recordReview, reportVerdict } from '../gate/review.mjs';
 import { commitAll, featureRepo, git, tmpDir, write } from './helpers.mjs';
 
 /** 审查说明（超过 MIN_NARRATIVE_CHARS）：假执行器写进 review.report。 */
@@ -262,6 +262,7 @@ test('renderReport 自检：只有一处结论，且与判定一致', () => {
   const text = renderReport({ request, result, assessment: { verdict: 'fail', notes: [] }, meta: { reviewer: 'external:x', inputHash: '0'.repeat(64), durationMs: 1000, usageLine: '无' } });
   assert.equal(reportVerdict(text).verdict, 'fail');
   assert.match(text, /外部一致性审报告（修后复核）/);
+  assert.deepEqual(missingSections(text, normalizeConfig({ profile: 2 }).reviewSections), [], '渲染的报告含项目默认要求的各节，不会被格式检查拒绝');
 });
 
 /** 假的 codex 命令：按 codex exec --json 的格式输出事件，把会话记录写进 CODEX_HOME，把收到的参数记下来供断言。 */

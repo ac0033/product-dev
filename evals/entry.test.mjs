@@ -184,8 +184,11 @@ test('受控的值：方法文档里的默认值与套件配置一致，常规�
   const review = read(`${ENTRY_DIR}/references/review.md`);
   // 通用流程细则只写在套件版 process.md（入口版链接过去，见“process.md 不复述套件流程文档”一条），所以查两份合起来的内容
   const proc = [read(`${ENTRY_DIR}/references/process.md`), read('skills/engineering-kit/references/process.md')].join('\n');
-  assert.ok(review.includes(`默认 ${DEFAULTS.reviewMinChars}`), '复审报告最短字数与套件默认值不一致');
-  assert.ok(review.includes(`不少于 ${DEFAULTS.reviewMinChars} 字`), '任务书里的最短字数与套件默认值不一致');
+  assert.equal(DEFAULTS.reviewMinChars, 0, '0.7.0 起默认不按字数判定');
+  assert.ok(review.includes(`默认是${DEFAULTS.reviewSections.join('、')}`), '复审报告必需的节与套件默认值不一致');
+  assert.ok(review.includes('报告必须有范围、发现、作者的验证、结论四节'), '任务书里没有写明报告必需的几节');
+  assert.ok(!/全文不少于 \d+ 字/.test(review), '任务书里不应再有字数要求');
+  for (const name of DEFAULTS.reviewSections) assert.ok(review.includes(`## ${name}`), `报告格式模板里没有“${name}”一节`);
   assert.ok(review.includes(`默认是“${DEFAULTS.reviewKeyword}”`) && review.includes(`## ${DEFAULTS.reviewKeyword}`), '报告格式里没有套件要求的关键词一节');
   for (const name of DEFAULTS.reviewers) assert.ok(review.includes(`\`${name}\``), `review.md 没有列出默认复审者 ${name}`);
   assert.ok(proc.includes(`\`${DEFAULTS.reviewFlow}\`（默认）`), '默认复审流程与套件默认值不一致');

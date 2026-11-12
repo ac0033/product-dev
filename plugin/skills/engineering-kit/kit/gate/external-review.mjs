@@ -28,7 +28,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { baseRevision, defaultGh, EMPTY_TREE, git, isMain, loadConfig, readPr, repoRoot } from './lib.mjs';
-import { recordReview, reportVerdict } from './review.mjs';
+import { missingSections, recordReview, reportVerdict } from './review.mjs';
 
 /** 协议版本：任务与结果 JSON 的 version 字段。 */
 export const PROTOCOL_VERSION = 1;
@@ -575,13 +575,13 @@ export function renderReport({ request, result, assessment, meta, keyword = '结
     `# 外部${KIND_NAMES[request.review.kind]}报告（${ROUND_NAMES[request.review.round]}）`,
     '',
     `- 复审者：${meta.reviewer}（执行器 ${oneLine(result.provenance.executor)}${result.provenance.executorVersion ? ` ${oneLine(result.provenance.executorVersion)}` : ''}）`,
-    `- 被审内容：${request.target.baseSha.slice(0, 12)}..${request.target.headSha}（${request.target.files.length} 个文件）`,
     `- 输入哈希：sha256:${meta.inputHash}`,
     `- 请求模型：${request.model.id}（来源 ${request.model.source}，由 ${request.model.chosenBy} 选择${request.model.reason ? `；依据：${oneLine(request.model.reason)}` : ''}）`,
     `- 实际模型：${oneLine(result.provenance.actualModel)}${result.provenance.actualModelSource === 'executor-settings' ? '（来源：执行器记录的生效设置，执行器不提供服务端回传的模型名）' : ''}${request.model.effort ? `，推理强度 ${request.model.effort}` : ''}`,
     `- 执行：${STATUS_NAMES[result.execution.status]}，耗时 ${Math.round(meta.durationMs / 1000)} 秒；只读副本与仓库工作区未改动，最终提交未变化`,
     `- 用量：${oneLine(meta.usageLine)}`,
   ];
+  lines.push('', '## 范围', '', `- 被审内容：${request.target.baseSha.slice(0, 12)}..${request.target.headSha}（${request.target.files.length} 个文件）`);
   if (request.target.excludedFiles.length > 0) lines.push(`- 未外发的敏感文件：${oneLine(request.target.excludedFiles.join('、'))}（未经本次复审）`);
   lines.push('', '## 发现', '');
   for (const sev of SEVERITIES) {
@@ -594,6 +594,7 @@ export function renderReport({ request, result, assessment, meta, keyword = '结
     if (list.length === 0) lines.push('无', '');
   }
   lines.push('## 复审说明（复审者原文）', '', quoted(r.report), '');
+  lines.push('## 作者的验证', '', '- 外部复审者只依据提示里的 diff 审，没有运行测试，也没有看到作者的验证证据（闸门输出、CI、变异检查）；这些没有经过本次复审核对。', '');
   // 局限里有执行器写的文字（模型的 limitations、执行器报的模型名），每条都压成一行并加“｜”，不能冒充结论行
   const limits = [...r.limitations, ...assessment.notes].map(oneLine);
   lines.push('## 局限', '', ...(limits.length > 0 ? limits.map((l) => `- ｜${l}`) : ['- 无']), '');
@@ -766,8 +767,12 @@ export async function runExternalReview(opts) {
   }
   const config = loadConfig(root);
   const report = renderReport({ request, result, assessment, meta, keyword: config.reviewKeyword });
-  if (report.trim().length < config.reviewMinChars) {
+  if (config.reviewMinChars > 0 && report.trim().length < config.reviewMinChars) {
     return { ...base, ok: false, message: `渲染出的报告只有 ${report.trim().length} 字，少于项目要求的 ${config.reviewMinChars} 字，不登记（运行记录：${runDir}）` };
+  }
+  const missingParts = missingSections(report, config.reviewSections);
+  if (missingParts.length > 0) {
+    return { ...base, ok: false, message: `渲染出的报告缺少项目要求的节：${missingParts.join('、')}（modules.review.reviewSections 当前是 ${config.reviewSections.join('、')}；外部复审的报告含范围、发现、复审说明、作者的验证、局限和结论几节），不登记（运行记录：${runDir}）` };
   }
   const reportPath = path.join(runDir, 'report.md');
   fs.writeFileSync(reportPath, report);

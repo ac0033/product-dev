@@ -1,5 +1,5 @@
 {
-  "_说明": "项目配置（profile 2）：同步时只创建一次，之后由本项目维护，同步不覆盖。modules 是模块参数，layout 是目录布局，hygiene 是巡检参数，rules 是闸门规则。sourceGlobs、testGlobs、testCommand 必须按本项目修改。modules.gate.reviewFlow 是复审流程：pre-push（默认，推送前复审，推送核对只要求代码复审）或 pr（对 PR 做代码复审与一致性审：复审可以与 CI 并行开始；CI 全部通过后才登记、合并，经 merge.mjs 合并；需要 GitHub 远程与 gh）。modules.gate.requiredChecks 是 pr 流程的必需检查名：写检查运行的 job 名（含矩阵后缀，不含工作流名和事件）或提交状态的 context，为空时每一项检查都算必需；口径见 engineering-kit 的 references/process.md 第 4 节。rules.reviewIgnore 只放真正的纯说明文件：规则、技能正文、提示词、可执行原型会改变行为，不要放进来。modules.gate.testGroups 是可选的测试分组：数组，每项 { \"name\": 分组名, \"paths\": [glob…], \"command\": 测试命令 }，供 gate.mjs --affected 只跑受影响的分组（没有分组时照常跑 testCommand 全量）。modules.review.externalExecutors 是允许的外部复审执行器名（external-review.mjs，默认不写即不允许；复审者名单另加 external:<执行器名>），modules.review.externalExclude 是外发前追加排除的 glob。modules.review.maxReviewRounds 是复审轮次上限（默认 3）：同一 PR 或分支上有这么多份不同的被审内容登记过不通过后（pr 流程按最终提交，pre-push 流程按工作区内容；同一份内容上两种审查都不通过只算一份），再登记须带用户决定。",
+  "_说明": "项目配置（profile 2）：同步时只创建一次，之后由本项目维护，同步不覆盖。modules 是模块参数，layout 是目录布局，hygiene 是巡检参数，rules 是闸门规则。sourceGlobs、testGlobs、testCommand 必须按本项目修改。modules.gate.reviewFlow 是复审流程：pre-push（默认，推送前复审，推送核对只要求代码复审）或 pr（对 PR 做代码复审与一致性审：复审可以与 CI 并行开始；CI 全部通过后才登记、合并，经 merge.mjs 合并；需要 GitHub 远程与 gh）。modules.gate.requiredChecks 是 pr 流程的必需检查名：写检查运行的 job 名（含矩阵后缀，不含工作流名和事件）或提交状态的 context，为空时每一项检查都算必需；口径见 engineering-kit 的 references/process.md 第 4 节。rules.reviewIgnore 只放真正的纯说明文件：规则、技能正文、提示词、可执行原型会改变行为，不要放进来。modules.gate.testGroups 是可选的测试分组：数组，每项 { \"name\": 分组名, \"paths\": [glob…], \"command\": 测试命令 }，供 gate.mjs --affected 只跑受影响的分组（没有分组时照常跑 testCommand 全量）。modules.review.externalExecutors 是允许的外部复审执行器名（external-review.mjs，默认不写即不允许；复审者名单另加 external:<执行器名>），modules.review.externalExclude 是外发前追加排除的 glob。modules.review.reviewSections 是复审报告必需的节（默认范围、发现、作者的验证；每节要有标题行和内容，结论一节另按 reviewKeyword 判定），0.7.0 起取代按字数判定；旧配置里写的 reviewMinChars 仍然生效，新项目不必写。modules.review.maxReviewRounds 是复审轮次上限（默认 3）：同一 PR 或分支上有这么多份不同的被审内容登记过不通过后（pr 流程按最终提交，pre-push 流程按工作区内容；同一份内容上两种审查都不通过只算一份），再登记须带用户决定。",
   "profile": 2,
   "modules": {
     "gate": {
@@ -12,7 +12,7 @@
     },
     "review": {
       "reviewers": ["product-dev:code-reviewer", "feature-dev:code-reviewer", "/code-review", "general-purpose"],
-      "reviewMinChars": 200,
+      "reviewSections": ["范围", "发现", "作者的验证"],
       "reviewKeyword": "结论",
       "maxReviewRounds": 3
     }

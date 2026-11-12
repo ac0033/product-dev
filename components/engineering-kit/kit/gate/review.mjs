@@ -1,6 +1,7 @@
 // 复审记录：独立复审（代码复审 code 或一致性审 consistency）后在这里登记。业务含义：复审必须由不共享作者上下文的独立复审者完成——宿主子代理或外部执行器（external-review.mjs，登记名 external:<执行器>），且在允许名单内；
-// 判定策略（复审流程、必需检查名、复审者名单、最少字数、结论关键词、复审轮次上限）取基准提交上的配置，被审分支改了不算数（lib.mjs 的 loadConfig）。
-// 报告要有实质内容，并且有一处明确的结论（写法见 reportVerdict）：登记 pass 要求结论是通过，登记 fail 要求结论是不通过，
+// 判定策略（复审流程、必需检查名、复审者名单、必需的节、最少字数、结论关键词、复审轮次上限）取基准提交上的配置，被审分支改了不算数（lib.mjs 的 loadConfig）。
+// 报告要有实质内容：必需的几节（modules.review.reviewSections，默认范围、发现、作者的验证，见 missingSections）齐全且各有内容，
+// 并且有一处明确的结论（写法见 reportVerdict）：登记 pass 要求结论是通过，登记 fail 要求结论是不通过，
 // 找不到明确结论、前后矛盾或与登记不符时拒绝。四种登记：
 //   pass / fail   复审结论。
 //   defer         一致性审延期（只限 consistency），须写理由。
@@ -114,6 +115,41 @@ export function reportVerdict(text, keyword = '结论') {
   return { verdict: kinds.size === 1 ? [...kinds][0] : null, conflict: false, bracketed };
 }
 
+/**
+ * 报告里缺哪几节。一节算有，要同时满足：
+ *   标题行：井号加空格开头（可带编号，如“## 1. 范围”“### 一、范围”），标题文字以节名开头，其后是空白、括号、冒号或行尾；或同一行写“节名：内容”（行首允许井号、引用符、列表符、星号）；
+ *   有内容：标题行之后、下一个同级或更高级标题之前至少有一个非空、非标题的行（更深一级的子标题本身不算内容）；同一行写法的冒号后要有字。
+ * 代码围栏（```）里的行不能当标题，防止把模板原样放进围栏冒充各节；围栏里写的内容算所在一节的内容（例如“作者的验证”下直接贴测试输出）。节名只比较文字，不分大小写。
+ */
+export function missingSections(text, sections) {
+  // 逐行记下是否在代码围栏里：围栏里的行不能当标题（防止把模板原样放进围栏冒充各节），但围栏里写的内容算所在一节的内容
+  const lines = [];
+  let fenced = false;
+  for (const raw of String(text).split(/\r?\n/)) {
+    if (/^\s*(```|~~~)/.test(raw)) { fenced = !fenced; lines.push({ text: raw, fenced: true }); continue; }
+    lines.push({ text: raw, fenced });
+  }
+  const level = (l) => (l.fenced ? 0 : (/^\s{0,3}(#{1,6})\s/.exec(l.text)?.[1].length ?? 0));
+  return sections.filter((name) => {
+    const n = escapeRe(name);
+    const head = new RegExp(`^\\s{0,3}(#{1,6})\\s+(?:\\d+[.、)）]?\\s*|[一二三四五六七八九十]+[、.]\\s*)?[*_]*${n}[*_]*(?:[\\s（(:：]|$)`, 'i');
+    const inline = new RegExp(`^[\\s>#*_-]*${n}[\\s*_]*[:：][\\s*_]*\\S`, 'i');
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].fenced) continue;
+      if (inline.test(lines[i].text)) return false;
+      const m = head.exec(lines[i].text);
+      if (!m) continue;
+      const depth = m[1].length;
+      for (let j = i + 1; j < lines.length; j++) {
+        const lv = level(lines[j]);
+        if (lv > 0 && lv <= depth) break;
+        if (lv === 0 && lines[j].text.trim() !== '') return false;
+      }
+    }
+    return true;
+  });
+}
+
 /** 审查种类及中文名。 */
 const KINDS = { code: '代码复审', consistency: '一致性审' };
 
@@ -140,8 +176,12 @@ function checkReport(config, expect, reviewer, reportPath, label = expect) {
   }
   if (!reportPath || !fs.existsSync(reportPath)) return { ok: false, message: '找不到复审报告文件' };
   const text = fs.readFileSync(reportPath, 'utf8');
-  if (text.trim().length < config.reviewMinChars) {
+  if (config.reviewMinChars > 0 && text.trim().length < config.reviewMinChars) {
     return { ok: false, message: `复审报告不少于 ${config.reviewMinChars} 字（当前 ${text.trim().length} 字）` };
+  }
+  const missing = missingSections(text, config.reviewSections);
+  if (missing.length > 0) {
+    return { ok: false, message: `复审报告缺少必需的节：${missing.join('、')}（每节要有单独的标题行，如“## ${missing[0]}”，或同一行写“${missing[0]}：内容”，标题下要有内容；必需的节由 modules.review.reviewSections 配置，当前是 ${config.reviewSections.join('、')}；结论一节另按“${config.reviewKeyword}”判定）` };
   }
   const kw = config.reviewKeyword;
   const how = `写法：同一行写“${kw}：通过。理由”或“${kw}：不通过。理由”，或者单独一行“## ${kw}”、其后第一个非空行写“通过。理由”或“不通过。理由”；结论词只认中文的通过、不通过、未通过，要单独成一个小句，结论词后不要加括号；全文只写一处结论`;
@@ -259,7 +299,7 @@ function argProblem({ verdict, kind, reason, userDecision }) {
  */
 export function recordReview({ root, verdict, reviewer, reportPath, summary = '', pr, kind, reason, userDecision, gh = defaultGh }) {
   const config = loadConfig(root);
-  assertPolicy(config); // reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds 取基准提交上的配置，取不到时不按工作区的值登记
+  assertPolicy(config); // reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewSections、reviewKeyword、maxReviewRounds 取基准提交上的配置，取不到时不按工作区的值登记
   if (config.reviewFlow === 'pr') return recordPrReview({ root, config, verdict, reviewer, reportPath, summary, pr, kind, reason, userDecision, gh });
   if (pr !== undefined) {
     return { ok: false, message: '本项目的复审流程是 pre-push，不接受 --pr；要启用 PR 双审，在主干上把 modules.gate.reviewFlow 改为 pr（闸门按基准提交上的配置判定）' };

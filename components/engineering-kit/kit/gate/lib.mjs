@@ -2,7 +2,7 @@
 // 业务含义：闸门要回答三件事——这次改动了哪些文件（范围）、这些文件现在的内容是什么（树哈希）、
 // 测试与复审记录是不是针对这份内容、这个基准提交做的（绑定）。范围只有一个口径（gateScope）：
 // 配置、豁免表和套件脚本永远在范围内。判定依据不由被审分支决定，在 loadConfig 一处得出：基准分支设置（base）取默认主干上的配置，
-// 判定策略字段（POLICY_KEYS：reviewIgnore、reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds、externalExecutors、externalExclude）取基准提交上的配置。
+// 判定策略字段（POLICY_KEYS：reviewIgnore、reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewSections、reviewKeyword、maxReviewRounds、externalExecutors、externalExclude）取基准提交上的配置。
 // 只读 git 与工作区，写入只发生在 git 目录下的记录目录里，
 // 不污染工作区。测试与推送前复审记录放在各工作树自己的 git 目录（互不覆盖）；全局锁与 PR 审查记录（pr 流程）
 // 放在 git 公共目录：同一仓库同时只跑一个闸门，PR 的复审与合并可以在不同工作树进行。
@@ -61,7 +61,7 @@ export function gitCommonDir(root) {
  * 其余字段（testCommand、testEnv、testGroups、sourceGlobs、testGlobs、commentMode、layout、hygiene 等）仍用工作区的值：它们随功能分支一起变化是正常的（新加语言、改测试命令），而且配置文件
  * 永远在闸门范围内，改了就要过测试与复审，会被复审者看到。base 另由默认主干上的配置决定（mainlineBase）。
  */
-export const POLICY_KEYS = ['reviewIgnore', 'reviewFlow', 'requiredChecks', 'reviewers', 'reviewMinChars', 'reviewKeyword', 'maxReviewRounds', 'externalExecutors', 'externalExclude'];
+export const POLICY_KEYS = ['reviewIgnore', 'reviewFlow', 'requiredChecks', 'reviewers', 'reviewMinChars', 'reviewSections', 'reviewKeyword', 'maxReviewRounds', 'externalExecutors', 'externalExclude'];
 
 /**
  * 读取某个提交上的项目配置并展开。该提交上没有配置文件时返回 null；读不出或不合法时抛错（失败不放行），

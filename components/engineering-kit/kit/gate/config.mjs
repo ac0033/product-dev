@@ -1,11 +1,11 @@
 // 项目配置（engineering.config.json）的 profile 结构与展开。业务含义：
 //   项目配置是唯一由项目自己维护的文件，结构分四段，便于升级时只改动套件认可的字段：
 //     modules  —— 模块参数：gate（基准分支、测试命令、环境变量、测试分组 testGroups、锁时长、复审流程 reviewFlow、必需检查 requiredChecks）、
-//                 review（复审者名单、字数、结论关键词、复审轮次上限 maxReviewRounds、允许的外部复审执行器 externalExecutors、外发前追加排除 externalExclude）
+//                 review（复审者名单、报告必需的节 reviewSections、可选的最少字数 reviewMinChars、结论关键词、复审轮次上限 maxReviewRounds、允许的外部复审执行器 externalExecutors、外发前追加排除 externalExclude）
 //     layout   —— 目录布局：源文件与测试的 glob、阶段目录、允许的顶层目录
 //     hygiene  —— 巡检参数：禁用文件名片段、草稿超期天数、记录类目录、合法状态值
 //     rules    —— 规则：不计入闸门的文档（reviewIgnore；项目配置、豁免表、套件脚本除外，永远计入）、注释检查模式（commentMode）
-//   这里只做结构展开与取值校验。闸门运行时 base 与判定策略字段（reviewIgnore、reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds、externalExecutors、externalExclude）
+//   这里只做结构展开与取值校验。闸门运行时 base 与判定策略字段（reviewIgnore、reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewSections、reviewKeyword、maxReviewRounds、externalExecutors、externalExclude）
 //   的生效值不取工作区，而取主干或基准提交上的配置，见 lib.mjs 的 loadConfig。
 //   闸门内部只使用“扁平”字段（FLAT_KEYS），由 normalizeConfig 展开；旧版扁平配置仍可读取，便于回滚。
 // 同步器通过 toProfile / toFlat 在两种结构之间转换，保证回滚到旧版本时配置格式也随之回退。
@@ -13,13 +13,14 @@
 /** 闸门使用的扁平字段名（与旧版 engineering.config.json 相同）。 */
 export const FLAT_KEYS = [
   'base', 'sourceGlobs', 'testGlobs', 'reviewIgnore', 'commentMode', 'testCommand', 'testEnv',
-  'reviewers', 'reviewMinChars', 'reviewKeyword', 'lockMaxAgeMinutes', 'reviewFlow', 'testGroups', 'maxReviewRounds', 'requiredChecks',
+  'reviewers', 'reviewMinChars', 'reviewSections', 'reviewKeyword', 'lockMaxAgeMinutes', 'reviewFlow', 'testGroups', 'maxReviewRounds', 'requiredChecks',
   'externalExecutors', 'externalExclude',
 ];
 
 /**
  * 扁平字段的缺省值。reviewIgnore 只放真正的纯说明文件（docs 下的 Markdown、根目录的 README 与 CHANGELOG）：
  * 规则（AGENTS.md、CLAUDE.md）、技能正文、提示词、可执行原型都会改变行为，不默认免审（0.7.0 起；之前是全部 Markdown 加整个 docs 目录）。
+ * reviewSections 是复审报告必需的节（结论一节另按 reviewKeyword 判定）；reviewMinChars 0.7.0 起默认 0，不再按字数判定，只有项目显式写了正数才继续检查（旧配置里写的 200 照常生效）。
  * requiredChecks 为空表示 PR 上报告的每一项 CI 检查都是必需检查。externalExecutors 为空表示不允许外部复审（external-review.mjs）。
  */
 export const DEFAULTS = {
@@ -31,7 +32,8 @@ export const DEFAULTS = {
   testCommand: 'npm test',
   testEnv: {},
   reviewers: ['product-dev:code-reviewer', 'feature-dev:code-reviewer', '/code-review', 'general-purpose'],
-  reviewMinChars: 200,
+  reviewMinChars: 0,
+  reviewSections: ['范围', '发现', '作者的验证'],
   reviewKeyword: '结论',
   lockMaxAgeMinutes: 90,
   reviewFlow: 'pre-push',
@@ -83,6 +85,9 @@ export function normalizeConfig(raw) {
   }
   checkTestGroups(eff.testGroups);
   checkRequiredChecks(eff.requiredChecks);
+  if (!Array.isArray(eff.reviewSections) || !eff.reviewSections.every((x) => typeof x === 'string' && x.trim() && x === x.trim() && !x.includes(String.fromCharCode(10))) || new Set(eff.reviewSections).size !== eff.reviewSections.length) {
+    throw new Error('engineering.config.json 的 modules.review.reviewSections 必须是不重复的字符串数组，节名不能为空、不能有首尾空白和换行（写成空数组表示不要求任何节）');
+  }
   for (const k of ['externalExecutors', 'externalExclude']) {
     const v = eff[k];
     if (!Array.isArray(v) || !v.every((x) => typeof x === 'string' && x.trim())) throw new Error(`engineering.config.json 的 modules.review.${k} 必须是非空字符串数组`);
@@ -154,6 +159,7 @@ function expand(raw) {
     requiredChecks: gate.requiredChecks ?? DEFAULTS.requiredChecks,
     reviewers: review.reviewers ?? DEFAULTS.reviewers,
     reviewMinChars: review.reviewMinChars ?? DEFAULTS.reviewMinChars,
+    reviewSections: review.reviewSections ?? DEFAULTS.reviewSections,
     reviewKeyword: review.reviewKeyword ?? DEFAULTS.reviewKeyword,
     maxReviewRounds: review.maxReviewRounds ?? DEFAULTS.maxReviewRounds,
     externalExecutors: review.externalExecutors ?? DEFAULTS.externalExecutors,
@@ -169,7 +175,7 @@ function expand(raw) {
 
 /**
  * 扁平配置 → profile 结构（同步器写入新格式时使用）。扁平结构里 _profile 段保存的布局与巡检设置原样恢复。
- * 测试分组、必需检查名和外部复审的两项是可选项：没有时不写，迁移旧配置不凭空多出一项。
+ * 测试分组、必需检查名、最少字数和外部复审的两项是可选项：没有时不写，迁移旧配置不凭空多出一项。
  */
 export function toProfile(flat) {
   const f = normalizeConfig(flat);
@@ -177,7 +183,8 @@ export function toProfile(flat) {
   const gate = { base: f.base, testCommand: f.testCommand, testEnv: f.testEnv, lockMaxAgeMinutes: f.lockMaxAgeMinutes, reviewFlow: f.reviewFlow };
   if (f.testGroups.length > 0) gate.testGroups = f.testGroups;
   if (f.requiredChecks.length > 0) gate.requiredChecks = f.requiredChecks;
-  const review = { reviewers: f.reviewers, reviewMinChars: f.reviewMinChars, reviewKeyword: f.reviewKeyword, maxReviewRounds: f.maxReviewRounds };
+  const review = { reviewers: f.reviewers, reviewSections: f.reviewSections, reviewKeyword: f.reviewKeyword, maxReviewRounds: f.maxReviewRounds };
+  if (f.reviewMinChars > 0) review.reviewMinChars = f.reviewMinChars;
   if (f.externalExecutors.length > 0) review.externalExecutors = f.externalExecutors;
   if (f.externalExclude.length > 0) review.externalExclude = f.externalExclude;
   return {
@@ -200,6 +207,8 @@ export function toFlat(profile) {
   const eff = normalizeConfig(profile);
   const out = {};
   for (const k of FLAT_KEYS) out[k] = eff[k];
+  // 旧版套件只认字数：默认的 0 不写出去，让旧版用它自己的默认值（回滚后恢复旧行为），显式写了正数的照常保留
+  if (out.reviewMinChars === 0) delete out.reviewMinChars;
   out._profile = { layout: { stages: eff.layout.stages, topLevelAllowed: eff.layout.topLevelAllowed }, hygiene: eff.hygiene };
   return out;
 }
