@@ -111,5 +111,12 @@ test('reviewSections 格式不对时报错；写成空数组表示不要求任�
   assert.throws(() => normalizeConfig({ profile: 2, modules: { review: { reviewSections: '范围' } } }), /reviewSections/);
   assert.throws(() => normalizeConfig({ profile: 2, modules: { review: { reviewSections: ['范围', ''] } } }), /reviewSections/);
   assert.throws(() => normalizeConfig({ profile: 2, modules: { review: { reviewSections: ['范围', '范围'] } } }), /reviewSections/);
+  assert.throws(() => normalizeConfig({ profile: 2, modules: { review: { reviewSections: [' 范围'] } } }), /reviewSections/, '首尾有空白的节名永远匹配不上');
+  assert.throws(() => normalizeConfig({ profile: 2, modules: { review: { reviewSections: ['范围' + String.fromCharCode(10)] } } }), /reviewSections/);
   assert.deepEqual(normalizeConfig({ profile: 2, modules: { review: { reviewSections: [] } } }).reviewSections, []);
+});
+
+test('回滚到扁平格式：默认的 reviewMinChars 0 不写出去（旧版用自己的默认字数），显式的正数保留', () => {
+  assert.equal('reviewMinChars' in toFlat(normalizeConfig({ profile: 2 })), false);
+  assert.equal(toFlat(normalizeConfig({ profile: 2, modules: { review: { reviewMinChars: 150 } } })).reviewMinChars, 150);
 });

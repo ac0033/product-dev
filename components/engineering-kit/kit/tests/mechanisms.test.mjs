@@ -57,6 +57,7 @@ test('测试分组：testGroups 是工作区字段，格式校验；maxReviewRou
   assert.ok(!POLICY_KEYS.includes('testGroups'));
   assert.ok(POLICY_KEYS.includes('maxReviewRounds'));
   assert.ok(POLICY_KEYS.includes('requiredChecks'), '必需检查名决定合并能否放行，分支不能自己改');
+  assert.ok(POLICY_KEYS.includes('reviewSections'), '复审报告必需的节是判定策略，分支不能自己关掉');
   assert.equal(DEFAULTS.maxReviewRounds, 3);
   assert.deepEqual(DEFAULTS.testGroups, []);
   const eff = normalizeConfig({ profile: 2, modules: { gate: { testGroups: GROUPS }, review: { maxReviewRounds: 5 } } });

@@ -772,7 +772,7 @@ export async function runExternalReview(opts) {
   }
   const missingParts = missingSections(report, config.reviewSections);
   if (missingParts.length > 0) {
-    return { ...base, ok: false, message: `渲染出的报告缺少项目要求的节：${missingParts.join('、')}（modules.review.reviewSections 当前是 ${config.reviewSections.join('、')}；外部复审的报告只有范围、发现、作者的验证、局限和结论几节），不登记（运行记录：${runDir}）` };
+    return { ...base, ok: false, message: `渲染出的报告缺少项目要求的节：${missingParts.join('、')}（modules.review.reviewSections 当前是 ${config.reviewSections.join('、')}；外部复审的报告含范围、发现、复审说明、作者的验证、局限和结论几节），不登记（运行记录：${runDir}）` };
   }
   const reportPath = path.join(runDir, 'report.md');
   fs.writeFileSync(reportPath, report);

@@ -117,31 +117,33 @@ export function reportVerdict(text, keyword = '结论') {
 
 /**
  * 报告里缺哪几节。一节算有，要同时满足：
- *   标题行：井号开头（可带编号，如“## 1. 范围”“### 一、范围”），标题文字以节名开头，其后是空白、括号、冒号或行尾；或同一行写“节名：内容”（行首允许引用符、列表符、星号）；
- *   有内容：标题行之后、下一个同级或更高级标题之前至少有一个非空行；同一行写法的冒号后要有字。
- * 代码围栏（```）里的行不算，防止把模板原样放进围栏冒充各节。节名只比较文字，不分大小写。
+ *   标题行：井号加空格开头（可带编号，如“## 1. 范围”“### 一、范围”），标题文字以节名开头，其后是空白、括号、冒号或行尾；或同一行写“节名：内容”（行首允许井号、引用符、列表符、星号）；
+ *   有内容：标题行之后、下一个同级或更高级标题之前至少有一个非空、非标题的行（更深一级的子标题本身不算内容）；同一行写法的冒号后要有字。
+ * 代码围栏（```）里的行不能当标题，防止把模板原样放进围栏冒充各节；围栏里写的内容算所在一节的内容（例如“作者的验证”下直接贴测试输出）。节名只比较文字，不分大小写。
  */
 export function missingSections(text, sections) {
+  // 逐行记下是否在代码围栏里：围栏里的行不能当标题（防止把模板原样放进围栏冒充各节），但围栏里写的内容算所在一节的内容
   const lines = [];
   let fenced = false;
   for (const raw of String(text).split(/\r?\n/)) {
-    if (/^\s*(```|~~~)/.test(raw)) { fenced = !fenced; lines.push(''); continue; }
-    lines.push(fenced ? '' : raw);
+    if (/^\s*(```|~~~)/.test(raw)) { fenced = !fenced; lines.push({ text: raw, fenced: true }); continue; }
+    lines.push({ text: raw, fenced });
   }
-  const level = (l) => /^\s{0,3}(#{1,6})\s/.exec(l)?.[1].length ?? 0;
+  const level = (l) => (l.fenced ? 0 : (/^\s{0,3}(#{1,6})\s/.exec(l.text)?.[1].length ?? 0));
   return sections.filter((name) => {
     const n = escapeRe(name);
-    const head = new RegExp(`^\\s{0,3}(#{1,6})\\s*(?:\\d+[.、)）]?\\s*|[一二三四五六七八九十]+[、.]\\s*)?[*_]*${n}[*_]*(?:[\\s（(:：]|$)`, 'i');
-    const inline = new RegExp(`^[\\s>*_-]*${n}[\\s*_]*[:：][\\s*_]*\\S`, 'i');
+    const head = new RegExp(`^\\s{0,3}(#{1,6})\\s+(?:\\d+[.、)）]?\\s*|[一二三四五六七八九十]+[、.]\\s*)?[*_]*${n}[*_]*(?:[\\s（(:：]|$)`, 'i');
+    const inline = new RegExp(`^[\\s>#*_-]*${n}[\\s*_]*[:：][\\s*_]*\\S`, 'i');
     for (let i = 0; i < lines.length; i++) {
-      if (inline.test(lines[i])) return false;
-      const m = head.exec(lines[i]);
+      if (lines[i].fenced) continue;
+      if (inline.test(lines[i].text)) return false;
+      const m = head.exec(lines[i].text);
       if (!m) continue;
       const depth = m[1].length;
       for (let j = i + 1; j < lines.length; j++) {
         const lv = level(lines[j]);
         if (lv > 0 && lv <= depth) break;
-        if (lines[j].trim() !== '') return false;
+        if (lv === 0 && lines[j].text.trim() !== '') return false;
       }
     }
     return true;

@@ -573,3 +573,15 @@ test('漏洞 10：带句号的写法都能认出：“结论：通过。无高�
   const f = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(`${BODY}## 结论\n不通过。H1 未修复。\n`), summary: 's' });
   assert.equal(f.ok, true, f.message);
 });
+
+test('漏洞 9-5：分支把 reviewSections 改成 []，登记仍按基准上的值判定，缺节的报告照样被拒', () => {
+  const root = featureRepo();
+  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, reviewSections: [] }, null, 2));
+  passingChange(root);
+  assert.equal(runGate({ root }).ok, true);
+  assert.deepEqual(loadConfig(root).reviewSections, ['范围', '发现', '作者的验证']);
+  const thin = `${'已逐条核对改动，边界条件均有覆盖。'.repeat(10)}\n## 结论\n通过。没有问题。\n`;
+  const r = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(thin), summary: 's' });
+  assert.equal(r.ok, false, r.message);
+  assert.match(r.message, /缺少必需的节/);
+});

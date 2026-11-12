@@ -85,8 +85,8 @@ export function normalizeConfig(raw) {
   }
   checkTestGroups(eff.testGroups);
   checkRequiredChecks(eff.requiredChecks);
-  if (!Array.isArray(eff.reviewSections) || !eff.reviewSections.every((x) => typeof x === 'string' && x.trim()) || new Set(eff.reviewSections).size !== eff.reviewSections.length) {
-    throw new Error('engineering.config.json 的 modules.review.reviewSections 必须是不重复的非空字符串数组（写成空数组表示不要求任何节）');
+  if (!Array.isArray(eff.reviewSections) || !eff.reviewSections.every((x) => typeof x === 'string' && x.trim() && x === x.trim() && !x.includes(String.fromCharCode(10))) || new Set(eff.reviewSections).size !== eff.reviewSections.length) {
+    throw new Error('engineering.config.json 的 modules.review.reviewSections 必须是不重复的字符串数组，节名不能为空、不能有首尾空白和换行（写成空数组表示不要求任何节）');
   }
   for (const k of ['externalExecutors', 'externalExclude']) {
     const v = eff[k];
@@ -207,6 +207,8 @@ export function toFlat(profile) {
   const eff = normalizeConfig(profile);
   const out = {};
   for (const k of FLAT_KEYS) out[k] = eff[k];
+  // 旧版套件只认字数：默认的 0 不写出去，让旧版用它自己的默认值（回滚后恢复旧行为），显式写了正数的照常保留
+  if (out.reviewMinChars === 0) delete out.reviewMinChars;
   out._profile = { layout: { stages: eff.layout.stages, topLevelAllowed: eff.layout.topLevelAllowed }, hygiene: eff.hygiene };
   return out;
 }

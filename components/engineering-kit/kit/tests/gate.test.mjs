@@ -492,6 +492,13 @@ test('missingSections：标题行和“节名：内容”两种写法都认，�
   assert.deepEqual(missingSections('范围：读了 a.ts\n- 发现：无\n> 作者的验证：核对了\n', ['范围', '发现', '作者的验证']), []);
 });
 
+test('missingSections：围栏里只能放内容不能当标题；“##范围”无空格不算标题；同一行写法在标题行里也认；空子标题不算内容', () => {
+  assert.deepEqual(missingSections('## 作者的验证\n```\nnode --test：309 通过\n```\n## 结论\n通过\n', ['作者的验证']), [], '一节的内容只有一个围栏时算有内容');
+  assert.deepEqual(missingSections('##范围\n##发现\n无\n', ['范围', '发现']), ['范围', '发现'], '井号后没有空格不算标题');
+  assert.deepEqual(missingSections('## 范围：只读了 diff\n## 发现\n无\n', ['范围', '发现']), [], '标题行里冒号后写了内容算有内容');
+  assert.deepEqual(missingSections('## 范围\n### 细项\n## 发现\n无\n', ['范围', '发现']), ['范围'], '只有空子标题的节没有内容');
+});
+
 test('missingSections：缺节、空节、节名只是别的词的前缀、藏在代码围栏里的都算缺', () => {
   assert.deepEqual(missingSections('## 范围\n读了。\n## 结论\n通过\n', ['范围', '发现', '作者的验证']), ['发现', '作者的验证']);
   assert.deepEqual(missingSections('## 范围\n\n## 发现\n无\n', ['范围', '发现']), ['范围'], '标题下没有内容算缺');
