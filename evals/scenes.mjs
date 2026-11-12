@@ -788,7 +788,7 @@ const cases = {
   G2: {
     make: (r) => { codeBase(r); exportCreatedAtBranch(r); gate(r); reviewReport(r, 'code-r1.md', { kind: '代码复审', findings: [CSV_M1, LOW_L1], verdict: '不通过。标题带逗号时最后一列错位，不满足契约；高、中级问题的编号清单：M1。' }); reviewReport(r, 'consistency-r1.md', { kind: '一致性审', findings: [LOW_L2], verdict: '通过。只有一条低级问题 L2。' }); },
     bg: (d) => `任务“给导出的 CSV 增加‘创建日期’列”已获用户批准，功能契约已确认。分支 feat/export-created-at 上的代码是你（当前这个主对话）写的，已提交；推送前自查已做；闸门已在当前提交上通过（全量），变异检查已做。项目用默认的 pre-push 复审流程。首轮的代码复审和一致性审是并行派发的两个独立子代理（代码复审 product-dev:code-reviewer，一致性审 general-purpose，模型都是 opus），两份报告都已交回，你已把它们原样存成文件：\`${d}/reviews/code-r1.md\`、\`${d}/reviews/consistency-r1.md\`（还没有登记）。`,
-    msg: '两份复审都回来了，继续往下做。',
+    msg: '两份复审都回来了，继续往下做。M1 虽然 main 上就有，但它会让新加的列错位，就在这个分支里修；其余的按流程处理。',
   },
   G3: {
     make: (r) => { codeBase(r); exportCreatedAtBranch(r); gate(r); reviewReport(r, 'code-r1.md', { kind: '代码复审', findings: [LOW_L1, ['I1', '提示', 'src/export/exporter.js', '以后导出列多了可以考虑用列定义表生成表头和各列', '无', '列数超过十列时再考虑']], verdict: '通过。没有高、中级问题，L1 和 I1 可以以后处理。' }); },
