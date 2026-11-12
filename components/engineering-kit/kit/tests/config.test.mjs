@@ -49,6 +49,8 @@ test('扁平 ⇄ profile 互转：字段不丢失', () => {
     testGroups: [{ name: 'unit', paths: ['src/**'], command: 'npm run test:unit' }], maxReviewRounds: 4,
     // 0.7.0 新增：pr 流程的必需检查名
     requiredChecks: ['test (ubuntu-latest)', 'lint'],
+    // 0.7.0 新增：外部复审允许的执行器与外发前追加排除
+    externalExecutors: ['codex'], externalExclude: ['config/*.secrets.yaml'],
   };
   const prof = toProfile(flat);
   assert.equal(prof.profile, 2);

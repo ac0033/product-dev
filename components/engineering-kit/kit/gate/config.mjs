@@ -1,11 +1,11 @@
 // 项目配置（engineering.config.json）的 profile 结构与展开。业务含义：
 //   项目配置是唯一由项目自己维护的文件，结构分四段，便于升级时只改动套件认可的字段：
 //     modules  —— 模块参数：gate（基准分支、测试命令、环境变量、测试分组 testGroups、锁时长、复审流程 reviewFlow、必需检查 requiredChecks）、
-//                 review（复审者名单、字数、结论关键词、复审轮次上限 maxReviewRounds）
+//                 review（复审者名单、字数、结论关键词、复审轮次上限 maxReviewRounds、允许的外部复审执行器 externalExecutors、外发前追加排除 externalExclude）
 //     layout   —— 目录布局：源文件与测试的 glob、阶段目录、允许的顶层目录
 //     hygiene  —— 巡检参数：禁用文件名片段、草稿超期天数、记录类目录、合法状态值
 //     rules    —— 规则：不计入闸门的文档（reviewIgnore；项目配置、豁免表、套件脚本除外，永远计入）、注释检查模式（commentMode）
-//   这里只做结构展开与取值校验。闸门运行时 base 与判定策略字段（reviewIgnore、reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds）
+//   这里只做结构展开与取值校验。闸门运行时 base 与判定策略字段（reviewIgnore、reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds、externalExecutors、externalExclude）
 //   的生效值不取工作区，而取主干或基准提交上的配置，见 lib.mjs 的 loadConfig。
 //   闸门内部只使用“扁平”字段（FLAT_KEYS），由 normalizeConfig 展开；旧版扁平配置仍可读取，便于回滚。
 // 同步器通过 toProfile / toFlat 在两种结构之间转换，保证回滚到旧版本时配置格式也随之回退。
@@ -14,12 +14,13 @@
 export const FLAT_KEYS = [
   'base', 'sourceGlobs', 'testGlobs', 'reviewIgnore', 'commentMode', 'testCommand', 'testEnv',
   'reviewers', 'reviewMinChars', 'reviewKeyword', 'lockMaxAgeMinutes', 'reviewFlow', 'testGroups', 'maxReviewRounds', 'requiredChecks',
+  'externalExecutors', 'externalExclude',
 ];
 
 /**
  * 扁平字段的缺省值。reviewIgnore 只放真正的纯说明文件（docs 下的 Markdown、根目录的 README 与 CHANGELOG）：
  * 规则（AGENTS.md、CLAUDE.md）、技能正文、提示词、可执行原型都会改变行为，不默认免审（0.7.0 起；之前是全部 Markdown 加整个 docs 目录）。
- * requiredChecks 为空表示 PR 上报告的每一项 CI 检查都是必需检查。
+ * requiredChecks 为空表示 PR 上报告的每一项 CI 检查都是必需检查。externalExecutors 为空表示不允许外部复审（external-review.mjs）。
  */
 export const DEFAULTS = {
   base: 'auto',
@@ -37,6 +38,8 @@ export const DEFAULTS = {
   testGroups: [],
   maxReviewRounds: 3,
   requiredChecks: [],
+  externalExecutors: [],
+  externalExclude: [],
 };
 
 /** 复审流程的合法取值：pre-push（推送前复审，推送核对只要求代码复审）或 pr（对 PR 最终提交做代码复审与一致性审：复审可以与 CI 并行开始；CI 全部通过后才登记、合并，经 merge.mjs 合并）。 */
@@ -80,6 +83,10 @@ export function normalizeConfig(raw) {
   }
   checkTestGroups(eff.testGroups);
   checkRequiredChecks(eff.requiredChecks);
+  for (const k of ['externalExecutors', 'externalExclude']) {
+    const v = eff[k];
+    if (!Array.isArray(v) || !v.every((x) => typeof x === 'string' && x.trim())) throw new Error(`engineering.config.json 的 modules.review.${k} 必须是非空字符串数组`);
+  }
   return eff;
 }
 
@@ -149,6 +156,8 @@ function expand(raw) {
     reviewMinChars: review.reviewMinChars ?? DEFAULTS.reviewMinChars,
     reviewKeyword: review.reviewKeyword ?? DEFAULTS.reviewKeyword,
     maxReviewRounds: review.maxReviewRounds ?? DEFAULTS.maxReviewRounds,
+    externalExecutors: review.externalExecutors ?? DEFAULTS.externalExecutors,
+    externalExclude: review.externalExclude ?? DEFAULTS.externalExclude,
     sourceGlobs: lay.sourceGlobs ?? DEFAULTS.sourceGlobs,
     testGlobs: lay.testGlobs ?? DEFAULTS.testGlobs,
     reviewIgnore: rules.reviewIgnore ?? DEFAULTS.reviewIgnore,
@@ -160,7 +169,7 @@ function expand(raw) {
 
 /**
  * 扁平配置 → profile 结构（同步器写入新格式时使用）。扁平结构里 _profile 段保存的布局与巡检设置原样恢复。
- * 测试分组和必需检查名是可选项：没有时不写 testGroups、requiredChecks，迁移旧配置不凭空多出一项。
+ * 测试分组、必需检查名和外部复审的两项是可选项：没有时不写，迁移旧配置不凭空多出一项。
  */
 export function toProfile(flat) {
   const f = normalizeConfig(flat);
@@ -168,11 +177,14 @@ export function toProfile(flat) {
   const gate = { base: f.base, testCommand: f.testCommand, testEnv: f.testEnv, lockMaxAgeMinutes: f.lockMaxAgeMinutes, reviewFlow: f.reviewFlow };
   if (f.testGroups.length > 0) gate.testGroups = f.testGroups;
   if (f.requiredChecks.length > 0) gate.requiredChecks = f.requiredChecks;
+  const review = { reviewers: f.reviewers, reviewMinChars: f.reviewMinChars, reviewKeyword: f.reviewKeyword, maxReviewRounds: f.maxReviewRounds };
+  if (f.externalExecutors.length > 0) review.externalExecutors = f.externalExecutors;
+  if (f.externalExclude.length > 0) review.externalExclude = f.externalExclude;
   return {
     profile: 2,
     modules: {
       gate,
-      review: { reviewers: f.reviewers, reviewMinChars: f.reviewMinChars, reviewKeyword: f.reviewKeyword, maxReviewRounds: f.maxReviewRounds },
+      review,
     },
     layout: { sourceGlobs, testGlobs, stages, topLevelAllowed },
     hygiene: { ...f.hygiene },
