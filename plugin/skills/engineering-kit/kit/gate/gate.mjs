@@ -60,6 +60,9 @@ const FULL_RECORD = 'tests-full.json';
 function staticMessages({ testFirst, comments }, assertions) {
   return [
     `测试先行检查通过（本次改动的源文件：检查 ${testFirst.checked} 个，豁免 ${testFirst.exempt} 个，无需测试 ${testFirst.skipped} 个，含已删除的）`,
+    ...(testFirst.unchecked > 0
+      ? [`  未检查 ${testFirst.unchecked} 个（语言不支持，识别不了测试引用，不等于无需测试，请自行保证有测试）：${testFirst.uncheckedFiles.join('、')}`]
+      : []),
     `注释检查通过（本次改动的源文件，不含 reviewIgnore 之内的和已删除的：检查 ${comments.checked} 个，豁免 ${comments.exempt} 个）`,
     `断言检查通过（本次改动的测试文件，不含已删除的、reviewIgnore 之内的和 __init__.py、conftest.py：检查 ${assertions.checked} 个，豁免 ${assertions.exempt} 个）`,
   ];

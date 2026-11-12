@@ -7,6 +7,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { HYGIENE_DEFAULTS, LAYOUT_DEFAULTS } from '../components/engineering-kit/kit/gate/config.mjs';
+import { capList, listRepoFiles } from './repo-files.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** 不参与检查的目录：本机私有材料、工具目录、第三方组件的本机存档（vendor）；模板里的链接相对安装后的位置，单独处理。 */
@@ -23,18 +24,8 @@ const PLUGIN_THIRD_PARTY = ['plugin/skills/impeccable/', 'plugin/skills/archify/
 const inComponent = (f) => (isPluginCopy(f) ? f.slice(PLUGIN_SKILLS.length) : f.startsWith(COMPONENTS) ? f.slice(COMPONENTS.length) : f);
 const isTemplate = (f) => inComponent(f).startsWith(TEMPLATE_DIR);
 
-/** 递归列出仓库里的文件（相对路径，正斜杠）。 */
-function listFiles(dir = ROOT, out = []) {
-  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (SKIP_DIRS.has(e.name)) continue;
-    const p = path.join(dir, e.name);
-    if (e.isDirectory()) listFiles(p, out);
-    else out.push(path.relative(ROOT, p).replace(/\\/g, '/'));
-  }
-  return out;
-}
-
-const FILES = listFiles();
+// 文件清单按 git 取（已跟踪 + 未跟踪未忽略，实际存在的），嵌套仓库和工作树（如 .claude/worktrees/）不在其内。
+const FILES = listRepoFiles(ROOT, SKIP_DIRS);
 /** 被检查的文档：全部 Markdown，本机专用记录（*.local.md）除外。 */
 const DOCS = FILES.filter((f) => f.endsWith('.md') && !f.endsWith('.local.md') && !PLUGIN_THIRD_PARTY.some((p) => f.startsWith(p)));
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
@@ -53,7 +44,7 @@ test('链接：文档里的相对链接和锚点都能到达', () => {
       else if (anchor && fs.statSync(target).isFile() && !fs.readFileSync(target, 'utf8').includes(`id="${anchor}"`)) broken.push(`${f} → ${link}（锚点不存在）`);
     }
   }
-  assert.deepEqual(broken, []);
+  assert.deepEqual(capList(broken), []);
 });
 
 test('阶段目录：文档和模板里出现的阶段目录名都在套件默认配置里', () => {
@@ -128,7 +119,7 @@ test('已废弃的说法：不再出现在任何文档里', () => {
   const bad = [];
   const scripts = FILES.filter((f) => /^components\/engineering-kit\/kit\/(gate|hooks|tools)\/.*\.(mjs|sh)$/.test(f));
   for (const f of [...DOCS.filter((d) => d !== 'evals/conflict-matrix.md'), ...scripts]) for (const b of banned) if (read(f).includes(b)) bad.push(`${f}：${b}`);
-  assert.deepEqual(bad, []);
+  assert.deepEqual(capList(bad), []);
 });
 
 test('重复：同一句较长的话不出现在两个文件里', () => {
@@ -152,5 +143,5 @@ test('重复：同一句较长的话不出现在两个文件里', () => {
     }
   }
   const dup = [...seen].filter(([, files]) => files.size > 1).map(([k, files]) => `${[...files].join(' = ')}：${k.split(' ')[1].slice(0, 40)}`);
-  assert.deepEqual(dup, []);
+  assert.deepEqual(capList(dup), []);
 });

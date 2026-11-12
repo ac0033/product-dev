@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { checkComments } from '../gate/check-comments.mjs';
-import { checkTestFirst, referencesModule } from '../gate/check-test-first.mjs';
+import { checkTestFirst, referencesFile } from '../gate/check-test-first.mjs';
 import { acquireLock, changedFiles, loadConfig, readRecord, recordDir, scopeFiles, treeHash, writeRecord } from '../gate/lib.mjs';
 import { runGate } from '../gate/gate.mjs';
 import { branchDirName, recordReview } from '../gate/review.mjs';
@@ -205,11 +205,12 @@ test('测试命令环境变量：配置的 testEnv 会传给测试命令（Pytho
 });
 
 test('测试先行：Python 的 “from 包 import 模块” 写法也算引用', () => {
-  assert.equal(referencesModule('from pdf_translation import budget\n', 'budget'), true);
-  assert.equal(referencesModule('from pdf_translation import tools, budget\n', 'budget'), true);
-  assert.equal(referencesModule('from pdf_translation.budget import Budget\n', 'budget'), true);
-  assert.equal(referencesModule('from pdf_translation import budget_helpers\n', 'budget'), false);
-  assert.equal(referencesModule("import { x } from '../src/dedup.ts';\n", 'dedup'), true);
+  const py = (text, src = 'pdf_translation/budget.py') => referencesFile(text, 'tests/test_budget.py', src);
+  assert.equal(py('from pdf_translation import budget\n'), true);
+  assert.equal(py('from pdf_translation import tools, budget\n'), true);
+  assert.equal(py('from pdf_translation.budget import Budget\n'), true);
+  assert.equal(py('from pdf_translation import budget_helpers\n'), false);
+  assert.equal(referencesFile("import { x } from '../src/dedup.ts';\n", 'test/dedup.test.ts', 'src/dedup.ts'), true);
 });
 
 test('闸门：配置的 glob 一个文件都匹配不上（如 JS 项目用了默认的 .ts）时报错，不当作“尚无源码”放行', () => {
@@ -251,10 +252,11 @@ test('复审记录：“结论：**不通过**”“结论：未通过”也识�
 });
 
 test('测试先行：模块名必须是完整的导入文件名，user-service 不算引用了 user', () => {
-  assert.equal(referencesModule("import { a } from '../src/user-service';", 'user'), false);
-  assert.equal(referencesModule("import { a } from '../src/user';", 'user'), true);
-  assert.equal(referencesModule("import { a } from '../src/user.ts';", 'user'), true);
-  assert.equal(referencesModule("const a = require('./user.js');", 'user'), true);
+  const ref = (text) => referencesFile(text, 'test/user.test.js', 'src/user.ts');
+  assert.equal(ref("import { a } from '../src/user-service';"), false);
+  assert.equal(ref("import { a } from '../src/user';"), true);
+  assert.equal(ref("import { a } from '../src/user.ts';"), true);
+  assert.equal(ref("const a = require('../src/user.js');"), true);
 });
 
 test('记录目录：各工作树各用自己的 git 目录，记录互不覆盖', () => {
