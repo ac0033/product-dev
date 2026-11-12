@@ -11,7 +11,7 @@ Product Dev 也提供一个可独立导入的 **Agent Skills 包**。整个包�
 这一节写给替用户安装的 Agent。按顺序做，每一步以命令的实际输出为准。
 
 1. **确认宿主。** 你运行在哪个 Agent 里，就装到哪个。判断不了时问用户，不要每个宿主都装一遍。
-2. **查是否已装。** 先运行下表的验证命令。已经装过的不重复安装，直接做第 4 步；要更新时用 [README 的升级一节](https://github.com/ac0033/product-dev/blob/main/README.md#upgrade)里的命令。
+2. **查是否已装。** 先运行下表的验证命令。已经装过的不重复安装，直接做第 4 步；装了但没启用的（Claude Code 的 `Status` 是 disabled，Codex 显示已装但没有 `enabled`）也不重装：Claude Code 运行 `claude plugin enable product-dev@ac0033-skills`，其他宿主请用户在插件设置里启用，再做第 4 步；要更新时用 [README 的升级一节](https://github.com/ac0033/product-dev/blob/main/README.md#upgrade)里的命令。
 3. **安装并验证。** 只用下表的来源。添加市场或安装时提示已存在的，以验证命令的结果为准，不算失败。其余命令失败时把命令和输出原样告诉用户，不换别的来源，也不手工复制文件代替。
 
    | 宿主 | 安装 | 验证 |
@@ -23,7 +23,7 @@ Product Dev 也提供一个可独立导入的 **Agent Skills 包**。整个包�
 
 4. **核对版本。** 验证命令显示的版本号，应与[最新发布](https://github.com/ac0033/product-dev/releases/latest)的版本一致。不一致时按第 2 步链接里的升级命令更新一次，仍不一致就如实告诉用户。
 5. **让它生效。** 安装前已经打开的会话看不到新插件。Claude Code 运行 `/reload-plugins` 或重新启动，Codex 重启桌面端或新开会话，其他宿主新开会话。
-6. **向用户交代结果。** 说明装到了哪个宿主、版本号、怎样调用（Claude Code 是 `/product-dev:product-dev`，Codex 在技能列表里选 `product-dev`，DeepSeek Harness 是 `/product-dev`），以及哪一步没有做成。
+6. **向用户交代结果。** 说明装到了哪个宿主、版本号、怎样调用（Claude Code 是 `/product-dev:product-dev`，Codex 在技能列表里选 `product-dev`，DeepSeek Harness 是 `/product-dev`，pi 是 `/skill:product-dev`，OpenCode 是告诉它加载 `product-dev` 技能，WorkBuddy 在任务中选择 `product-dev`，其他宿主见下文对应一节），以及哪一步没有做成。
 
 安装只装插件本身，不向用户的项目写入任何文件。把工程套件同步进某个项目是另一件事，要用户另行同意。
 
