@@ -119,7 +119,8 @@ export function loadConfig(root) {
   const atBase = rev && rev !== EMPTY_TREE ? configAt(root, rev, `基准提交 ${rev.slice(0, 12)} `) : null;
   if (atBase) {
     for (const k of POLICY_KEYS) policy[k] = atBase[k];
-    const differ = POLICY_KEYS.filter((k) => JSON.stringify(atBase[k]) !== JSON.stringify(config[k]));
+    // externalExclude 由 external-review.mjs 与工作区取并集、当轮生效，不适用“合入主干后才生效”的提示
+    const differ = POLICY_KEYS.filter((k) => k !== 'externalExclude' && JSON.stringify(atBase[k]) !== JSON.stringify(config[k]));
     if (differ.length > 0) {
       notes.push(`提示：工作区配置的 ${differ.join('、')} 与基准提交 ${rev.slice(0, 12)} 上的不同，闸门按基准上的值判定；这些改动合入主干后才生效`);
     }

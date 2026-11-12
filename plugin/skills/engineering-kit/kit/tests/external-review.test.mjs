@@ -6,8 +6,10 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { normalizeConfig, toFlat, toProfile } from '../gate/config.mjs';
 import { runGate } from '../gate/gate.mjs';
+import { loadConfig } from '../gate/lib.mjs';
 import {
   assess,
   buildPrompt,
@@ -381,7 +383,8 @@ test('M1 组包：含反斜杠等不安全的树条目名不写进副本，也�
   const parent = tmpDir('ekit-mat-');
   const dir = path.join(parent, 'a', 'b', 'ws');
   const res = materialize(root, commit, dir);
-  assert.deepEqual(res.unsafe.sort(), ['con.txt', 'x\\..\\..\\evil.txt']);
+  // con.txt 只在 Windows 上算不安全（保留名）；反斜杠在所有平台都拦
+  assert.deepEqual(res.unsafe.sort(), process.platform === 'win32' ? ['con.txt', 'x\\..\\..\\evil.txt'] : ['x\\..\\..\\evil.txt']);
   assert.ok(fs.existsSync(path.join(dir, 'ok.txt')));
   assert.equal(fs.existsSync(path.join(parent, 'a', 'evil.txt')), false, '没有写到副本目录之外');
   assert.equal(fs.existsSync(path.join(dir, 'x\\..\\..\\evil.txt')), false);
@@ -495,7 +498,7 @@ test('L4 排除：分支新加的 externalExclude 当轮生效（与基准取并
 
 test('L5 命令行：数值参数不是正数时报错，不静默放宽上限', () => {
   const { root } = repo();
-  const cli = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', 'gate', 'external-review.mjs');
+  const cli = fileURLToPath(new URL('../gate/external-review.mjs', import.meta.url));
   const r = spawnSync(process.execPath, [cli, 'run', '--executor', 'fake', '--max-diff-kb', 'abc'], { cwd: root, encoding: 'utf8' });
   assert.equal(r.status, 1);
   assert.match(r.stderr, /--max-diff-kb 必须是正数/);
@@ -517,4 +520,80 @@ test('P1 首轮用 --base 收窄范围：报告局限里写明，登记仍可做
   const res = await run(root, head, 'pass', { base: 'HEAD~1' });
   assert.equal(res.ok, true, res.message);
   assert.match(fs.readFileSync(res.reportPath, 'utf8'), /首轮用 --base 收窄了被审范围/);
+});
+
+// ── 修后复核意见（PR #18 第二轮）对应的测试 ──
+
+test('M-a Codex：会话里出现任何工具条目（命令执行、文件改动等）就判失败，不可登记', () => {
+  const request = { model: { id: 'm' } };
+  const review = { verdict: 'pass', findings: [], limitations: [], report: NARRATIVE };
+  const ev = (...e) => e.map((x) => JSON.stringify(x)).join('\n');
+  for (const type of ['command_execution', 'file_change', 'mcp_tool_call', 'web_search', 'something_new']) {
+    const p = parseCodex(ev(
+      { type: 'thread.started', thread_id: 't' },
+      { type: 'item.started', item: { type, command: 'cat ~/.ssh/id_rsa' } },
+      { type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(review) } },
+    ), null, request);
+    assert.equal(p.status, 'failed', type);
+    assert.match(p.error, /执行了工具/);
+  }
+  const ok = parseCodex(ev({ type: 'thread.started', thread_id: 't' }, { type: 'item.completed', item: { type: 'reasoning', text: '想一想' } }, { type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(review) } }), null, request);
+  assert.equal(ok.status, 'completed', '推理条目不算工具');
+});
+
+test('L-c 组包：大写的密钥文件名（SERVER.PEM、.ENV）同样不外发', async () => {
+  const { root } = repo();
+  write(root, 'certs/SERVER.PEM', 'UPPER-PEM\n');
+  write(root, 'app/.ENV', 'UPPER-ENV\n');
+  git(root, ['add', '-f', 'certs/SERVER.PEM', 'app/.ENV']);
+  commitAll(root, 'upper');
+  const head = git(root, ['rev-parse', 'HEAD']).trim();
+  const res = await run(root, head, 'pass');
+  const seen = JSON.parse(fs.readFileSync(path.join(res.runDir, 'raw', 'seen.json'), 'utf8'));
+  assert.doesNotMatch(seen.req.target.diff, /UPPER-PEM|UPPER-ENV/);
+  for (const f of ['certs/SERVER.PEM', 'app/.ENV']) assert.ok(!seen.files.includes(f) && seen.req.target.excludedFiles.includes(f), f);
+});
+
+test('L-d 配置：分支追加 externalExclude 不给“合入主干后才生效”的误导提示', () => {
+  const { root } = repo();
+  const cfg = JSON.parse(fs.readFileSync(path.join(root, 'engineering.config.json'), 'utf8'));
+  write(root, 'engineering.config.json', JSON.stringify({ ...cfg, externalExclude: ['config/*.secrets.yaml'] }));
+  assert.ok(!loadConfig(root).notes.some((n) => n.includes('externalExclude')));
+});
+
+test('L-f 补登：运行目录里的任务被改过（被审提交、哈希对不上）时拒绝', async () => {
+  const { root, head } = repo();
+  const res = await run(root, head, 'pass');
+  const file = path.join(res.runDir, 'request.json');
+  const req = JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.writeFileSync(file, JSON.stringify({ ...req, target: { ...req.target, headSha: 'd'.repeat(40) } }));
+  const r = registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh(['d'.repeat(40)]) });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /互相对不上/);
+});
+
+test('passEnv：本机配置列出的变量名从当前环境放行，其余照样拦下', () => {
+  const env = executorEnv({}, {}, { OPENAI_API_KEY: 'sk-x', OTHER_KEY: 'y', PATH: 'p' }, ['OPENAI_API_KEY']);
+  assert.deepEqual(Object.keys(env).sort(), ['OPENAI_API_KEY', 'PATH']);
+  const f = path.join(tmpDir('ekit-local-'), 'c.json');
+  fs.writeFileSync(f, JSON.stringify({ executors: { x: { type: 'codex', command: ['codex'], passEnv: ['BAD NAME'] } } }));
+  assert.throws(() => loadLocalConfig(repo().root, f), /passEnv 必须是环境变量名数组/);
+});
+
+test('L-a 运行子进程：超时后脱离进程树的后代仍握着输出管道时，宽限期一到就返回（POSIX）', { skip: process.platform === 'win32' && 'Windows 的进程树结束方式不同，这条只在 POSIX 上跑' }, async () => {
+  const dir = tmpDir('ekit-grace-');
+  const pidFile = path.join(dir, 'pid');
+  const script = `const { spawn } = require('node:child_process'); const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }); require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(c.pid)); setInterval(() => {}, 1000);`;
+  const started = Date.now();
+  const r = await runProcess({ command: process.execPath, args: ['-e', script], timeoutMs: 800, graceMs: 800 });
+  try {
+    assert.equal(r.timedOut, true);
+    assert.ok(Date.now() - started < 10000, '没有挂住');
+  } finally {
+    try {
+      process.kill(Number(fs.readFileSync(pidFile, 'utf8')), 'SIGKILL');
+    } catch {
+      // 已结束
+    }
+  }
 });

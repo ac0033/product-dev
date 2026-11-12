@@ -71,6 +71,11 @@
 - 执行器的环境变量改成允许清单，并关闭 `code_mode_host`，所有工具失败即关闭，Codex 只依据 diff 审。原因：只读沙箱能读全盘，提示注入可能让模型读本机的密钥。
 - 改后用 gpt-6.1-sol 在注入样例上实跑一次：登录正常，结论不通过，SQL 注入判为高级，没有被带偏，局限里写明"只依据 diff"，耗时 30 秒。订阅额度仍是 41%，全部 Codex 调用累计约 26 次。
 
+### PR #18 修后复核后的变化（2026-11-13）
+
+- "关闭 `code_mode_host` 就没有工具"的依据：本机两次实测的报错不同。没关时是"failed to spawn code-mode host"（宿主程序缺失）；关掉后是"code-mode host is disabled … fail closed"，Codex 没有退回经典 shell。说明是开关本身让工具失败即关闭，和宿主程序在不在无关。但这只在 Windows 上的 codex-cli 0.167.0-alpha 观察过，没有在工具可用的平台上验证。
+- 补了代码核对：Codex 会话里出现回答、推理、错误、待办以外的任何条目，就判失败、不可登记。本轮所有真实运行（28 个会话）只出现过 `error` 和 `agent_message` 两种条目，模型硬去调工具的那次也一样。这道核对是事后的：工具真跑了，读到的内容在作废前可能已经发出，所以换平台或升级 Codex 后应先复测。
+
 ### CodeBuddy CLI（2.165.0，WorkBuddy AI 内置，放弃）
 
 - **参数**：`-p`、`--output-format json/stream-json`、`--json-schema`、`--tools`、`--allowedTools`、`--disallowedTools`、`--permission-mode`（含 `dontAsk`）、`--max-turns`、`--model` 都存在。
