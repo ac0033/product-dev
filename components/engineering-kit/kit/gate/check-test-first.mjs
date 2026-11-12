@@ -56,8 +56,10 @@ function jsReferences(text, testRel, srcRel) {
       const resolved = posix.normalize(posix.join(posix.dirname(testRel), base)).replace(/^\.$/, '');
       return targets.includes(resolved);
     }
-    const p = base.replace(/^[@~#]\//, '');
-    return targets.some((t) => t === p || (p.includes('/') && t.endsWith(`/${p}`)) || (t.includes('/') && p.endsWith(`/${t}`)));
+    // 别名前缀（@/、~/、#）明确表示“从某个源码根起算”，去掉后按后缀匹配，允许单段（@/util）；不带前缀的单段名（util）不算
+    const aliased = /^(?:[@~]\/|#)/.test(base);
+    const p = base.replace(/^(?:[@~]\/|#)/, '');
+    return targets.some((t) => t === p || ((aliased || p.includes('/')) && t.endsWith(`/${p}`)) || (t.includes('/') && p.endsWith(`/${t}`)));
   });
 }
 

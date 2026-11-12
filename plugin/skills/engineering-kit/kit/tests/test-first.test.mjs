@@ -97,6 +97,11 @@ test('非相对路径（别名、包名）：写出的路径必须是源文件�
   assert.equal(referencesFile("import { x } from 'src/a/util';", 'test/x.test.js', src), true);
   assert.equal(referencesFile("import { x } from 'pkg/src/a/util.js';", 'test/x.test.js', src), true);
   assert.equal(referencesFile("import { x } from '@/b/util';", 'test/x.test.js', src), false);
+  // 别名指向源码根时只有一段也认（Vue、Vite、Next 项目常见）；不带别名前缀的单段名不认
+  assert.equal(referencesFile("import { f } from '@/util';", 'test/x.test.ts', 'src/util.ts'), true);
+  assert.equal(referencesFile("import { f } from '~/util';", 'test/x.test.ts', 'src/util.ts'), true);
+  assert.equal(referencesFile("import { f } from '#src/a/util.js';", 'test/x.test.js', src), true);
+  assert.equal(referencesFile("import { f } from '@/other';", 'test/x.test.ts', 'src/util.ts'), false);
   assert.equal(referencesFile("import util from 'util';", 'test/x.test.js', src), false, 'Node 内置的 util 不是本文件');
   assert.equal(referencesFile("import util from 'node:util';", 'test/x.test.js', src), false);
 });
@@ -156,5 +161,15 @@ test('闸门输出：测试先行通过行之后列出“未检查”的文件�
   const res = runGate({ root });
   assert.equal(res.ok, true, res.messages.join('\n'));
   assert.ok(res.messages.some((m) => /^测试先行检查通过.*无需测试 0 个/.test(m)), res.messages.join('\n'));
+  assert.ok(res.messages.some((m) => /^\s*未检查 1 个.*src\/main\.go/.test(m)), res.messages.join('\n'));
+});
+
+test('闸门输出：静态检查不通过时，“未检查”的文件同样列出', () => {
+  const root = featureRepo({ sourceGlobs: ['src/**/*.ts', 'src/**/*.go'] });
+  write(root, 'src/main.go', '// 示例：Go 源文件，测试先行检查识别不了它的测试引用。\npackage main\n');
+  write(root, 'src/rank.ts', `${HEADER}export function rank(x: number) {\n  return x;\n}\n`);
+  const res = runGate({ root });
+  assert.equal(res.ok, false);
+  assert.ok(res.messages.some((m) => /src\/rank\.ts：没有引用它的测试/.test(m)), res.messages.join('\n'));
   assert.ok(res.messages.some((m) => /^\s*未检查 1 个.*src\/main\.go/.test(m)), res.messages.join('\n'));
 });

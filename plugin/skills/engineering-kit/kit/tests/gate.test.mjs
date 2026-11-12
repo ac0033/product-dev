@@ -312,7 +312,7 @@ test('闸门输出：通过时列出测试先行和注释两项静态检查各�
   assert.match(cm, /检查 2 个/);
   assert.match(cm, /豁免 1 个/);
   assert.ok(res.messages.indexOf(tf) < res.messages.findIndex((m) => m.startsWith('测试通过')), '静态检查结果排在测试结果之前');
-  assert.deepEqual(res.record.staticChecks, { testFirst: { checked: 1, exempt: 1, skipped: 1 }, comments: { checked: 2, exempt: 1 } });
+  assert.deepEqual(res.record.staticChecks, { testFirst: { checked: 1, exempt: 1, skipped: 1, unchecked: 0, uncheckedFiles: [] }, comments: { checked: 2, exempt: 1 } });
   assert.deepEqual(readRecord(root, 'tests.json').staticChecks, res.record.staticChecks);
 });
 
@@ -468,7 +468,7 @@ test('闸门输出：删除的源文件计入测试先行的“无需测试”�
   const res = runGate({ root });
   assert.equal(res.ok, true, res.messages.join('\n'));
   // 改动的源文件 2 个：dedup.ts 已删除（无需测试），legacy/old.ts 被测试先行检查、但在 reviewIgnore 之内所以注释检查不看
-  assert.deepEqual(res.record.staticChecks, { testFirst: { checked: 1, exempt: 0, skipped: 1 }, comments: { checked: 0, exempt: 0 } });
+  assert.deepEqual(res.record.staticChecks, { testFirst: { checked: 1, exempt: 0, skipped: 1, unchecked: 0, uncheckedFiles: [] }, comments: { checked: 0, exempt: 0 } });
   assert.ok(res.messages.some((m) => /^测试先行检查通过.*无需测试 1 个，含已删除的/.test(m)), res.messages.join('\n'));
   assert.ok(res.messages.some((m) => /^注释检查通过.*不含 reviewIgnore 之内的和已删除的.*检查 0 个/.test(m)), res.messages.join('\n'));
 });
