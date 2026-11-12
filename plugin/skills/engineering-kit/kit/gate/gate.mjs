@@ -52,6 +52,13 @@ const CODE_FILE = /\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|rb|php|cs|c|cc|cpp|h|swift
 /** 最近一次通过的全量记录（按影响范围测试的起点）。tests.json 总是最近一次运行的记录。 */
 const FULL_RECORD = 'tests-full.json';
 
+/** 测试先行没能检查的文件（语言不支持）：通过与不通过时的输出都要列出，不让它们被当成“无需测试”。 */
+function uncheckedLines(testFirst) {
+  return testFirst.unchecked > 0
+    ? [`  未检查 ${testFirst.unchecked} 个（语言不支持，识别不了测试引用，不等于无需测试，请自行保证有测试）：${testFirst.uncheckedFiles.join('、')}`]
+    : [];
+}
+
 /**
  * 静态检查通过后的结果行：各检查了几个本次改动的文件、豁免了几个。三项的范围不同，各自写明：
  * 测试先行看全部改动的源文件，已删除的和没有可测导出的计入“无需测试”；注释检查不看 reviewIgnore 之内的和已删除的；
@@ -60,6 +67,7 @@ const FULL_RECORD = 'tests-full.json';
 function staticMessages({ testFirst, comments }, assertions) {
   return [
     `测试先行检查通过（本次改动的源文件：检查 ${testFirst.checked} 个，豁免 ${testFirst.exempt} 个，无需测试 ${testFirst.skipped} 个，含已删除的）`,
+    ...uncheckedLines(testFirst),
     `注释检查通过（本次改动的源文件，不含 reviewIgnore 之内的和已删除的：检查 ${comments.checked} 个，豁免 ${comments.exempt} 个）`,
     `断言检查通过（本次改动的测试文件，不含已删除的、reviewIgnore 之内的和 __init__.py、conftest.py：检查 ${assertions.checked} 个，豁免 ${assertions.exempt} 个）`,
   ];
@@ -174,7 +182,7 @@ function runChecks({ root, config, affected = false, force = false }) {
     if (problems.length > 0) {
       return {
         ok: false,
-        messages: ['静态检查未通过（未运行测试）：', ...problems.map((p) => `  - ${p.message}`), ...hintLines],
+        messages: ['静态检查未通过（未运行测试）：', ...problems.map((p) => `  - ${p.message}`), ...uncheckedLines(staticChecks.testFirst), ...hintLines],
         record: null,
       };
     }

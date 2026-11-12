@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { checkComments } from '../gate/check-comments.mjs';
-import { checkTestFirst, referencesModule } from '../gate/check-test-first.mjs';
+import { checkTestFirst, referencesFile } from '../gate/check-test-first.mjs';
 import { acquireLock, changedFiles, loadConfig, readRecord, recordDir, scopeFiles, treeHash, writeRecord } from '../gate/lib.mjs';
 import { runGate } from '../gate/gate.mjs';
 import { branchDirName, recordReview } from '../gate/review.mjs';
@@ -205,11 +205,12 @@ test('测试命令环境变量：配置的 testEnv 会传给测试命令（Pytho
 });
 
 test('测试先行：Python 的 “from 包 import 模块” 写法也算引用', () => {
-  assert.equal(referencesModule('from pdf_translation import budget\n', 'budget'), true);
-  assert.equal(referencesModule('from pdf_translation import tools, budget\n', 'budget'), true);
-  assert.equal(referencesModule('from pdf_translation.budget import Budget\n', 'budget'), true);
-  assert.equal(referencesModule('from pdf_translation import budget_helpers\n', 'budget'), false);
-  assert.equal(referencesModule("import { x } from '../src/dedup.ts';\n", 'dedup'), true);
+  const py = (text, src = 'pdf_translation/budget.py') => referencesFile(text, 'tests/test_budget.py', src);
+  assert.equal(py('from pdf_translation import budget\n'), true);
+  assert.equal(py('from pdf_translation import tools, budget\n'), true);
+  assert.equal(py('from pdf_translation.budget import Budget\n'), true);
+  assert.equal(py('from pdf_translation import budget_helpers\n'), false);
+  assert.equal(referencesFile("import { x } from '../src/dedup.ts';\n", 'test/dedup.test.ts', 'src/dedup.ts'), true);
 });
 
 test('闸门：配置的 glob 一个文件都匹配不上（如 JS 项目用了默认的 .ts）时报错，不当作“尚无源码”放行', () => {
@@ -251,10 +252,11 @@ test('复审记录：“结论：**不通过**”“结论：未通过”也识�
 });
 
 test('测试先行：模块名必须是完整的导入文件名，user-service 不算引用了 user', () => {
-  assert.equal(referencesModule("import { a } from '../src/user-service';", 'user'), false);
-  assert.equal(referencesModule("import { a } from '../src/user';", 'user'), true);
-  assert.equal(referencesModule("import { a } from '../src/user.ts';", 'user'), true);
-  assert.equal(referencesModule("const a = require('./user.js');", 'user'), true);
+  const ref = (text) => referencesFile(text, 'test/user.test.js', 'src/user.ts');
+  assert.equal(ref("import { a } from '../src/user-service';"), false);
+  assert.equal(ref("import { a } from '../src/user';"), true);
+  assert.equal(ref("import { a } from '../src/user.ts';"), true);
+  assert.equal(ref("const a = require('../src/user.js');"), true);
 });
 
 test('记录目录：各工作树各用自己的 git 目录，记录互不覆盖', () => {
@@ -310,7 +312,7 @@ test('闸门输出：通过时列出测试先行和注释两项静态检查各�
   assert.match(cm, /检查 2 个/);
   assert.match(cm, /豁免 1 个/);
   assert.ok(res.messages.indexOf(tf) < res.messages.findIndex((m) => m.startsWith('测试通过')), '静态检查结果排在测试结果之前');
-  assert.deepEqual(res.record.staticChecks, { testFirst: { checked: 1, exempt: 1, skipped: 1 }, comments: { checked: 2, exempt: 1 } });
+  assert.deepEqual(res.record.staticChecks, { testFirst: { checked: 1, exempt: 1, skipped: 1, unchecked: 0, uncheckedFiles: [] }, comments: { checked: 2, exempt: 1 } });
   assert.deepEqual(readRecord(root, 'tests.json').staticChecks, res.record.staticChecks);
 });
 
@@ -466,7 +468,7 @@ test('闸门输出：删除的源文件计入测试先行的“无需测试”�
   const res = runGate({ root });
   assert.equal(res.ok, true, res.messages.join('\n'));
   // 改动的源文件 2 个：dedup.ts 已删除（无需测试），legacy/old.ts 被测试先行检查、但在 reviewIgnore 之内所以注释检查不看
-  assert.deepEqual(res.record.staticChecks, { testFirst: { checked: 1, exempt: 0, skipped: 1 }, comments: { checked: 0, exempt: 0 } });
+  assert.deepEqual(res.record.staticChecks, { testFirst: { checked: 1, exempt: 0, skipped: 1, unchecked: 0, uncheckedFiles: [] }, comments: { checked: 0, exempt: 0 } });
   assert.ok(res.messages.some((m) => /^测试先行检查通过.*无需测试 1 个，含已删除的/.test(m)), res.messages.join('\n'));
   assert.ok(res.messages.some((m) => /^注释检查通过.*不含 reviewIgnore 之内的和已删除的.*检查 0 个/.test(m)), res.messages.join('\n'));
 });
