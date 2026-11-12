@@ -147,6 +147,17 @@ test('功能契约模板：提示写明日期、时间字段的时区口径', ()
   for (const word of ['存储', '展示', '边界']) assert.ok(contract.includes(word), `时区提示缺“${word}”`);
 });
 
+test('功能契约模板：“预期行为与异常边界”一节排在验收标准之前，场景表三栏，五类情形逐类列出', () => {
+  const root = targetRepo();
+  syncKit({ target: root });
+  const contract = read(root, 'docs/_templates/feature-contract.md');
+  const at = contract.indexOf('## 预期行为与异常边界');
+  assert.ok(at > 0 && at < contract.indexOf('## 怎样证明正确'), '场景表一节应在“怎样证明正确”之前');
+  assert.match(contract, /\| 场景 \| 触发 \| 预期结果 \|/);
+  for (const kind of ['正常', '失败', '超时', '并发或重复', '边界值']) assert.ok(contract.includes(`：${kind} |`), `场景表缺“${kind}”一类`);
+  assert.ok(contract.includes('不适用') && contract.includes('不从实现倒推'));
+});
+
 test('按标签回滚：旧版本（0.1.0，扁平配置、无标记块）能装回，配置格式随之回退', () => {
   const tagExists = spawnSync('git', ['-C', BUNDLE_ROOT, 'rev-parse', '--verify', '--quiet', 'engineering-kit-v0.1.0^{commit}'], { encoding: 'utf8' }).status === 0;
   if (!tagExists) return; // 源仓库没有 0.1.0 标签时跳过（例如在别的克隆里运行）

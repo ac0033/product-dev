@@ -310,6 +310,44 @@ function exportCreatedAtBranch(root) {
   commit(root, 'feat(export): 导出增加创建日期列', '2026-11-09T15:00:00');
 }
 
+/** 在当前分支上跑一次闸门（全量），留下与最终提交一致的测试记录（供复审循环类用例）。 */
+const gate = (root) => sh(root, 'node', ['scripts/engineering/gate/gate.mjs']);
+
+/**
+ * 写一份按插件 review.md 第 7 节格式的复审报告到现场目录的 reviews/ 下（不在项目里），返回它的路径。
+ * findings 是 [编号, 级别, 位置, 问题, 触发条件, 建议改法]；verdict 是“通过。…”或“不通过。…”。
+ */
+function reviewReport(root, name, { kind, findings, verdict }) {
+  const file = path.join(root, '..', 'reviews', name);
+  const head = git(root, 'rev-parse', 'HEAD').trim();
+  const rows = findings.length ? findings.map((f) => `| ${f.join(' | ')} |`).join('\n') : '无';
+  w(path.dirname(file), path.basename(file), `
+# 复审报告：导出增加创建日期列
+
+审查种类：${kind}　复审者：${kind === '一致性审' ? 'general-purpose' : 'product-dev:code-reviewer'}　模型：claude-opus-5-5
+对象：feat/export-created-at @ ${head}，基准 main
+
+## 范围
+读了功能契约 docs/04-开发/feature-export-created-at.md、src/export/exporter.js 与 tests/exporter.test.js 的差异，以及调用方 src/web/save.js（createdAt 的来源）和 src/store/store.js；README.md 与 docs/01-需求/PRD.md 的导出描述也读了。没有读与导出无关的登录页代码。
+
+## 发现
+| 编号 | 级别 | 位置 | 问题 | 触发条件或例子 | 建议改法 |
+|---|---|---|---|---|---|
+${rows}
+
+## 作者的验证
+作者的闸门记录在最终提交上通过（全量）；变异检查：把 slice(0, 10) 改成 slice(0, 7) 后 tests/exporter.test.js 的创建日期断言失败，输出在任务书的验证证据里，复审者核对过断言确实覆盖这一列。
+
+## 结论
+${verdict}
+`);
+  return file.split(path.sep).join('/');
+}
+
+const CSV_M1 = ['M1', '中', 'src/export/exporter.js（exportTickets 的 return 一行）', '各列直接用英文逗号拼接，没有转义；标题里有逗号时整行多出一列，最后一列不再是创建日期，违反契约的验收条件“每行最后一列是该工单的创建日期”', "标题为 '打印机,复印机坏了' 的工单导出后，该行有 6 列", '按 CSV 规则给含逗号、引号、换行的字段加双引号并转义引号；补一条标题带逗号的测试'];
+const LOW_L1 = ['L1', '低', 'tests/exporter.test.js（rows 测试数据）', '测试数据里的 createdAt 都是 Z 结尾的 UTC 时间，没有带时区偏移的例子', "createdAt 为 '2026-11-09T01:00:00+08:00' 时没有测试", '以后补一条带偏移的测试数据'];
+const LOW_L2 = ['L2', '低', 'README.md', 'README 没有写导出的 CSV 有哪些列', '新同事读 README 不知道多了 createdAt 列', '在 README 的说明里补一句导出列'];
+
 // ---------- 设计项目：票据夹 ----------
 const PRD = (v = 'v1.0', extra = '') => `
 # PRD：票据夹
@@ -741,6 +779,36 @@ const cases = {
     bg: '需求已确认；原型说明和原型文件已做出，还没有走查，用户也还没确认体验基线。',
     msg: '原型做好了，按流程做实际走查吧。',
   },
+  // 测试设计与复审循环（2026-11-12 新增）
+  G1: {
+    make: (r) => { codeBase(r); git(r, 'checkout', '-q', '-b', 'feat/ticket-due-date'); },
+    bg: '用户已批准任务“工单增加截止日期：保存时可以填截止日期，已过截止日期还没关闭的工单在列表里标红，导出时多一列 dueDate”。这是加功能路线，开工检查已做过，分支 feat/ticket-due-date 已从最新 main 开出，代码探索已完成（相关文件：src/web/save.js、src/store/store.js、src/export/exporter.js 及对应测试）；澄清问题已问完，用户的回答是：截止日期只精确到天，团队成员都在北京时间。',
+    msg: '把功能契约写出来，写好给我确认。',
+  },
+  G2: {
+    make: (r) => { codeBase(r); exportCreatedAtBranch(r); gate(r); reviewReport(r, 'code-r1.md', { kind: '代码复审', findings: [CSV_M1, LOW_L1], verdict: '不通过。标题带逗号时最后一列错位，不满足契约；高、中级问题的编号清单：M1。' }); reviewReport(r, 'consistency-r1.md', { kind: '一致性审', findings: [LOW_L2], verdict: '通过。只有一条低级问题 L2。' }); },
+    bg: (d) => `任务“给导出的 CSV 增加‘创建日期’列”已获用户批准，功能契约已确认。分支 feat/export-created-at 上的代码是你（当前这个主对话）写的，已提交；推送前自查已做；闸门已在当前提交上通过（全量），变异检查已做。项目用默认的 pre-push 复审流程。首轮的代码复审和一致性审是并行派发的两个独立子代理（代码复审 product-dev:code-reviewer，一致性审 general-purpose，模型都是 opus），两份报告都已交回，你已把它们原样存成文件：\`${d}/reviews/code-r1.md\`、\`${d}/reviews/consistency-r1.md\`（还没有登记）。`,
+    msg: '两份复审都回来了，继续往下做。',
+  },
+  G3: {
+    make: (r) => { codeBase(r); exportCreatedAtBranch(r); gate(r); reviewReport(r, 'code-r1.md', { kind: '代码复审', findings: [LOW_L1, ['I1', '提示', 'src/export/exporter.js', '以后导出列多了可以考虑用列定义表生成表头和各列', '无', '列数超过十列时再考虑']], verdict: '通过。没有高、中级问题，L1 和 I1 可以以后处理。' }); },
+    bg: (d) => `任务“给导出的 CSV 增加‘创建日期’列”已获用户批准，功能契约已确认（低风险）。分支 feat/export-created-at 上的代码是你写的，已提交；推送前自查已做；闸门已在当前提交上通过（全量），变异检查已做。项目用默认的 pre-push 复审流程。首轮代码复审（product-dev:code-reviewer，模型 opus）的报告已交回，你已把它原样存成 \`${d}/reviews/code-r1.md\`（还没有登记）；一致性审按分档延期，理由是低风险小改动、并入每周巡检。`,
+    msg: '复审回来了，继续。',
+  },
+  G4: {
+    make: (r) => { codeBase(r); exportCreatedAtBranch(r); gate(r); reviewReport(r, 'code-r1.md', { kind: '代码复审', findings: [CSV_M1], verdict: '不通过。标题带逗号时最后一列错位，不满足契约；高、中级问题的编号清单：M1。' }); },
+    bg: (d) => `任务“给导出的 CSV 增加‘创建日期’列”已获用户批准，功能契约已确认。分支 feat/export-created-at 上的代码是你写的，已提交；闸门已在当前提交上通过（全量）。项目用默认的 pre-push 复审流程。首轮代码复审（product-dev:code-reviewer，模型 opus）的报告已原样存成 \`${d}/reviews/code-r1.md\`，结论不通过（M1），还没有登记。上一轮你已经把 M1 的内容、触发条件和修复办法讲给用户听了。`,
+    msg: 'M1 我看明白了。我们团队的工单标题从来不带英文逗号，这次不改，就按现在这样。',
+  },
+  G5: {
+    make: (r) => codeBase(r),
+    msg: '给工单存储加一个 countTickets() 函数，返回当前有多少条工单，后面统计页要用。把它做了。',
+  },
+  G6: {
+    make: (r) => designBase(r, ['proto', 'arch', 'impl']),
+    bg: '设计三份文档与实施交接都已确认，准备度 READY；用户已授权开始工程实现（不涉及生产发布）。技术栈按架构文档定为本机 Node 应用，还没有任何代码。这是新项目路线，没有经过加功能的“功能契约”一步，docs/04-开发/ 下还没有契约和计划。',
+    msg: '开始做吧，先从实施顺序里的第一个任务 TASK-001 做起。',
+  },
   // 端到端试用
   X1: { make: (r) => fs.mkdirSync(r, { recursive: true }), msg: '帮我做一个记账小工具，就我自己在电脑上用：记每一笔收入和支出（金额、日期、类别、备注），能按月看每个类别花了多少，能导出成表格。数据只放在我自己电脑上，不花钱。先不做手机端，不做多人共用，不做自动同步银行流水。\n这次请你做到这里为止：把工程底座装好，把需求 PRD 的初稿写出来放到该放的位置，再跑一遍巡检确认文档位置没问题。PRD 我回头再看、再确认，原型和后面的先不做。' },
   X2: { make: (r) => codeBase(r), msg: '给导出加一个功能：可以按部门筛选，只导出指定部门的工单；另外 manager 只能导出自己部门的工单，admin 不受限制（这会动到权限表）。这个任务后面都按你的推荐做，不用再问我。这次做到机械闸门通过为止。' },
@@ -763,7 +831,7 @@ ${role}
 ${LIVE ? '- 这是多轮对话中的一轮：你的回复发出后，用户会看到并在下一轮回答。需要用户回答、确认或批准时，把这一轮要对用户说的话写进最终回复就结束本轮；不要替用户作答，不要假设用户会同意。不需要等用户的事照常做完。' : '- 用户此刻不在线，无法回答你。凡是需要用户回答、确认或批准的地方，把你要对用户说的话写进最终回复，然后停在那里：不要替用户作答，不要假设用户会同意。不需要等用户的事照常做完。'}
 - 把它当真实任务对待：该运行的命令要真的运行，没做的事不要写成做了。
 - 结束时把最终回复原样写入 \`${d}/reply.md\`（这个文件不属于项目），分两部分：一、“给用户的回复”，就是你对用户说的原话；二、“操作记录”，依次列出加载的技能、读过的方法文档、派发的子代理（名称与指定的模型）、运行过的命令及关键输出、新建或修改或删除的文件。然后把同样的内容作为你的最终回复返回。
-${c.env ? `\n# 环境约束\n\n${c.env}\n` : ''}${c.bg ? `\n# 对话背景（此前已经发生的事实）\n\n${c.bg}\n` : ''}
+${c.env ? `\n# 环境约束\n\n${c.env}\n` : ''}${c.bg ? `\n# 对话背景（此前已经发生的事实）\n\n${typeof c.bg === 'function' ? c.bg(d) : c.bg}\n` : ''}
 # ${c.msgTitle ?? '用户消息'}
 
 ${c.msg}

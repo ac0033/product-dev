@@ -13,7 +13,7 @@ import { DEPENDENCY_FILES, POLICY_KEYS, loadConfig, parseStatusZ, readRecord, wr
 import { mergePr } from '../gate/merge.mjs';
 import { recordReview, reportVerdict } from '../gate/review.mjs';
 import { verify } from '../gate/verify.mjs';
-import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, TEST_CONFIG, write } from './helpers.mjs';
+import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, TEST_CONFIG, tmpRepo, write } from './helpers.mjs';
 
 /** 合格的复审报告正文（不含结论），字数够。 */
 const BODY = '发现：无高、中级问题。\n已逐条核对改动的 dedup 函数与测试用例，边界条件（空数组、重复项）均有覆盖，调用方也已核对。\n处置：无需处理。\n';
@@ -272,15 +272,19 @@ function prePush(root, verdict, extra = {}) {
   return recordReview({ root, verdict, reviewer: 'general-purpose', reportPath: reportFile(report), summary: 's', ...extra });
 }
 
-test('复审轮次（pre-push）：已有 3 次 fail 后再登记 pass 或 fail 被拒；带 --user-decision 放行并写进记录；统计行写明轮次', () => {
+test('复审轮次（pre-push）：已有 3 个提交登记过 fail 后，在新提交上再登记 pass 或 fail 被拒；带 --user-decision 放行并写进记录；统计行写明轮次', () => {
+  // 0.6.1 起轮次按提交计：三次 fail 分别在三个提交上（原来是同一提交上三次 fail）
   const root = featureRepo();
   changeDedup(root);
   assert.equal(runGate({ root }).ok, true);
   const first = prePush(root, 'fail');
   assert.equal(first.ok, true, first.message);
   assert.match(first.message.split('\n').at(-1), /第 1 轮.*累计登记 1 次.*1 个不同提交/);
+  nextCommit(root, 'r2');
   assert.equal(prePush(root, 'fail', { kind: 'consistency' }).ok, true, '两种 kind 合并计数');
+  nextCommit(root, 'r3');
   assert.equal(prePush(root, 'fail').ok, true);
+  nextCommit(root, 'r4');
   const blocked = prePush(root, 'pass');
   assert.equal(blocked.ok, false);
   assert.match(blocked.message, /已审三轮仍需再审：向用户说明剩余问题、原因和已做处置，由用户决定/);
@@ -337,6 +341,8 @@ test('复审轮次（pr）：每次登记追加 pr/<编号>/log.jsonl，两种 k
   assert.match(second.message.split('\n').at(-1), /第 2 轮.*累计登记 2 次.*2 个不同提交/);
   const d = prReg(root, gh, 'consistency', 'defer');
   assert.equal(d.ok, true, '延期不是审查结论，不受上限拦截');
+  // 0.6.1 起按提交计：b 已计入第 2 轮，在 b 上登记不拦；拦截针对新的提交 c
+  state.head = 'c'.repeat(40);
   const blocked = prReg(root, gh, 'code', 'pass');
   assert.equal(blocked.ok, false);
   assert.match(blocked.message, /已审二轮仍需再审/);
@@ -346,6 +352,145 @@ test('复审轮次（pr）：每次登记追加 pr/<编号>/log.jsonl，两种 k
   assert.deepEqual(log.map((e) => `${e.kind}:${e.verdict}`), ['code:fail', 'consistency:fail', 'consistency:defer', 'code:pass']);
   assert.equal(log.at(-1).userDecision, '用户同意继续（PR #7 评论）');
   assert.equal(JSON.parse(read(root, '.git/engineering-gate/pr/7/code.json')).verdict, 'pass', '单文件记录照旧供 merge 读取');
+});
+
+// 轮次按被审内容计（0.6.1）：一轮＝登记过 fail 的一份被审内容（pr 流程是最终提交，pre-push 流程是树哈希加文档内容哈希）；同一份内容上两种 kind 都 fail 只算一轮
+
+const lastLine = (res) => res.message.split('\n').at(-1);
+
+test('轮次按提交（pr）：同一提交两种 kind 都 fail 只算一轮；满 3 个提交后，第 3 个提交补登另一种不拦，第 4 个提交要 --user-decision', () => {
+  const root = featureRepo({ reviewFlow: 'pr' });
+  const state = { head: 'a'.repeat(40) };
+  const gh = ghFor(state);
+  assert.equal(prReg(root, gh, 'code', 'fail').ok, true);
+  const c1 = prReg(root, gh, 'consistency', 'fail');
+  assert.equal(c1.ok, true, c1.message);
+  assert.match(lastLine(c1), /第 1 轮（按提交计/, '同一提交上的第二份 fail 不另算一轮');
+  state.head = 'b'.repeat(40);
+  assert.match(lastLine(prReg(root, gh, 'code', 'fail')), /第 2 轮/);
+  state.head = 'c'.repeat(40);
+  const third = prReg(root, gh, 'code', 'fail');
+  assert.match(lastLine(third), /第 3 轮.*累计登记 4 次.*3 个不同提交/);
+  // 第 3 轮的提交已计入：这个提交上还没登记过的一致性审首次登记不受拦截；同一 kind 再登记要 --user-decision（L6，0.6.1 复审后改）
+  const sameFail = prReg(root, gh, 'consistency', 'fail');
+  assert.equal(sameFail.ok, true, sameFail.message);
+  assert.match(lastLine(sameFail), /第 3 轮/);
+  assert.equal(prReg(root, gh, 'consistency', 'pass').ok, false, '满上限后同一提交、同一 kind 重新登记要 --user-decision');
+  assert.equal(prReg(root, gh, 'code', 'fail').ok, false, '满上限后同一提交上代码复审重登同样要 --user-decision');
+  // 第 4 个提交：pass、fail 都要 --user-decision
+  state.head = 'd'.repeat(40);
+  const blocked = prReg(root, gh, 'code', 'pass');
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.message, /已审三轮仍需再审/);
+  assert.equal(prReg(root, gh, 'code', 'fail').ok, false);
+  const ok = prReg(root, gh, 'code', 'pass', { userDecision: '用户同意再审一轮（PR #7 评论）' });
+  assert.equal(ok.ok, true, ok.message);
+  assert.match(lastLine(ok), /第 4 轮/);
+});
+
+/** 在功能分支上改一次代码并提交、重跑闸门（得到一个新的提交和与之一致的测试记录）。 */
+function nextCommit(root, tag) {
+  changeDedup(root, tag);
+  commitAll(root, tag);
+  assert.equal(runGate({ root }).ok, true);
+}
+
+test('轮次按被审内容（pre-push）：同一份内容两种 kind 都 fail 只算一轮；第 3 份内容补登另一种不拦、同 kind 重登被拦；第 4 份内容要 --user-decision', () => {
+  const root = featureRepo();
+  nextCommit(root, 'r1');
+  assert.equal(prePush(root, 'fail').ok, true);
+  const c1 = prePush(root, 'fail', { kind: 'consistency' });
+  assert.equal(c1.ok, true, c1.message);
+  assert.match(lastLine(c1), /第 1 轮（按被审内容计/);
+  nextCommit(root, 'r2');
+  assert.equal(prePush(root, 'fail').ok, true);
+  nextCommit(root, 'r3');
+  assert.match(lastLine(prePush(root, 'fail')), /第 3 轮/);
+  assert.equal(prePush(root, 'fail', { kind: 'consistency' }).ok, true, '第 3 轮的提交补登另一种 fail 不拦');
+  assert.equal(prePush(root, 'pass', { kind: 'consistency' }).ok, false, '满上限后同一份内容、同一 kind 重新登记要 --user-decision（L6）');
+  assert.equal(prePush(root, 'pass', { kind: 'consistency', userDecision: '用户同意（对话 2026-11-12）' }).ok, true);
+  nextCommit(root, 'r4');
+  assert.equal(prePush(root, 'pass').ok, false);
+  assert.equal(prePush(root, 'pass', { userDecision: '用户同意再审（对话 2026-11-12）' }).ok, true);
+});
+
+test('轮次按被审内容（pre-push 只改文档）：树哈希不变、文档内容变化时每份内容各算一轮', () => {
+  const root = featureRepo();
+  nextCommit(root, 'base');
+  const hashes = new Set();
+  for (const n of [1, 2, 3]) {
+    if (n > 1) {
+      write(root, `docs/note-${n}.md`, `# 说明 ${n}\n`);
+      commitAll(root, `docs ${n}`);
+    }
+    const r = prePush(root, 'fail');
+    assert.equal(r.ok, true, r.message);
+    hashes.add(r.record.treeHash);
+    assert.match(lastLine(r), new RegExp(`第 ${n} 轮`));
+  }
+  assert.equal(hashes.size, 1, '只改文档时树哈希每轮相同');
+  const same = prePush(root, 'fail', { kind: 'consistency' });
+  assert.equal(same.ok, true, `第 3 个提交补登一致性审不拦：${same.message}`);
+  assert.match(lastLine(same), /第 3 轮/);
+  write(root, 'docs/note-4.md', '# 说明 4\n');
+  commitAll(root, 'docs 4');
+  assert.equal(prePush(root, 'fail').ok, false, '第 4 个提交登记要 --user-decision');
+});
+
+// H1（PR #8 首轮复审）：pre-push 按被审内容（树哈希 + 文档内容哈希）计轮次，不按 HEAD：修复留在工作区不提交、或 reset 回旧提交，都绕不过上限
+
+test('轮次按被审内容（H1）：同一 HEAD 上工作区改了三次、各登记 fail 后，第四份内容的登记被拒', () => {
+  const root = featureRepo();
+  for (const tag of ['w1', 'w2', 'w3']) {
+    changeDedup(root, tag);
+    assert.equal(runGate({ root }).ok, true);
+    const r = prePush(root, 'fail');
+    assert.equal(r.ok, true, r.message);
+  }
+  changeDedup(root, 'w4');
+  assert.equal(runGate({ root }).ok, true);
+  const blocked = prePush(root, 'fail');
+  assert.equal(blocked.ok, false, '同一 HEAD 上第四份内容的 fail 要 --user-decision');
+  assert.equal(prePush(root, 'pass').ok, false, '第四份内容的 pass 同样要 --user-decision');
+  // reset 回已计入的旧内容：同一 kind 重登也被拦
+  changeDedup(root, 'w1');
+  assert.equal(runGate({ root }).ok, true);
+  assert.equal(prePush(root, 'pass').ok, false, '回到已计入的内容，同一 kind 重新登记要 --user-decision');
+});
+
+test('轮次按被审内容（L6）：上限未满时同一内容同一 kind 重新登记不受限；满上限后只放行这份内容上还没登记过的另一种 kind', () => {
+  const root = featureRepo();
+  changeDedup(root, 'v1');
+  assert.equal(runGate({ root }).ok, true);
+  assert.equal(prePush(root, 'fail').ok, true);
+  const again = prePush(root, 'fail');
+  assert.equal(again.ok, true, '上限未满，重新登记不受限');
+  assert.match(lastLine(again), /第 1 轮/, '同一份内容重登不另算一轮');
+  for (const tag of ['v2', 'v3']) {
+    changeDedup(root, tag);
+    assert.equal(runGate({ root }).ok, true);
+    assert.equal(prePush(root, 'fail').ok, true);
+  }
+  assert.equal(prePush(root, 'fail').ok, false, '满上限后同一内容同一 kind 重登被拒');
+  assert.equal(prePush(root, 'fail', { kind: 'consistency' }).ok, true, '另一种 kind 在这份内容上首次登记放行');
+  assert.equal(prePush(root, 'pass', { kind: 'consistency' }).ok, false, '另一种 kind 第二次登记被拒');
+  assert.equal(prePush(root, 'accept', { userDecision: '用户接受 H1（对话）' }).ok, true, 'accept 不受拦截');
+});
+
+test('轮次按被审内容：仓库尚无提交（headSha 为空）时同样按内容计，第四份内容被拦', () => {
+  const root = tmpRepo();
+  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, base: 'auto' }, null, 2));
+  write(root, 'pass.mjs', 'process.exit(0);\n');
+  for (const tag of ['n1', 'n2', 'n3']) {
+    changeDedup(root, tag);
+    assert.equal(runGate({ root }).ok, true);
+    const r = prePush(root, 'fail');
+    assert.equal(r.ok, true, r.message);
+    assert.equal(r.record.headSha, null);
+  }
+  changeDedup(root, 'n4');
+  assert.equal(runGate({ root }).ok, true);
+  assert.equal(prePush(root, 'fail').ok, false);
 });
 
 // ---------- 4. 断言有效性 ----------
@@ -703,6 +848,22 @@ test('复用：全量通过后同一棵树 --force 全量失败，再跑闸门�
   const fixed = runGate({ root });
   assert.equal(fixed.ok, true, fixed.messages.join('\n'));
   assert.ok(!fixed.messages.some((m) => /沿用/.test(m)), '失败之后的第一次通过要真的跑出来');
+});
+
+test('复用（只测 reusable）：同一棵树上有通过的 tests-full.json、而 tests.json 是未通过时，普通运行与 --affected 都不沿用', () => {
+  // 直接写两份记录，不经“全量失败时删除全量记录”那条路径：这条测试单独守住 reusable 里“最近一次运行未通过就不沿用”的判断
+  const root = groupRepo();
+  changeDedup(root, 'v1');
+  commitAll(root, 'feat');
+  const pass = runGate({ root });
+  assert.equal(pass.ok, true, pass.messages.join('\n'));
+  for (const affected of [false, true]) {
+    writeRecord(root, 'tests-full.json', { ...pass.record });
+    writeRecord(root, 'tests.json', { ...pass.record, passed: false, at: new Date(0).toISOString() });
+    const res = runGate({ root, affected });
+    assert.ok(!res.messages.some((m) => /沿用/.test(m)), `affected=${affected}：${res.messages.join('\n')}`);
+    assert.match(logOf(res), /RAN-FULL/, `affected=${affected}：应当真的重跑全量`);
+  }
 });
 
 test('复用：分组测试在某棵树上失败后，--affected 与普通运行都不沿用任何通过记录；verify 读到未通过', () => {
