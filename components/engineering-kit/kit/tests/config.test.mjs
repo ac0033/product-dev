@@ -47,6 +47,8 @@ test('扁平 ⇄ profile 互转：字段不丢失', () => {
     reviewMinChars: 200, reviewKeyword: '结论', lockMaxAgeMinutes: 90, reviewFlow: 'pr',
     // 0.6.0 新增的两个扁平字段
     testGroups: [{ name: 'unit', paths: ['src/**'], command: 'npm run test:unit' }], maxReviewRounds: 4,
+    // 0.7.0 新增：pr 流程的必需检查名
+    requiredChecks: ['test (ubuntu-latest)', 'lint'],
   };
   const prof = toProfile(flat);
   assert.equal(prof.profile, 2);

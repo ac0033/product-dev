@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import { normalizeConfig, toFlat, toProfile } from '../gate/config.mjs';
 import { runGate } from '../gate/gate.mjs';
 import { readRecord } from '../gate/lib.mjs';
-import { mergePr } from '../gate/merge.mjs';
+import { ciLines, mergePr } from '../gate/merge.mjs';
 import { recordReview } from '../gate/review.mjs';
 import { runSmoke } from '../gate/smoke.mjs';
 import { verify } from '../gate/verify.mjs';
@@ -24,10 +24,14 @@ const GOOD_REPORT = `发现：无高、中级问题。\n已逐条核对 PR 的�
 const HEAD = 'a'.repeat(40);
 const NEW_HEAD = 'b'.repeat(40);
 
-/** 全部通过的检查：成功、提交状态成功、跳过、中性。 */
+/** 全部通过的检查：检查运行成功、提交状态成功（未配置必需检查名时每一项都算必需，须为成功）。 */
 const GREEN = [
   { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
   { __typename: 'StatusContext', context: 'lint', state: 'SUCCESS' },
+];
+
+/** 跳过与中性的检查（只有列为非必需时才放行）。 */
+const SOFT = [
   { __typename: 'CheckRun', name: 'e2e', status: 'COMPLETED', conclusion: 'SKIPPED' },
   { __typename: 'CheckRun', name: 'info', status: 'COMPLETED', conclusion: 'NEUTRAL' },
 ];
@@ -113,6 +117,102 @@ test('验收 3：CI 有检查失败、仍在运行、或一项检查都没有时
     assert.match(r.message, /CI/);
     assert.equal(fs.existsSync(path.join(root, '.git', 'engineering-gate', 'pr', '7', 'code.json')), false, '拒绝时不写记录');
   }
+});
+
+test('必需检查：未配置 requiredChecks 时每一项都算必需，跳过或中性的检查拦下登记与合并', () => {
+  for (const soft of SOFT) {
+    const root = prRepo();
+    const view = prView({ checks: [...GREEN, soft] });
+    const r = register(root, fakeGh(view), 'code');
+    assert.equal(r.ok, false, soft.name);
+    assert.match(r.message, new RegExp(`必需检查没有成功：${soft.name}`));
+    assert.match(r.message, /未配置 modules\.gate\.requiredChecks/);
+    const gh = fakeGh(view);
+    const res = mergePr({ root, pr: '7', gh });
+    assert.equal(res.ok, false);
+    assert.equal(merged(gh), false);
+  }
+});
+
+test('必需检查：列出 requiredChecks 后，必需检查须成功，跳过或中性只放行非必需检查，合并输出分开报告', () => {
+  const root = featureRepo({ reviewFlow: 'pr', requiredChecks: ['test', 'lint'] });
+  const view = prView({ checks: [...GREEN, ...SOFT, { __typename: 'CheckRun', name: 'docs', status: 'COMPLETED', conclusion: 'SUCCESS' }] });
+  assert.equal(register(root, fakeGh(view), 'code').ok, true);
+  assert.equal(register(root, fakeGh(view), 'consistency').ok, true);
+  const gh = fakeGh(view);
+  const res = mergePr({ root, pr: '7', gh });
+  assert.equal(res.ok, true, JSON.stringify(res.problems));
+  assert.ok(merged(gh));
+  assert.deepEqual(res.ci.passed, [{ name: 'test', required: true }, { name: 'lint', required: true }, { name: 'docs', required: false }]);
+  assert.deepEqual(res.ci.skipped, [{ name: 'e2e', result: 'SKIPPED' }, { name: 'info', result: 'NEUTRAL' }]);
+  assert.deepEqual(ciLines(res.ci), [
+    'CI 必需检查成功：test、lint',
+    'CI 非必需检查成功：docs',
+    'CI 非必需检查跳过或中性（放行，不算通过）：e2e（SKIPPED）、info（NEUTRAL）',
+  ]);
+  // 必需检查被跳过、非必需检查失败、列出的必需检查没有出现在 PR 上：都拒绝
+  for (const [checks, why] of [
+    [[{ ...GREEN[0], conclusion: 'SKIPPED' }, GREEN[1]], /必需检查没有成功：test/],
+    [[...GREEN, { __typename: 'CheckRun', name: 'e2e', status: 'COMPLETED', conclusion: 'FAILURE' }], /CI 检查未通过：e2e/],
+    // 找不到的必需检查：提示里列出本次 PR 上实际看到的检查名，便于改正配置
+    [[GREEN[0], ...SOFT], /必需检查没有出现在 PR 上：lint（.*job 名.*本次 PR 上的检查名：test、e2e、info）/],
+  ]) {
+    const r = register(featureRepo({ reviewFlow: 'pr', requiredChecks: ['test', 'lint'] }), fakeGh(prView({ checks })), 'code');
+    assert.equal(r.ok, false, JSON.stringify(checks));
+    assert.match(r.message, why);
+  }
+});
+
+test('必需检查：同名的检查合在一起判定（同一个 job 跑了两份）：一份成功、其余跳过算成功，有失败或运行中仍拦', () => {
+  const run = (conclusion) => ({ __typename: 'CheckRun', name: 'test', status: conclusion ? 'COMPLETED' : 'IN_PROGRESS', conclusion });
+  const lint = GREEN[1];
+  const repo = () => featureRepo({ reviewFlow: 'pr', requiredChecks: ['test', 'lint'] });
+  assert.equal(register(repo(), fakeGh(prView({ checks: [run('SUCCESS'), run('SKIPPED'), lint] })), 'code').ok, true, '成功加跳过：算成功');
+  for (const [checks, why] of [
+    [[run('SUCCESS'), run('FAILURE'), lint], /CI 检查未通过：test（FAILURE）/],
+    [[run('SUCCESS'), run(''), lint], /CI 检查未通过：test（IN_PROGRESS）/],
+    [[run('SKIPPED'), run('NEUTRAL'), lint], /必需检查没有成功：test（SKIPPED、NEUTRAL；/],
+  ]) {
+    const r = register(repo(), fakeGh(prView({ checks })), 'code');
+    assert.equal(r.ok, false, JSON.stringify(checks));
+    assert.match(r.message, why);
+  }
+  // 不同工作流里的同名检查不互相抵：CI 里必需的 test 被跳过，另一个工作流里同名的 test 成功，仍拦
+  const crossWf = [{ ...run('SKIPPED'), workflowName: 'CI' }, { ...run('SUCCESS'), workflowName: 'Release' }, lint];
+  const cross = register(repo(), fakeGh(prView({ checks: crossWf })), 'code');
+  assert.equal(cross.ok, false, '跨工作流同名的成功不能抵掉被跳过的必需检查');
+  assert.match(cross.message, /必需检查没有成功：test（SKIPPED；/);
+  // 同一工作流里的两份（push 与 pull_request）照常合并
+  const sameWf = [{ ...run('SKIPPED'), workflowName: 'CI' }, { ...run('SUCCESS'), workflowName: 'CI' }, lint];
+  assert.equal(register(repo(), fakeGh(prView({ checks: sameWf })), 'code').ok, true);
+  // 非必需的同名检查全是跳过或中性：放行，报告里合成一项
+  const root = repo();
+  const view = prView({ checks: [...GREEN, { ...SOFT[0] }, { ...SOFT[0], conclusion: 'NEUTRAL' }] });
+  register(root, fakeGh(view), 'code');
+  register(root, fakeGh(view), 'consistency');
+  const res = mergePr({ root, pr: '7', gh: fakeGh(view) });
+  assert.equal(res.ok, true, JSON.stringify(res.problems));
+  assert.deepEqual(res.ci.skipped, [{ name: 'e2e', result: 'SKIPPED、NEUTRAL' }]);
+});
+
+test('必需检查：requiredChecks 是判定策略字段，取基准提交上的配置，分支自己改的不生效', () => {
+  const root = prRepo();
+  const cfg = JSON.parse(read(root, 'engineering.config.json'));
+  write(root, 'engineering.config.json', JSON.stringify({ ...cfg, requiredChecks: ['test', 'lint'] }, null, 2));
+  commitAll(root, 'chore: 分支里放宽必需检查');
+  const r = register(root, fakeGh(prView({ checks: [...GREEN, SOFT[0]] })), 'code');
+  assert.equal(r.ok, false, '基准上没有列必需检查名，e2e 仍算必需');
+  assert.match(r.message, /必需检查没有成功：e2e/);
+});
+
+test('配置：requiredChecks 默认为空，只认不重复的非空字符串数组；空时 toProfile 不写这一项', () => {
+  assert.deepEqual(normalizeConfig({ profile: 2 }).requiredChecks, []);
+  assert.deepEqual(normalizeConfig({ profile: 2, modules: { gate: { requiredChecks: ['test'] } } }).requiredChecks, ['test']);
+  for (const bad of ['test', [''], ['a', 'a'], [1]]) {
+    assert.throws(() => normalizeConfig({ profile: 2, modules: { gate: { requiredChecks: bad } } }), /requiredChecks/, JSON.stringify(bad));
+  }
+  assert.equal('requiredChecks' in toProfile({}).modules.gate, false);
+  assert.deepEqual(toProfile(toFlat({ profile: 2, modules: { gate: { requiredChecks: ['test'] } } })).modules.gate.requiredChecks, ['test']);
 });
 
 test('验收 4：PR 已关闭或已合并时拒绝登记', () => {

@@ -1,5 +1,6 @@
 // 合并入口（复审流程为 pr 的项目）：PR 只经这里合并。业务含义：合并时要能证明 CI 已对 PR 的最终提交全部通过，
-// 且代码复审和一致性审都是针对这个最终提交做的。依次核对：PR 打开；CI 在最终提交上全部通过；代码复审有 pass 记录；
+// 且代码复审和一致性审都是针对这个最终提交做的。依次核对：PR 打开；CI 在最终提交上全部通过（必需检查须为成功，
+// 跳过、中性只放行非必需检查，判定见 lib.mjs 的 ciStatus；输出把通过项与被放行的跳过项分开列出）；代码复审有 pass 记录；
 // 一致性审有 pass 或延期（defer）记录；两份记录的提交都等于当前最终提交。两种审查的 accept（报告不通过、用户已知情并决定接受风险）
 // 同样放行，输出写明“按用户决定接受风险放行”。代码复审记录之后 PR 只改了文档（记录的提交到最终提交之间的差异全是文档，
 // 判定同 isIgnoredDoc）时仍认这份代码复审记录并写明两个提交；本地算不出差异（没有这两个提交等）时按过期处理。
@@ -69,8 +70,9 @@ function readPrRecord(root, pr, kind) {
 }
 
 /**
- * 核对并合并 PR。返回 { ok, problems, notes, head }：ok 为 true 表示已执行合并；notes 是放行时要写明的说明
- * （按用户决定接受风险放行、沿用只改文档之前的代码复审记录、本地判断不了是否只改文档的原因）。
+ * 核对并合并 PR。返回 { ok, problems, notes, head, ci }：ok 为 true 表示已执行合并；notes 是放行时要写明的说明
+ * （按用户决定接受风险放行、沿用只改文档之前的代码复审记录、本地判断不了是否只改文档的原因）；
+ * ci 是 ciStatus 的结果，其中 passed（成功的检查）与 skipped（被放行的跳过或中性的非必需检查）由命令行分开报告。
  * 项目未启用 pr 流程、参数不合法、gh 失败时抛错；gh 可注入，测试用假的实现。
  */
 export function mergePr({ root, pr, method = 'squash', gh = defaultGh }) {
@@ -81,7 +83,7 @@ export function mergePr({ root, pr, method = 'squash', gh = defaultGh }) {
   }
   if (!METHODS.includes(method)) throw new Error(`合并方式只能是 ${METHODS.join('、')}（当前 ${method}）`);
   const no = prNumber(pr);
-  const st = readPr(root, no, gh);
+  const st = readPr(root, no, gh, config.requiredChecks);
   const short = (sha) => String(sha).slice(0, 12);
   const problems = [];
   const notes = [];
@@ -100,9 +102,21 @@ export function mergePr({ root, pr, method = 'squash', gh = defaultGh }) {
       if (rec.verdict === 'accept') notes.push(`${r.name}结论为不通过，按用户决定接受风险放行（用户决定：${rec.userDecision}）`);
     }
   }
-  if (problems.length > 0) return { ok: false, problems, notes, head: st.head };
+  if (problems.length > 0) return { ok: false, problems, notes, head: st.head, ci: st.ci };
   runGh(gh, ['pr', 'merge', no, `--${method}`, '--match-head-commit', st.head, '--delete-branch'], root);
-  return { ok: true, problems: [], notes, head: st.head };
+  return { ok: true, problems: [], notes, head: st.head, ci: st.ci };
+}
+
+/** CI 结果的报告行：成功的检查一行（标明必需与否），被放行的跳过或中性的非必需检查另起一行，不与成功项混在一起。 */
+export function ciLines(ci) {
+  const out = [];
+  if (!ci) return out;
+  const req = ci.passed.filter((p) => p.required).map((p) => p.name);
+  const opt = ci.passed.filter((p) => !p.required).map((p) => p.name);
+  if (req.length) out.push(`CI 必需检查成功：${req.join('、')}`);
+  if (opt.length) out.push(`CI 非必需检查成功：${opt.join('、')}`);
+  if (ci.skipped.length) out.push(`CI 非必需检查跳过或中性（放行，不算通过）：${ci.skipped.map((s) => `${s.name}（${s.result}）`).join('、')}`);
+  return out;
 }
 
 if (isMain(import.meta.url)) {
@@ -112,6 +126,7 @@ if (isMain(import.meta.url)) {
     const method = i >= 0 ? argv[i + 1] : 'squash';
     const pr = argv.find((a, k) => !a.startsWith('--') && (i < 0 || k !== i + 1));
     const res = mergePr({ root: repoRoot(), pr, method });
+    for (const l of ciLines(res.ci)) console.log(l);
     for (const n of res.notes) console.log(n);
     if (res.ok) {
       console.log(`已合并 PR #${pr}（${method}，最终提交 ${res.head.slice(0, 12)}），远端分支已删除`);

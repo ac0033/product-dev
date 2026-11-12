@@ -3,7 +3,7 @@
 //   pre-push 流程的测试记录须是全量（gate.mjs 不带 --affected；没有 mode 字段的旧记录视为全量）；代码复审记录的结论为
 //   pass，或 accept（报告不通过、用户已知情并决定接受风险，输出写明“按用户决定接受风险放行”）。一致性审记录不要求。
 //   复审流程为 pr（modules.gate.reviewFlow）时不要求复审记录，测试记录接受按影响范围的（CI 会在最终提交上跑全量）：
-//   复审在 CI 通过后针对 PR 最终提交进行，由 merge.mjs 核对。
+//   复审可以与 CI 并行开始；CI 全部通过后才针对 PR 最终提交登记、合并，由 merge.mjs 核对。
 // 闸门范围的口径见 lib.mjs 的 gateScope：本次改动中去掉文档的部分，判定文档用基准提交上配置的 reviewIgnore，
 //   项目配置、豁免表和 scripts/engineering/** 永远在范围内；基准分支设置取默认主干上的配置（lib.mjs 的 loadConfig），
 //   判定策略（reviewIgnore、reviewFlow 等）取基准提交上的配置，工作区写的值与生效值不同时给提示行。只改文档的推送直接放行。

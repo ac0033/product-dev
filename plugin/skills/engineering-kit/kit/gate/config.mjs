@@ -1,11 +1,11 @@
 // 项目配置（engineering.config.json）的 profile 结构与展开。业务含义：
 //   项目配置是唯一由项目自己维护的文件，结构分四段，便于升级时只改动套件认可的字段：
-//     modules  —— 模块参数：gate（基准分支、测试命令、环境变量、测试分组 testGroups、锁时长、复审流程 reviewFlow）、
+//     modules  —— 模块参数：gate（基准分支、测试命令、环境变量、测试分组 testGroups、锁时长、复审流程 reviewFlow、必需检查 requiredChecks）、
 //                 review（复审者名单、字数、结论关键词、复审轮次上限 maxReviewRounds）
 //     layout   —— 目录布局：源文件与测试的 glob、阶段目录、允许的顶层目录
 //     hygiene  —— 巡检参数：禁用文件名片段、草稿超期天数、记录类目录、合法状态值
 //     rules    —— 规则：不计入闸门的文档（reviewIgnore；项目配置、豁免表、套件脚本除外，永远计入）、注释检查模式（commentMode）
-//   这里只做结构展开与取值校验。闸门运行时 base 与判定策略字段（reviewIgnore、reviewFlow、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds）
+//   这里只做结构展开与取值校验。闸门运行时 base 与判定策略字段（reviewIgnore、reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewKeyword、maxReviewRounds）
 //   的生效值不取工作区，而取主干或基准提交上的配置，见 lib.mjs 的 loadConfig。
 //   闸门内部只使用“扁平”字段（FLAT_KEYS），由 normalizeConfig 展开；旧版扁平配置仍可读取，便于回滚。
 // 同步器通过 toProfile / toFlat 在两种结构之间转换，保证回滚到旧版本时配置格式也随之回退。
@@ -13,15 +13,19 @@
 /** 闸门使用的扁平字段名（与旧版 engineering.config.json 相同）。 */
 export const FLAT_KEYS = [
   'base', 'sourceGlobs', 'testGlobs', 'reviewIgnore', 'commentMode', 'testCommand', 'testEnv',
-  'reviewers', 'reviewMinChars', 'reviewKeyword', 'lockMaxAgeMinutes', 'reviewFlow', 'testGroups', 'maxReviewRounds',
+  'reviewers', 'reviewMinChars', 'reviewKeyword', 'lockMaxAgeMinutes', 'reviewFlow', 'testGroups', 'maxReviewRounds', 'requiredChecks',
 ];
 
-/** 扁平字段的缺省值。 */
+/**
+ * 扁平字段的缺省值。reviewIgnore 只放真正的纯说明文件（docs 下的 Markdown、根目录的 README 与 CHANGELOG）：
+ * 规则（AGENTS.md、CLAUDE.md）、技能正文、提示词、可执行原型都会改变行为，不默认免审（0.7.0 起；之前是全部 Markdown 加整个 docs 目录）。
+ * requiredChecks 为空表示 PR 上报告的每一项 CI 检查都是必需检查。
+ */
 export const DEFAULTS = {
   base: 'auto',
   sourceGlobs: [],
   testGlobs: [],
-  reviewIgnore: ['**/*.md', 'docs/**'],
+  reviewIgnore: ['docs/**/*.md', 'README.md', 'CHANGELOG.md'],
   commentMode: 'header+exports',
   testCommand: 'npm test',
   testEnv: {},
@@ -32,15 +36,16 @@ export const DEFAULTS = {
   reviewFlow: 'pre-push',
   testGroups: [],
   maxReviewRounds: 3,
+  requiredChecks: [],
 };
 
-/** 复审流程的合法取值：pre-push（推送前复审，推送核对只要求代码复审）或 pr（CI 通过后对 PR 最终提交做代码复审与一致性审，经 merge.mjs 合并）。 */
+/** 复审流程的合法取值：pre-push（推送前复审，推送核对只要求代码复审）或 pr（对 PR 最终提交做代码复审与一致性审：复审可以与 CI 并行开始；CI 全部通过后才登记、合并，经 merge.mjs 合并）。 */
 export const REVIEW_FLOWS = ['pre-push', 'pr'];
 
 /** 目录布局与巡检的缺省值（profile 的 layout、hygiene 段）。 */
 export const LAYOUT_DEFAULTS = {
   stages: ['00-总览', '01-需求', '02-原型', '03-架构', '04-开发', '05-测试', '06-发布'],
-  topLevelAllowed: ['docs', 'src', 'tests', 'scripts', 'config', 'templates', '.github', '.claude'],
+  topLevelAllowed: ['docs', 'src', 'tests', 'scripts', 'config', 'templates', '.github', '.claude', '.impeccable'],
 };
 export const HYGIENE_DEFAULTS = {
   bannedNameTokens: ['copy', 'final', 'bak', 'old', 'tmp'],
@@ -74,6 +79,7 @@ export function normalizeConfig(raw) {
     throw new Error(`engineering.config.json 的 modules.review.maxReviewRounds 必须是正整数（当前 ${JSON.stringify(eff.maxReviewRounds)}）`);
   }
   checkTestGroups(eff.testGroups);
+  checkRequiredChecks(eff.requiredChecks);
   return eff;
 }
 
@@ -96,6 +102,17 @@ function checkTestGroups(groups) {
     }
     if (typeof g.command !== 'string' || !g.command.trim()) throw new Error(`${at}（${g.name}）缺少 command（非空字符串）`);
   });
+}
+
+/**
+ * 校验必需检查名（modules.gate.requiredChecks）：不重复的非空字符串数组，写检查运行的 name（job 名，含矩阵后缀，不含工作流名和事件）或提交状态的 context。
+ * 格式不对时抛错：拼错的类型会让必需检查静默变少，不能忽略。
+ */
+function checkRequiredChecks(names) {
+  const where = 'engineering.config.json 的 modules.gate.requiredChecks';
+  if (!Array.isArray(names) || !names.every((n) => typeof n === 'string' && n.trim())) throw new Error(`${where} 必须是检查名（非空字符串）数组`);
+  const dup = names.find((n, i) => names.indexOf(n) !== i);
+  if (dup !== undefined) throw new Error(`${where} 的检查名 ${dup} 重复`);
 }
 
 /** 展开两种结构（取值校验由 normalizeConfig 统一做）。 */
@@ -127,6 +144,7 @@ function expand(raw) {
     lockMaxAgeMinutes: gate.lockMaxAgeMinutes ?? DEFAULTS.lockMaxAgeMinutes,
     reviewFlow: gate.reviewFlow ?? DEFAULTS.reviewFlow,
     testGroups: gate.testGroups ?? DEFAULTS.testGroups,
+    requiredChecks: gate.requiredChecks ?? DEFAULTS.requiredChecks,
     reviewers: review.reviewers ?? DEFAULTS.reviewers,
     reviewMinChars: review.reviewMinChars ?? DEFAULTS.reviewMinChars,
     reviewKeyword: review.reviewKeyword ?? DEFAULTS.reviewKeyword,
@@ -142,13 +160,14 @@ function expand(raw) {
 
 /**
  * 扁平配置 → profile 结构（同步器写入新格式时使用）。扁平结构里 _profile 段保存的布局与巡检设置原样恢复。
- * 测试分组是可选项：没有分组时不写 testGroups，迁移旧配置不凭空多出一项。
+ * 测试分组和必需检查名是可选项：没有时不写 testGroups、requiredChecks，迁移旧配置不凭空多出一项。
  */
 export function toProfile(flat) {
   const f = normalizeConfig(flat);
   const { sourceGlobs, testGlobs, stages, topLevelAllowed } = { ...f.layout, sourceGlobs: f.sourceGlobs, testGlobs: f.testGlobs };
   const gate = { base: f.base, testCommand: f.testCommand, testEnv: f.testEnv, lockMaxAgeMinutes: f.lockMaxAgeMinutes, reviewFlow: f.reviewFlow };
   if (f.testGroups.length > 0) gate.testGroups = f.testGroups;
+  if (f.requiredChecks.length > 0) gate.requiredChecks = f.requiredChecks;
   return {
     profile: 2,
     modules: {

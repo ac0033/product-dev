@@ -12,9 +12,9 @@ disable-model-invocation: true
 按任务选择：安装或维护工程能力包；编排需求明确后的开发交付；记录用户可复用的经验；或将经验整理为套件变更。推送、合并、部署仍按用户授权与项目规则执行。
 
 - 开发交付：先读 `references/process.md`；本机存在 `references/dev-flow.local.md` 且任务涉及对应项目时，再读其中项目专用流程。`references/*.local.md` 是只留本机的记录（项目专用流程、试装与验收记录、实践来源），不进仓库。没有该文件时以通用流程和项目实际规则为准，不推断缺失的项目命令。
-- 经验记录：读 `references/process.md` 的“经验记录”节；只在用户确有可复用经验时记录，按当前用户授权记录，不把普通对话视为持久化授权。
+- 经验记录：读 `references/process.md` 的“经验记录”节；只在确有可复用经验时记录。用户本人提出的决定或做法直接记录，不必确认；agent 总结的只作候选，用户确认后才记录。
 
-注意：闸门有两种复审流程（`modules.gate.reviewFlow`）：默认 `pre-push` 是推送前复审（推送核对只要求代码复审）；`pr` 提供 CI 后双审与合并入口。安装或升级前先看第 5 节，已使用自有闸门的项目不要覆盖。
+注意：闸门有两种复审流程（`modules.gate.reviewFlow`）：默认 `pre-push` 是推送前复审（推送核对只要求代码复审）；`pr` 提供绑定 PR 最终提交的双审与合并入口（复审可以与 CI 并行开始；CI 全部通过后才登记、合并）。安装或升级前先看第 5 节，已使用自有闸门的项目不要覆盖。
 
 整包的清单是 `bundle.json`（组件、安装位置、所有权、整包版本）。下文 `<kit>` 指本技能的 `kit/` 目录，`<整包>` 指本技能目录。
 
@@ -47,7 +47,7 @@ node "<kit>/sync.mjs" --target "<项目>"             # 执行
 | 项目（project） | engineering.config.json、豁免表、docs 索引、阶段目录、模板 | 只在首次创建；配置格式不同时只做格式迁移，取值保留 |
 | 共享（shared） | .claude/settings.json | 只追加本套件的钩子 |
 
-同步后要做的一件事：按项目修改 `engineering.config.json` 的 `modules.gate.testCommand` 与 `testEnv`、`layout.sourceGlobs` 与 `testGlobs`，以及 `rules.reviewIgnore`（只应包含纯文档）；要按影响范围测试的，再配可选的 `modules.gate.testGroups`（每项 `{ name, paths, command }`，供 `gate.mjs --affected` 使用）。Python 项目把 `sourceGlobs` 改成 `**/*.py`，并在 `testEnv` 里设 `PYTHONPATH`。
+同步后要做的一件事：按项目修改 `engineering.config.json` 的 `modules.gate.testCommand` 与 `testEnv`、`layout.sourceGlobs` 与 `testGlobs`，以及 `rules.reviewIgnore`（只放纯说明文件：规则、技能正文、提示词、可执行原型不放；0.7.0 起的默认值是 `docs/**/*.md`、`README.md`、`CHANGELOG.md`）；用 `pr` 流程且 CI 有按条件跳过的检查的，配 `modules.gate.requiredChecks`（必需检查名）；要按影响范围测试的，再配可选的 `modules.gate.testGroups`（每项 `{ name, paths, command }`，供 `gate.mjs --affected` 使用）。Python 项目把 `sourceGlobs` 改成 `**/*.py`，并在 `testEnv` 里设 `PYTHONPATH`。
 
 ## 2. 一键更新与漂移检查
 
@@ -93,11 +93,11 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 | 流程 | 推送核对（`verify.mjs`） | 复审登记（`review.mjs`） | 合并 |
 |---|---|---|---|
 | `pre-push`（默认） | 静态检查、全量测试记录、代码复审记录（pass 或用户接受风险的 accept），都绑定当前代码树和基线（基准提交）；pre-push 钩子另核对实际推送的提交 | 推送前登记代码复审（可另登记一致性审或延期，推送核对不要求），记录里写明分支、HEAD 提交号和文档内容哈希；按分支计复审轮次（口径见第 6 节） | 套件不提供入口；钩子拒绝直接 `gh pr merge`，按项目约定的入口合并 |
-| `pr` | 静态检查、测试记录（绑定代码树和基线，按影响范围的也认）；不要求复审记录 | CI 全部通过后按 PR 登记代码复审与一致性审，绑定 PR 最终提交；按 PR 计复审轮次（口径见第 6 节） | `merge.mjs <PR>` 核对 PR 打开、CI 全过、两项记录与最终提交一致（代码复审之后只改文档的仍认；accept 按用户决定放行；只改文档的 PR 不要求记录）后执行 `gh pr merge --match-head-commit` |
+| `pr` | 静态检查、测试记录（绑定代码树和基线，按影响范围的也认）；不要求复审记录 | 复审可以与 CI 并行开始；CI 全部通过后才登记、合并：按 PR 登记代码复审与一致性审，绑定 PR 最终提交；按 PR 计复审轮次（口径见第 6 节） | `merge.mjs <PR>` 核对 PR 打开、CI 全过、两项记录与最终提交一致（代码复审之后只改文档的仍认；accept 按用户决定放行；只改文档的 PR 不要求记录）后执行 `gh pr merge --match-head-commit` |
 
-`pr` 流程需要 GitHub 远程、已登录的 `gh`，且 PR 上有 CI 检查（一项都没有视为未通过）；不满足的项目留在 `pre-push`。要恢复旧流程，须在主干上把 `reviewFlow` 改回 `pre-push`，合入后才生效；这个改动的 PR 本身仍按当时的 `pr` 流程经 `merge.mjs` 合并，合并入口用不了时由用户合并或走项目约定的入口。
+`pr` 流程需要 GitHub 远程、已登录的 `gh`，且 PR 上有 CI 检查（一项都没有视为未通过；“全部通过”的口径和必需检查名 `modules.gate.requiredChecks` 怎样写，见 `references/process.md` 第 4 节）；不满足的项目留在 `pre-push`。要恢复旧流程，须在主干上把 `reviewFlow` 改回 `pre-push`，合入后才生效；这个改动的 PR 本身仍按当时的 `pr` 流程经 `merge.mjs` 合并，合并入口用不了时由用户合并或走项目约定的入口。
 
-0.6.0 起已实现：按测试分组的受影响测试选择（`gate.mjs --affected`，判断不了影响范围时自动改跑全量，`pre-push` 流程最终推送前仍须全量）与结果复用；复审轮次的自动计数与拦截（`modules.review.maxReviewRounds`，默认 3；0.6.1 起按登记过不通过的不同被审内容计，口径见第 6 节）。这两项只有套件自己的测试覆盖，尚未在真实项目里走过。真实验证：`pr` 流程已由用户在带 CI 的 GitHub 仓库里走通（2026-11-10，用户报告，见 `references/contract-pr-review-merge.md`）。已采用自有闸门的项目优先使用自己的闸门，不要用本版本覆盖。
+0.6.0 起已实现：按测试分组的受影响测试选择（`gate.mjs --affected`，判断不了影响范围时自动改跑全量，`pre-push` 流程最终推送前仍须全量）与结果复用；复审轮次的自动计数与拦截（`modules.review.maxReviewRounds`，默认 3；0.6.1 起按登记过不通过的不同被审内容计，口径见第 6 节）。这两项只有套件自己的测试覆盖，尚未在真实项目里走过。真实验证：`pr` 流程已由用户在带 CI 的 GitHub 仓库里走通（2026-11-10，用户报告，见 `references/contract-pr-review-merge.md`），那时的 CI 口径是跳过、中性一律算通过；0.7.0 起的“必需检查须为成功”和 `modules.gate.requiredChecks` 只有套件自己的测试覆盖，尚未在真实项目里走过。已采用自有闸门的项目优先使用自己的闸门，不要用本版本覆盖。
 
 ## 6. 套件的范围与局限
 
@@ -112,7 +112,7 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 - 注释检查：文件开头（连续注释行，或 Python 文档字符串含多行）要有至少 8 个字的说明；JS/TS 导出函数、类、常量、枚举前要紧挨注释。Python 只查文件头。
 - Claude 钩子只防误操作，挡不住刻意绕过；终端直接 `git push` 不经过 Claude 钩子，靠 git pre-push 钩子兜底。pre-push 钩子把 stdin 里实际推送的引用交给 `verify.mjs --pre-push` 核对：分支推送的提交必须是当前 HEAD 或已在基准分支里，否则拒绝；标签推送不查引用（工作区核对照常），只删除远端引用（分支或标签）的推送直接放行。Claude 钩子拒绝跳过 git 钩子的推送（`git push --no-verify` 及从 `--no-veri` 起的前缀缩写、`git -c core.hooksPath=… push`），`-n`（即 `--dry-run`）照常核对。判断按 shell 规则逐段切词：引号里的文字不算参数，但被引号整个包住的词（如 `"--no-verify"`）照样算；core.hooksPath 只认 git 与 push 之间的 `-c`、`--config-env` 全局选项，以及同一条命令里用环境变量（`GIT_CONFIG_KEY_<n>`、`GIT_CONFIG_PARAMETERS`）设的值。认不出、因而拦不住的写法：换行续行把 `git push` 和选项拆在几行；子命令替换和变量展开；git 别名（如 `git -c alias.p="push --no-verify" p`，或配置里事先定义的别名）。推送引用只在 git pre-push 钩子里核对：钩子没装（安装时用了 `--no-hooks`，或已有别的 pre-push 钩子而没加核对行）时，Claude 钩子只核对工作区，推别的分支或显式 refspec 拦不住，整包漂移检查会把缺失的钩子报为 missing；事先用 `git config core.hooksPath` 改钩子目录这类持久配置也拦不住。
 - 闸门通过时先打印测试先行检查、注释检查、断言检查三行（有未检查的文件时，测试先行一行后多一行列出它们；静态检查不通过时，问题清单之后同样列出。推送核对和编辑后提醒不列未检查的文件），前两行写明各检查、豁免了几个本次改动的源文件（注释检查不看 `reviewIgnore` 之内的和已删除的，两行数字可以不同），断言检查一行写明查了几个本次改动的测试文件；用例数减少时多一行提示。之后按情况是测试结果一行，前面可能多一行说明（改跑全量的原因，或按影响范围跑了哪些分组），沿用已有记录时这一行换成“沿用已有通过记录”；静态检查不过时不跑测试。
-- 判定依据在 `lib.mjs` 的 `loadConfig` 一处得出，`gate.mjs`、`verify.mjs`、`review.mjs`、`merge.mjs`、巡检和钩子共用：判定策略字段 `reviewIgnore`、`reviewFlow`、`reviewers`、`reviewMinChars`、`reviewKeyword`、`maxReviewRounds` 取基准提交上的项目配置，基准上没有配置（首次安装）时才用工作区的，读不出或不合法时报错；测试命令、测试分组、glob 等其余字段用工作区的值（它们随功能分支变化是正常的，配置文件又永远在闸门范围内，改了要过复审）。闸门范围只有一个口径：项目配置、豁免表和 `scripts/engineering/**` 永远在范围内。分支改自己的判定策略要合入主干后才生效，工作区的值与生效值不同时，闸门和推送核对各输出一行判定策略提示（复审登记和合并入口不输出）。树哈希里子模块按它指向的提交号计入。
+- 判定依据在 `lib.mjs` 的 `loadConfig` 一处得出，`gate.mjs`、`verify.mjs`、`review.mjs`、`merge.mjs`、巡检和钩子共用：判定策略字段 `reviewIgnore`、`reviewFlow`、`requiredChecks`、`reviewers`、`reviewMinChars`、`reviewKeyword`、`maxReviewRounds` 取基准提交上的项目配置，基准上没有配置（首次安装）时才用工作区的，读不出或不合法时报错；测试命令、测试分组、glob 等其余字段用工作区的值（它们随功能分支变化是正常的，配置文件又永远在闸门范围内，改了要过复审）。闸门范围只有一个口径：项目配置、豁免表和 `scripts/engineering/**` 永远在范围内。分支改自己的判定策略要合入主干后才生效，工作区的值与生效值不同时，闸门和推送核对各输出一行判定策略提示（复审登记和合并入口不输出）。树哈希里子模块按它指向的提交号计入。
 - 测试与复审记录写明基线（基准提交）：合入新主干或变基后旧记录作废，提示“基线已变化”。测试运行期间范围内出现未被忽略的新文件（覆盖率、快照等测试产物）时仍判不通过，提示列出这些文件并建议加入 `.gitignore`。新文件位置检查也查改名后的新路径。
 - 复审报告要有一处明确的结论：同一行“结论：……”，或单独一行“## 结论”后的第一个非空行；两种写法都按逗号、分号、句号、冒号拆成小句，整句恰好是“通过 / 不通过 / 未通过”（只认中文）的小句才算，“通过前需修复 H1”不算，结论词后带括号的（“通过（待 M2 修复后）”）也不算；登记 pass 要求结论是通过，登记 fail 要求结论是不通过，找不到、前后矛盾或不符时拒绝。
 - 默认主干的识别：`base` 显式写成本地分支名（如 `main`）、或远端不叫 `origin` 时，本地分支会被当作主干，能改本地分支的人就能改判定依据；建议把 `base` 指向远端跟踪分支（如 `origin/main`）。
@@ -123,7 +123,9 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 - 闸门脚本本身（`scripts/engineering/gate/`）被分支改动时，本地闸门的结果不可信：由复审者核对脚本改动本身，有 CI 的项目另看 CI；没有 CI 的项目没有这道外部核对，只剩复审者核对脚本差异，套件不另加拦截。
 - 复审记录是本机约定，不是密码学证明；复审者名字由登记者填写，套件不验证它确是独立子代理。守住它靠 PR 里公开的复审摘要。
 - 测试记录与 `pre-push` 流程的复审记录放在各工作树自己的 git 目录（`engineering-gate/`），多个工作树互不覆盖，不进工作区；闸门锁与 `pr` 流程的 PR 审查记录（`engineering-gate/pr/<编号>/`）放在 git 公共目录，所有工作树共用：同一仓库同时只跑一个闸门，复审与合并可以在不同工作树进行。
-- `pr` 流程只支持 GitHub（经 `gh`）；`gh` 不存在或调用失败时登记与合并都报错，不放行。只改文档的 PR 和各风险档位怎样审，见 `references/process.md` 第 4 节。
+- `pr` 流程只支持 GitHub（经 `gh`）；`gh` 不存在或调用失败时登记与合并都报错，不放行。
+- `pr` 流程的必需检查只按名字比对，不核对来源（哪个 GitHub App、哪个工作流）：分支改 `.github/workflows` 造一个同名、直接成功的 job，或用有提交状态写权限的令牌发一个同名的成功状态，都能满足它；合并入口和闸门脚本也从当前检出运行。这两点只靠复审兜底（`.github/**` 不在默认 `reviewIgnore` 里，`scripts/engineering/**` 永远在闸门范围内）。用 `pr` 流程的项目建议同时开 GitHub 分支保护，把必需检查绑定到来源 App，作为权威的一层。
+- 项目配置里没写 `rules.reviewIgnore` 的（含旧版扁平配置），按当前版本的默认值；0.7.0 起是窄口径，升级后这类项目的规则、技能正文、提示词会开始要求复审。只改文档的 PR 和各风险档位怎样审，见 `references/process.md` 第 4 节。
 - 记录类目录（`hygiene.recordDirs`，如 `docs/adr`、`docs/acceptance`、`docs/release`）里已跟踪的文件被修改、删除或改名，巡检都报错：改名按旧路径删除计，工作区和相对基准分支已提交的改动都查；分支上新增后又删掉、从未进过基准的不报。
 - 同步比较闸门与钩子脚本、`.claude/settings.json` 和锁文件时只比内容、不计换行风格（AGENTS.md 规则块仍按原文比较）：项目开着 `core.autocrlf` 而 `.gitattributes` 没写 `eol=lf` 时，检出成 CRLF 的套件文件不算本地修改，漂移检查也不报；只差换行的 `.claude/settings.json` 与锁文件不重写。仍建议在 `.gitattributes` 里写 `* text=auto eol=lf`。
 - 巡检的“已合并分支”判断基于补丁等价（git cherry），squash 合并后的分支需人工复核。
