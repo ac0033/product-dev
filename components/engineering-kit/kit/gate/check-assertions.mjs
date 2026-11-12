@@ -71,9 +71,13 @@ function renamePairs(root, baseRev) {
  */
 function caseHints(root, tests, baseRev) {
   const hints = [];
+  const baseText = new Map(); // 每个路径只读一次基准提交上的内容（已删除的文件先判存在、后算总数，会用到两次）
   const atBase = (f) => {
-    const r = git(root, ['show', `${baseRev}:${f}`]);
-    return r.ok ? r.out : null;
+    if (!baseText.has(f)) {
+      const r = git(root, ['show', `${baseRev}:${f}`]);
+      baseText.set(f, r.ok ? r.out : null);
+    }
+    return baseText.get(f);
   };
   const exists = (f) => fs.existsSync(path.join(root, f)) && fs.statSync(path.join(root, f)).isFile();
   const current = (f) => fs.readFileSync(path.join(root, f), 'utf8');

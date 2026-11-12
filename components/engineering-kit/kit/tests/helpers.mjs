@@ -27,7 +27,8 @@ export function trackTmp(dir) {
  */
 export function cleanupTmp() {
   const left = [];
-  for (const dir of created.splice(0)) {
+  // 倒序删除：后登记的先删（例如指向临时目录的目录连接要先于它指向的目录删掉）
+  for (const dir of created.splice(0).reverse()) {
     try {
       fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     } catch {

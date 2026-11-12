@@ -93,7 +93,7 @@
 | 类别 | 位置 | 规则 |
 |---|---|---|
 | 活文档（需求、架构、计划） | 阶段目录 | 原地覆盖，历史靠 git |
-| 记录类（ADR、验收证据包、发布记录） | `docs/adr/`、`docs/acceptance/`、`docs/release/` | 只追加，不改旧文件（巡检会报错） |
+| 记录类（ADR、验收证据包、发布记录） | `docs/adr/`、`docs/acceptance/`、`docs/release/` | 只追加，不改、不删、不改名旧文件（巡检会报错） |
 | 模板 | `docs/_templates/` | 只读，复制后使用 |
 | 阶段索引 | `docs/README.md` | 每个阶段目录都要登记 |
 

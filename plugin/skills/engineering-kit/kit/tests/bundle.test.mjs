@@ -211,9 +211,8 @@ test('仓库根的 .gitattributes 与模板一致（同步按字节复制，CRLF
 });
 
 test('历史目录移动：独立仓库仍可导出旧 engineering-kit 标签的真实内容', () => {
-  const exported = extractTag('engineering-kit-v0.2.0');
-  try { assert.equal(read(exported, 'kit/VERSION').trim(), '0.2.0'); }
-  finally { fs.rmSync(exported, { recursive: true, force: true }); }
+  const exported = trackTmp(extractTag('engineering-kit-v0.2.0'));
+  assert.equal(read(exported, 'kit/VERSION').trim(), '0.2.0');
 });
 
 /** 只看换行风格的工作区：core.autocrlf=true、项目自己的 .gitattributes 只写 text=auto（没有 eol=lf），装好套件并提交，再重新检出一遍。 */

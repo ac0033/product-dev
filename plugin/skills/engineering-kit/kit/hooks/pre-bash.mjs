@@ -27,15 +27,112 @@ const RANK = { other: 0, push: 1, bypass: 2, merge: 3 };
 const GIT_PUSH = /\bgit(?:\.exe)?((?:\s+(?:-C\s+\S+|-c\s+\S+|--?[\w-]+(?:=\S+)?))*)\s+push\b([^\n;&|]*)/g;
 
 /**
- * 命令里有没有跳过 git 钩子的 git push：push 的参数里有 --no-verify（git 接受唯一前缀，--no-veri、--no-verif 同样生效），
- * 或这一段命令设了 core.hooksPath（在原始文本上查：-c "core.hooksPath=…" 的值在引号里）。-n 是 --dry-run，不算。
- * bare 是去掉引号内容后的命令（引号里的文字不是参数）。
+ * 按 shell 的规则把命令切成段（引号外的 ; & | 换行分段）和词：引号去掉、内容保留（"--no-verify" 与 --no-verify 是同一个词），
+ * 双引号里认反斜杠转义。返回 [[词, ...], ...]。只做判断用，不追求完整的 shell 语法（不处理换行续行、子命令替换等）。
  */
-function skipsGitHooks(command, bare) {
-  for (const m of bare.matchAll(GIT_PUSH)) {
-    if (/(?:^|\s)--no-veri(?:f|fy)?(?=\s|$)/.test(m[2])) return true;
+export function shellSegments(command) {
+  const segs = [];
+  let words = [];
+  let cur = null;
+  const flush = () => {
+    if (cur !== null) words.push(cur);
+    cur = null;
+  };
+  const endSeg = () => {
+    flush();
+    if (words.length) segs.push(words);
+    words = [];
+  };
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === '"' || ch === "'") {
+      let j = i + 1;
+      let text = '';
+      for (; j < command.length && command[j] !== ch; j++) {
+        if (ch === '"' && command[j] === '\\' && j + 1 < command.length) text += command[++j];
+        else text += command[j];
+      }
+      cur = (cur ?? '') + text;
+      i = j; // 停在收尾引号上（没有收尾引号时到结尾）
+    } else if (/[;&|\n]/.test(ch)) endSeg();
+    else if (/\s/.test(ch)) flush();
+    else cur = (cur ?? '') + ch;
   }
-  return /\bgit(?:\.exe)?\s[^\n;&|]*core\.hookspath[^\n;&|]*\spush\b/i.test(command);
+  endSeg();
+  return segs;
+}
+
+/** git 的可执行文件名（git、git.exe，允许带路径）。 */
+const GIT_EXE = /(?:^|[\\/])git(?:\.exe)?$/i;
+
+/** 一个配置项写法（core.hooksPath=…，或 --config-env 的 core.hooksPath=ENV）的键是不是 core.hooksPath（不分大小写）。 */
+const isHooksPathKey = (s) => s.split('=')[0].trim().toLowerCase() === 'core.hookspath';
+
+/**
+ * 一段命令里的 git push：返回 { globals: 全局选项设的配置项, args: push 之后的参数 }，不是 git push 时返回 null。
+ * git 与子命令之间的全局选项：-C <路径>、-c <键=值>、--config-env <键=环境变量>（也可写成 --config-env=…），其余 -x / --xxx[=…] 跳过。
+ */
+function gitPushIn(words) {
+  for (let i = 0; i < words.length; i++) {
+    if (!GIT_EXE.test(words[i])) continue;
+    const globals = [];
+    let j = i + 1;
+    while (j < words.length && words[j].startsWith('-')) {
+      const w = words[j];
+      if (w === '-C' || w === '-c' || w === '--config-env') {
+        if (w !== '-C' && j + 1 < words.length) globals.push(words[j + 1]);
+        j += 2;
+      } else {
+        if (w.startsWith('--config-env=')) globals.push(w.slice('--config-env='.length));
+        j += 1;
+      }
+    }
+    if (words[j] === 'push') return { globals, args: words.slice(j + 1) };
+  }
+  return null;
+}
+
+/**
+ * 命令里的环境变量赋值有没有把 core.hooksPath 交给 git：GIT_CONFIG_KEY_<n>=core.hooksPath，或 GIT_CONFIG_PARAMETERS 里含 core.hooksPath。
+ * 只认赋值位置：一段命令开头的 名字=值（前面可有 env、export、set），以及 PowerShell 的 $env:名字=值（= 两边可有空格）；echo 的参数之类不算。
+ */
+function envSetsHooksPath(segs) {
+  const hit = (name, value) =>
+    (/^GIT_CONFIG_KEY_\d+$/i.test(name) && isHooksPathKey(value)) || (/^GIT_CONFIG_PARAMETERS$/i.test(name) && /core\.hookspath/i.test(value));
+  for (const words of segs) {
+    let i = 0;
+    if (/^\$env:/i.test(words[0] ?? '')) {
+      const joined = words.join(' ');
+      const m = /^\$env:([\w]+)\s*=\s*(.*)$/i.exec(joined);
+      if (m && hit(m[1], m[2])) return true;
+      continue;
+    }
+    if (['env', 'export', 'set'].includes(words[0])) i = 1;
+    for (; i < words.length; i++) {
+      const m = /^([A-Za-z_]\w*)=(.*)$/s.exec(words[i]);
+      if (!m) break;
+      if (hit(m[1], m[2])) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 命令里有没有跳过 git 钩子的 git push（逐段按 shell 词判断，引号里的文字不是参数，但被引号包住的整个词照样是参数）：
+ *   push 的参数里有 --no-verify（git 接受唯一前缀，--no-veri、--no-verif 同样生效）；-n 是 --dry-run，不算；
+ *   git 与 push 之间的全局选项设了 core.hooksPath（-c、--config-env）；
+ *   命令里用环境变量（GIT_CONFIG_KEY_<n>、GIT_CONFIG_PARAMETERS）设了 core.hooksPath，且有 git push。
+ * 局限：换行续行（\ 或 `）、子命令替换、别名、事先 git config 写进配置文件的都不处理。
+ */
+function skipsGitHooks(command) {
+  const segs = shellSegments(command);
+  const pushes = segs.map(gitPushIn).filter(Boolean);
+  if (pushes.length === 0) return false;
+  for (const p of pushes) {
+    if (p.args.some((a) => /^--no-veri(?:f|fy)?$/.test(a))) return true;
+    if (p.globals.some(isHooksPathKey)) return true;
+  }
+  return envSetsHooksPath(segs);
 }
 
 /**
@@ -48,7 +145,7 @@ export function classify(command, depth = 0) {
   if (/\bgh(?:\.exe)?\b[^\n;&|]*\bpr\s+merge\b/.test(command) || /\bgh(?:\.exe)?\b[^\n]*\/pulls\/\d+\/merge/.test(command)) return 'merge';
   const bare = stripQuoted(command);
   let kind = 'other';
-  if (skipsGitHooks(command, bare)) kind = 'bypass';
+  if (skipsGitHooks(command)) kind = 'bypass';
   else if (new RegExp(GIT_PUSH.source).test(bare) || /\bgh(?:\.exe)?\b[^\n;&|]*\bpr\s+create\b/.test(bare)) kind = 'push';
   if (depth < 3) {
     const inner = /\b(?:bash|sh|zsh|pwsh|powershell|cmd)\s+(?:-c|-Command|\/c)\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')/gi;

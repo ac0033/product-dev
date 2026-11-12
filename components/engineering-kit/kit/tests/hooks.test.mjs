@@ -68,3 +68,35 @@ test('Claude 推送钩子：工作区核对能通过时，git push --no-verify �
   assert.equal(hooksPath.status, 2, hooksPath.stderr);
   assert.match(hooksPath.stderr, /core.hooksPath/);
 });
+
+test('core.hooksPath 只认 git 与 push 之间的全局选项：引号里、别的 git 子命令的参数里出现都不误拦（M1）', () => {
+  assert.equal(classify('git commit -m "拒绝 core.hooksPath 的 git push"'), 'other');
+  assert.equal(classify('git log --grep "core.hooksPath push"'), 'other');
+  assert.equal(classify('git grep core.hooksPath -- push'), 'other');
+  assert.equal(classify('git commit -m "改 core.hooksPath" && git push origin feat'), 'push');
+  // 真正的全局选项照常拦：-c 带引号、键名大小写不同、--config-env 两种写法
+  assert.equal(classify("git -c 'core.hooksPath=/dev/null' push"), 'bypass');
+  assert.equal(classify('git -c CORE.HOOKSPATH=x push origin feat'), 'bypass');
+  assert.equal(classify('git --config-env=core.hooksPath=HP push'), 'bypass');
+  assert.equal(classify('git --config-env core.hooksPath=HP push'), 'bypass');
+  assert.equal(classify('git -c core.editor=vim push origin feat'), 'push');
+});
+
+test('--no-verify 被引号包住（shell 去引号后 git 仍收到它）也判 bypass；只看 push 段的参数（L1）', () => {
+  assert.equal(classify('git push origin "--no-verify"'), 'bypass');
+  assert.equal(classify("git push origin '--no-verify'"), 'bypass');
+  assert.equal(classify('git push "--no-veri" origin feat'), 'bypass');
+  assert.equal(classify('git commit -m "x --no-verify" && git push origin feat'), 'push');
+  assert.equal(classify('git commit -m "--no-verify" && git push origin feat'), 'push');
+});
+
+test('环境变量设 core.hooksPath（GIT_CONFIG_KEY_n、GIT_CONFIG_PARAMETERS）再 git push 判 bypass；不推送时不管（L1）', () => {
+  assert.equal(classify('GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git push origin feat'), 'bypass');
+  assert.equal(classify("GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\" git push"), 'bypass');
+  assert.equal(classify('env GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_COUNT=1 git push'), 'bypass');
+  assert.equal(classify('export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath; git push origin feat'), 'bypass');
+  assert.equal(classify("$env:GIT_CONFIG_PARAMETERS=\"'core.hooksPath=NUL'\"; git push origin feat"), 'bypass');
+  assert.equal(classify('GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_COUNT=1 git status'), 'other');
+  assert.equal(classify('GIT_CONFIG_KEY_0=core.editor GIT_CONFIG_COUNT=1 git push'), 'push');
+  assert.equal(classify('echo "GIT_CONFIG_KEY_0=core.hooksPath" && git push origin feat'), 'push');
+});

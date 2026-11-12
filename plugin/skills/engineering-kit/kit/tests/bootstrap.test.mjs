@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { git, tmpRepo, write, read, tmpDir } from './helpers.mjs';
+import { git, tmpRepo, write, read, tmpDir, trackTmp } from './helpers.mjs';
 import { resolveBase, changedFiles, EMPTY_TREE } from '../gate/lib.mjs';
 import { runGate } from '../gate/gate.mjs';
 import { runHygiene } from '../gate/hygiene.mjs';
@@ -183,7 +183,7 @@ test('命令行入口：经由目录连接（junction/符号链接）调用时�
   // Windows 上安装目录可能是指向另一个目录的连接，Node 会把模块路径解析为真实路径；
   // 若入口判断只比较字符串，就会出现“退出码 0、什么输出也没有”。
   const real = tmpDir('ekit-real-');
-  const link = `${real}-link`;
+  const link = trackTmp(`${real}-link`); // 登记在 real 之后，清理时先删
   fs.symlinkSync(real, link, 'junction');
   const kit = path.resolve(BUNDLE_ROOT, 'kit');
   fs.cpSync(kit, path.join(real, 'kit'), { recursive: true });
@@ -191,5 +191,4 @@ test('命令行入口：经由目录连接（junction/符号链接）调用时�
   git(dir, ['init', '-q', '-b', 'main']);
   const r = spawnSync(process.execPath, [path.join(link, 'kit', 'sync.mjs'), '--target', dir, '--check'], { encoding: 'utf8' });
   assert.ok(r.stdout.includes('整包'), `入口未执行：stdout=${r.stdout} stderr=${r.stderr}`);
-  fs.rmSync(link, { recursive: true, force: true });
 });

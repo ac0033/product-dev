@@ -257,13 +257,9 @@ test('验收 10：pr 流程项目同步后有 merge.mjs、冒烟通过；回滚�
 
   const tag = 'engineering-kit-v0.2.2';
   if (spawnSync('git', ['-C', BUNDLE_ROOT, 'rev-parse', '--verify', '--quiet', `${tag}^{commit}`]).status !== 0) return; // 没有该标签的克隆里跳过回滚部分
-  const old = extractTag(tag);
-  try {
-    const back = syncKit({ target: root, bundleRoot: old });
-    assert.equal(back.ok, true, back.messages.join('\n'));
-  } finally {
-    fs.rmSync(old, { recursive: true, force: true });
-  }
+  const old = trackTmp(extractTag(tag)); // 本文件的测试结束后统一删除
+  const back = syncKit({ target: root, bundleRoot: old });
+  assert.equal(back.ok, true, back.messages.join('\n'));
   assert.equal(fs.existsSync(path.join(root, 'scripts/engineering/gate/merge.mjs')), false, '旧版本没有合并入口');
   assert.equal(JSON.parse(read(root, 'engineering.config.json')).modules.gate.reviewFlow, 'pr', '项目配置取值保留');
   // 旧流程：推送核对要求复审记录
