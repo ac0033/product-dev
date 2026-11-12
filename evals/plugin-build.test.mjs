@@ -255,3 +255,30 @@ function frontmatter(rel) {
   assert.ok(m, `${rel} 没有文件头`);
   return m[1];
 }
+
+test('套件自洽：插件里 kit 脚本的相对导入都存在，技能文本点名的 kit/tools 脚本和 kit/tests 都随插件带着（不排除它们的依据）', () => {
+  const kitRoot = path.join(PLUGIN, 'skills', 'engineering-kit');
+  const files = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith('.mjs')) files.push(p);
+    }
+  };
+  walk(path.join(kitRoot, 'kit'));
+  assert.ok(files.length > 20, '没有找到套件脚本');
+  for (const f of files) {
+    const src = fs.readFileSync(f, 'utf8');
+    for (const m of src.matchAll(/(?:^|\n)\s*(?:import|export)\b[^;'"]*?from\s*['"](\.{1,2}\/[^'"]+)['"]|(?:^|\n)\s*import\s*['"](\.{1,2}\/[^'"]+)['"]/g)) {
+      const rel = m[1] ?? m[2];
+      assert.ok(fs.existsSync(path.resolve(path.dirname(f), rel)), `${path.relative(PLUGIN, f)} 导入的 ${rel} 不在插件里`);
+    }
+  }
+  const skill = fs.readFileSync(path.join(kitRoot, 'SKILL.md'), 'utf8');
+  const named = [...skill.matchAll(/<kit>\/tools\/([a-z-]+\.mjs)/g)].map((m) => m[1]);
+  assert.ok(named.includes('changeset.mjs') && named.includes('release.mjs'), '套件技能文本应点名变更集与发布脚本');
+  for (const n of new Set(named)) assert.ok(fs.existsSync(path.join(kitRoot, 'kit', 'tools', n)), `技能文本点名的 kit/tools/${n} 不在插件里`);
+  assert.ok(skill.includes('node --test tests/*.test.mjs'), '技能文本应写明套件的测试命令');
+  assert.ok(fs.readdirSync(path.join(kitRoot, 'kit', 'tests')).some((n) => n.endsWith('.test.mjs')), '技能文本要求运行的 kit/tests 不在插件里');
+});

@@ -8,7 +8,7 @@ import { checkComments } from '../gate/check-comments.mjs';
 import { checkTestFirst, referencesFile } from '../gate/check-test-first.mjs';
 import { acquireLock, changedFiles, loadConfig, readRecord, recordDir, scopeFiles, treeHash, writeRecord } from '../gate/lib.mjs';
 import { runGate } from '../gate/gate.mjs';
-import { branchDirName, recordReview } from '../gate/review.mjs';
+import { branchDirName, missingSections, recordReview } from '../gate/review.mjs';
 import { newFileProblems, verify } from '../gate/verify.mjs';
 import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, TEST_CONFIG, tmpRepo, trackTmp, write } from './helpers.mjs';
 
@@ -16,7 +16,7 @@ import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, TEST_CONFIG,
 const cfg = { ...TEST_CONFIG };
 
 /** 一个合格的复审报告：字数够、含“结论”、结论为通过。 */
-const GOOD_REPORT = `发现：无高、中级问题。\n已逐条核对改动的 dedup 函数与测试用例，边界条件（空数组、重复项）均有覆盖。\n处置：无需处理。\n结论\n通过\n`;
+const GOOD_REPORT = `范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n已逐条核对改动的 dedup 函数与测试用例，边界条件（空数组、重复项）均有覆盖。\n处置：无需处理。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n结论\n通过\n`;
 
 test('测试先行：源文件改动时，引用它的测试也必须在本次改动里', () => {
   const root = featureRepo();
@@ -471,4 +471,60 @@ test('闸门输出：删除的源文件计入测试先行的“无需测试”�
   assert.deepEqual(res.record.staticChecks, { testFirst: { checked: 1, exempt: 0, skipped: 1, unchecked: 0, uncheckedFiles: [] }, comments: { checked: 0, exempt: 0 } });
   assert.ok(res.messages.some((m) => /^测试先行检查通过.*无需测试 1 个，含已删除的/.test(m)), res.messages.join('\n'));
   assert.ok(res.messages.some((m) => /^注释检查通过.*不含 reviewIgnore 之内的和已删除的.*检查 0 个/.test(m)), res.messages.join('\n'));
+});
+
+// ---------- 复审报告的格式检查：必需的节（reviewSections）取代字数 ----------
+
+const FULL = '## 范围\n读了 dedup 函数与测试。\n\n## 发现\n无。\n\n## 作者的验证\n核对了作者的测试输出，没有重跑。\n\n## 结论\n通过。无高、中级问题。\n';
+
+/** 用一份配置建仓库并准备好能登记复审的改动，返回仓库根。 */
+function reviewReadyRepo(config) {
+  const root = featureRepo(config);
+  write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
+  assert.equal(runGate({ root }).ok, true);
+  return root;
+}
+
+test('missingSections：标题行和“节名：内容”两种写法都认，带编号、星号的也认', () => {
+  assert.deepEqual(missingSections(FULL, ['范围', '发现', '作者的验证']), []);
+  assert.deepEqual(missingSections('### 1. 范围\n看了。\n## 一、发现\n无\n**作者的验证**：已核对\n', ['范围', '发现', '作者的验证']), []);
+  assert.deepEqual(missingSections('范围：读了 a.ts\n- 发现：无\n> 作者的验证：核对了\n', ['范围', '发现', '作者的验证']), []);
+});
+
+test('missingSections：缺节、空节、节名只是别的词的前缀、藏在代码围栏里的都算缺', () => {
+  assert.deepEqual(missingSections('## 范围\n读了。\n## 结论\n通过\n', ['范围', '发现', '作者的验证']), ['发现', '作者的验证']);
+  assert.deepEqual(missingSections('## 范围\n\n## 发现\n无\n', ['范围', '发现']), ['范围'], '标题下没有内容算缺');
+  assert.deepEqual(missingSections('## 范围内的问题\n读了。\n', ['范围']), ['范围'], '“范围内的问题”不是“范围”一节');
+  assert.deepEqual(missingSections('```markdown\n## 范围\n读了。\n```\n', ['范围']), ['范围'], '围栏里的模板不算');
+  assert.deepEqual(missingSections('## 范围\n### 细项\n读了。\n## 发现\n无\n', ['范围', '发现']), [], '子标题下的内容算本节的内容');
+  assert.deepEqual(missingSections('任意内容', []), [], '写成空数组表示不要求任何节');
+});
+
+test('复审记录：默认不再按字数判定，四节齐全的短报告可以登记', () => {
+  const root = reviewReadyRepo({ reviewMinChars: undefined });
+  assert.equal(loadConfig(root).reviewMinChars, 0);
+  const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile(FULL), summary: 's' });
+  assert.equal(r.ok, true, r.message);
+});
+
+test('复审记录：缺必需的节 → 拒绝，并说明缺哪几节；字数再多也不行', () => {
+  const root = reviewReadyRepo({ reviewMinChars: undefined });
+  const long = `${'已逐条核对。'.repeat(80)}\n## 发现\n无\n## 结论\n通过。理由充分。\n`;
+  const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile(long), summary: 's' });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /缺少必需的节：范围、作者的验证/);
+});
+
+test('复审记录：旧配置里显式写的 reviewMinChars 仍然生效，与必需的节一起判定', () => {
+  const root = reviewReadyRepo({ reviewMinChars: 400 });
+  const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile(FULL), summary: 's' });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /不少于 400/);
+});
+
+test('复审记录：reviewSections 可以按项目改写（只要求发现）', () => {
+  const root = reviewReadyRepo({ reviewMinChars: undefined, reviewSections: ['发现'] });
+  const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile('## 发现\n无\n## 结论\n通过。没有问题。\n'), summary: 's' });
+  assert.equal(r.ok, true, r.message);
 });

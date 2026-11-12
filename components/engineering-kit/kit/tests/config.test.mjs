@@ -44,7 +44,7 @@ test('扁平 ⇄ profile 互转：字段不丢失', () => {
   const flat = {
     base: 'origin/main', sourceGlobs: ['src/**/*.ts'], testGlobs: ['tests/**/*.ts'], reviewIgnore: ['**/*.md'],
     commentMode: 'header', testCommand: 'npm test', testEnv: { X: 'y' }, reviewers: ['general-purpose'],
-    reviewMinChars: 200, reviewKeyword: '结论', lockMaxAgeMinutes: 90, reviewFlow: 'pr',
+    reviewMinChars: 200, reviewSections: ['范围', '发现', '作者的验证'], reviewKeyword: '结论', lockMaxAgeMinutes: 90, reviewFlow: 'pr',
     // 0.6.0 新增的两个扁平字段
     testGroups: [{ name: 'unit', paths: ['src/**'], command: 'npm run test:unit' }], maxReviewRounds: 4,
     // 0.7.0 新增：pr 流程的必需检查名
@@ -91,4 +91,25 @@ test('默认复审者名单含插件自带的复审子代理 product-dev:code-re
   assert.deepEqual(template.modules.review.reviewers, DEFAULTS.reviewers);
   // 项目自己写了名单的不受默认值影响（老项目的配置不会被悄悄改掉）
   assert.deepEqual(normalizeConfig({ profile: 2, modules: { review: { reviewers: ['general-purpose'] } } }).reviewers, ['general-purpose']);
+});
+
+test('复审报告的格式检查：默认要求三节、不再按字数；旧配置的 reviewMinChars 照常读取', () => {
+  assert.deepEqual(DEFAULTS.reviewSections, ['范围', '发现', '作者的验证']);
+  assert.equal(DEFAULTS.reviewMinChars, 0);
+  const template = JSON.parse(readFileSync(TEMPLATE, 'utf8'));
+  assert.deepEqual(template.modules.review.reviewSections, DEFAULTS.reviewSections, '配置模板与默认值一致');
+  assert.equal(template.modules.review.reviewMinChars, undefined, '新项目的模板不再写最少字数');
+  const old = normalizeConfig({ profile: 2, modules: { review: { reviewMinChars: 200 } } });
+  assert.equal(old.reviewMinChars, 200);
+  assert.deepEqual(old.reviewSections, DEFAULTS.reviewSections, '旧配置没写 reviewSections 时取默认');
+  const prof = toProfile(old);
+  assert.equal(prof.modules.review.reviewMinChars, 200, '显式的正数在互转中保留');
+  assert.equal(toProfile(normalizeConfig({ profile: 2 })).modules.review.reviewMinChars, undefined, '默认的 0 不写进配置');
+});
+
+test('reviewSections 格式不对时报错；写成空数组表示不要求任何节', () => {
+  assert.throws(() => normalizeConfig({ profile: 2, modules: { review: { reviewSections: '范围' } } }), /reviewSections/);
+  assert.throws(() => normalizeConfig({ profile: 2, modules: { review: { reviewSections: ['范围', ''] } } }), /reviewSections/);
+  assert.throws(() => normalizeConfig({ profile: 2, modules: { review: { reviewSections: ['范围', '范围'] } } }), /reviewSections/);
+  assert.deepEqual(normalizeConfig({ profile: 2, modules: { review: { reviewSections: [] } } }).reviewSections, []);
 });

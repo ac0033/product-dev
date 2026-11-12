@@ -1,0 +1,144 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "修 bug",
+    "output": "bug-fix.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "visual_preset": "classic"
+  },
+  "lanes": [
+    {
+      "id": "find",
+      "label": "找原因"
+    },
+    {
+      "id": "fix",
+      "label": "修复"
+    },
+    {
+      "id": "wrap",
+      "label": "收尾"
+    }
+  ],
+  "mainPath": [
+    "repro",
+    "locate",
+    "gap",
+    "failtest",
+    "minfix",
+    "scan",
+    "selfcheck",
+    "regress"
+  ],
+  "nodes": [
+    {
+      "id": "repro",
+      "lane": "find",
+      "col": 0,
+      "type": "backend",
+      "label": "稳定复现"
+    },
+    {
+      "id": "locate",
+      "lane": "find",
+      "col": 1,
+      "type": "backend",
+      "label": "定位根因"
+    },
+    {
+      "id": "gap",
+      "lane": "find",
+      "col": 2,
+      "type": "backend",
+      "icon": "decision",
+      "label": "是需求缺口?"
+    },
+    {
+      "id": "tofeature",
+      "lane": "find",
+      "col": 3,
+      "type": "external",
+      "label": "转加功能路线"
+    },
+    {
+      "id": "failtest",
+      "lane": "fix",
+      "col": 2,
+      "type": "backend",
+      "label": "写失败测试"
+    },
+    {
+      "id": "minfix",
+      "lane": "fix",
+      "col": 3,
+      "type": "backend",
+      "label": "最小修复"
+    },
+    {
+      "id": "scan",
+      "lane": "fix",
+      "col": 4,
+      "type": "backend",
+      "label": "查同类与调用方"
+    },
+    {
+      "id": "selfcheck",
+      "lane": "wrap",
+      "col": 4,
+      "type": "security",
+      "label": "自查到合并"
+    },
+    {
+      "id": "regress",
+      "lane": "wrap",
+      "col": 5,
+      "type": "backend",
+      "label": "回归入库"
+    }
+  ],
+  "edges": [
+    {
+      "from": "repro",
+      "to": "locate"
+    },
+    {
+      "from": "locate",
+      "to": "gap"
+    },
+    {
+      "from": "gap",
+      "to": "tofeature",
+      "label": "是"
+    },
+    {
+      "from": "gap",
+      "to": "failtest",
+      "label": "否",
+      "route": "drop",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "failtest",
+      "to": "minfix"
+    },
+    {
+      "from": "minfix",
+      "to": "scan"
+    },
+    {
+      "from": "scan",
+      "to": "selfcheck",
+      "route": "drop",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "selfcheck",
+      "to": "regress",
+      "variant": "emphasis"
+    }
+  ]
+}

@@ -18,7 +18,7 @@ import { BUNDLE_ROOT, extractTag, syncKit } from '../sync.mjs';
 import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, tmpRepo, trackTmp, write } from './helpers.mjs';
 
 /** 一个合格的复审报告：字数够、含“结论”、结论为通过。 */
-const GOOD_REPORT = `发现：无高、中级问题。\n已逐条核对 PR 的最终提交，dedup 函数与测试用例的边界条件（空数组、重复项）均有覆盖。\n处置：无需处理。\n结论\n通过\n`;
+const GOOD_REPORT = `范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n已逐条核对 PR 的最终提交，dedup 函数与测试用例的边界条件（空数组、重复项）均有覆盖。\n处置：无需处理。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n结论\n通过\n`;
 
 /** PR 的两个最终提交（复审时的、复审后又推送的）。 */
 const HEAD = 'a'.repeat(40);

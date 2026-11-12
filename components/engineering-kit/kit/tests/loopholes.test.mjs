@@ -23,7 +23,7 @@ import { commitAll, featureRepo, git, reportFile, SRC_HEADER, TEST_CONFIG, tmpRe
 const KIT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /** 合格的复审报告正文（不含结论），字数够。 */
-const BODY = '发现：无高、中级问题。\n已逐条核对改动的 dedup 函数与测试用例，边界条件（空数组、重复项）均有覆盖，调用方也已核对。\n处置：无需处理。\n';
+const BODY = '范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n已逐条核对改动的 dedup 函数与测试用例，边界条件（空数组、重复项）均有覆盖，调用方也已核对。\n处置：无需处理。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n';
 /** 结论为通过的合格报告。 */
 const PASS_REPORT = `${BODY}结论\n通过\n`;
 
