@@ -16,13 +16,13 @@
 
 ## 快速开始
 
-**让 Agent 替你装。** 把下面这句话发给你正在用的 Agent。读到本仓库的 Agent 也可以直接照[给 Agent 的安装步骤](INSTALL.md#agent-install)执行。
+**让 Agent 替你装。** 把下面这段话原样发给你正在用的 Agent。读到本仓库的 Agent 也可以直接照做。
 
 ```text
-请按 https://github.com/ac0033/product-dev/blob/main/INSTALL.md 的“给 Agent 的安装步骤”一节，为我正在使用的这个 Agent 安装 Product Dev，装完按该节的办法验证，并告诉我版本号和调用方式。
+安装 Product Dev 插件，只用下面一种方式。如果你在 Claude Code 里，运行 `claude plugin marketplace add ac0033/skills`，再运行 `claude plugin install product-dev@ac0033-skills`，然后用 `claude plugin list` 确认列出了 product-dev@ac0033-skills。如果你在 Codex 里，运行 `codex plugin marketplace add ac0033/skills`，再运行 `codex plugin add product-dev@ac0033-skills`，然后用 `codex plugin list` 确认它的状态是 installed。如果你在别的 Agent 里，读取 https://raw.githubusercontent.com/ac0033/product-dev/main/INSTALL.md，按其中对应你这个 Agent 的一节安装。命令失败时把命令和输出原样告诉我，不要换别的来源。装完告诉我版本号，并提醒我重新打开会话后用 product-dev 入口开始。
 ```
 
-想自己动手，按下面对应的宿主安装。
+每一步的验证办法和注意事项见[给 Agent 的安装步骤](INSTALL.md#agent-install)。想自己动手，按下面对应的宿主安装。
 
 ### Claude Code
 
