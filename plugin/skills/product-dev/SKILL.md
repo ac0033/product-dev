@@ -17,7 +17,7 @@ description: 产品开发的唯一入口。用户提出产品或开发相关的�
 
 | 文件 | 什么时候读 |
 |---|---|
-| [process.md](references/process.md) | 开工与排程、功能契约、开发细则、两种复审流程的命令、预发与发布、文档位置、收工、巡检、授权边界 |
+| [process.md](references/process.md) | 入口步骤到套件流程文档各节的对照、配置闸门的字段、测试的四个阶段 |
 | [planning.md](references/planning.md) | 任务拆解 |
 | [build.md](references/build.md) | 测试设计、逐片开发、最小修复 |
 | [self-review.md](references/self-review.md) | 推送前自查 |
@@ -44,7 +44,7 @@ description: 产品开发的唯一入口。用户提出产品或开发相关的�
 |---|---|---|
 | 新项目 | 还没有代码：目录是空的，或只有说明和设计文档 | 第 2 节（装工程底座 → 设计段 → 配置闸门）→ 第 4 节 |
 | 加功能 | 已有项目里新增或改变一项能力，且不满足下一行“小新增”的条件；跨模块、新接口、数据库结构、权限、费用、服务器配置一律算这一档 | 第 3 节 → 第 4 节 |
-| 小新增 | 已有项目里新增一项低风险的小能力：单模块、不改接口和数据结构、需求明确。在已有模块里新增内部或导出的函数、而现有调用方式和行为不变，不算新接口；给已有函数加向后兼容的可选参数、新增带默认值且不改变默认行为的配置项，也不算新接口，改变默认行为的算；新增对外的 HTTP 或 RPC 接口、命令行命令、跨模块的新依赖方向、数据库结构，算新接口，按加功能 | 第 6 节 |
+| 小新增 | 已有项目里新增一项低风险的小能力：单模块、不改接口和数据结构、需求明确。在已有模块里新增内部或导出的函数、而现有调用方式和行为不变，不算新接口；给已有函数加向后兼容的可选参数、新增带默认值且不改变默认行为的配置项，也不算新接口，改变默认行为的算；新增对外的 HTTP 或 RPC 接口、命令行命令、跨模块的新依赖方向、数据库结构，算新接口，按加功能。PRD（或已确认的需求）里没有对应需求的不算“需求明确”：先经设计总控修订需求，修订后再按小新增或加功能分流；项目没有 PRD 时，以用户本次明确提出、范围清楚的要求为准 | 第 6 节 |
 | 修 bug | 行为与已确认的需求、契约或文档不符 | 第 5 节 |
 | 小改动 | 低风险、单模块、需求明确，不改接口和数据结构 | 第 6 节 |
 | 只改文档 | 全部文件都在项目配置 `rules.reviewIgnore` 之内，且不改变 agent 或产品的行为 | 第 6 节 |
@@ -86,31 +86,31 @@ description: 产品开发的唯一入口。用户提出产品或开发相关的�
 
 | 步骤 | 目标 | 原则 | 工具 | 过关证据 |
 |---|---|---|---|---|
-| 开工检查 | 从最新主干开分支，确认没有遗留的未提交改动 | 续做前核对提交记录和开着的 PR（R7） | `git fetch`、`git status`、`git worktree list`、`gh pr list`；`node scripts/engineering/gate/hygiene.mjs` 报告残留的分支和工作树；步骤见 [process.md](references/process.md) 的“开工” | 新分支从最新主干开出，工作区干净；遗留工作已说明去向 |
+| 开工检查 | 从最新主干开分支，确认没有遗留的未提交改动 | 续做前核对提交记录和开着的 PR（R7） | `git fetch`、`git status`、`git worktree list`、`gh pr list`；`node scripts/engineering/gate/hygiene.mjs` 报告残留的分支和工作树；步骤见 [套件流程文档](../engineering-kit/references/process.md) 第 1 节 | 新分支从最新主干开出，工作区干净；遗留工作已说明去向 |
 | 探索代码库 | 找出相似功能、相关模块和必读文件清单 | 先读懂再动手；子代理只给线索，主对话亲自读关键文件（R9） | 并行派发 2 到 3 个子代理 `product-dev:code-explorer`（[定义](../../agents/code-explorer.md)），各查一个方面，任务书要求交回文件清单和调用链 | 必读文件清单，且主对话都已读过 |
-| 澄清问题 | 边界情况、错误处理、兼容性都有明确答案 | 问题集中一次问完，推荐项放第一（R3）；不带着猜测往下走 | 宿主的提问工具，问法见 [process.md](references/process.md) 的“需求与方案” | 问题清单逐项有答案，或有“按授权采用推荐”的记录 |
+| 澄清问题 | 边界情况、错误处理、兼容性都有明确答案 | 问题集中一次问完，推荐项放第一（R3）；不带着猜测往下走 | 宿主的提问工具，问法见 [套件流程文档](../engineering-kit/references/process.md) 第 2 节 | 问题清单逐项有答案，或有“按授权采用推荐”的记录 |
 | 改产品行为? | 判断这次改动要不要先改 PRD 和原型 | 产品行为由需求角色决定，开发不因实现方便改体验 | 对照 `docs/01-需求/` 与 `docs/02-原型/`；要改时加载 `product-dev:product-design-orchestrator`（[SKILL.md](../product-design-orchestrator/SKILL.md)），只修订受影响的部分再回来 | 结论及依据；需要时有修订后的设计版本 |
-| 功能契约 | 写清“怎样证明做对了”，取得用户确认 | 验收标准不得擅自弱化；自行确定的口径单列待确认；契约里的预期和“预期行为与异常边界”场景表交用户集中确认一次，之后的小修复沿用这份契约，需求变了才重新确认 | 复制 `docs/_templates/feature-contract.md` 到 `docs/04-开发/` 填写（[模板原件](../engineering-kit/kit/templates/docs/templates/feature-contract.md)），场景表的写法见 [process.md](references/process.md) 的“需求与方案” | 用户确认的契约，含场景表（或 R2 的授权记录） |
-| 方案对比 | 比较最小改动、结构清晰、折中三种做法并给出推荐 | 建议不写成决定；说明复杂度、风险和能否回退 | 按三种做法各派一次子代理 `product-dev:code-architect`（[定义](../../agents/code-architect.md)；它的定义要求只给一个方案），每份任务书写明这次取哪种取向；主对话把三份蓝图汇成对比表 | 对比表和推荐理由 |
+| 功能契约 | 写清“怎样证明做对了”，取得用户确认 | 验收标准不得擅自弱化；自行确定的口径单列待确认；契约里的预期和“预期行为与异常边界”场景表交用户集中确认一次，之后的小修复沿用这份契约，需求变了才重新确认 | 复制 `docs/_templates/feature-contract.md` 到 `docs/04-开发/` 填写（[模板原件](../engineering-kit/kit/templates/docs/templates/feature-contract.md)），场景表的写法见 [套件流程文档](../engineering-kit/references/process.md) 第 2 节 | 用户确认的契约，含场景表（或 R2 的授权记录） |
+| 方案对比 | 比较最小改动、结构清晰、折中三种做法并给出推荐 | 建议不写成决定；说明复杂度、风险和能否回退 | 按三种做法各派一次子代理 `product-dev:code-architect`（[定义](../../agents/code-architect.md)；它的定义要求只给一个方案），每份任务书写明这次取哪种取向；主对话把三份蓝图汇成对比表。改动很小（只动一两个函数、三种取向的差别一眼可见）时可以不派，由主对话自己按三种取向比较，并在汇报里写明没有派发及理由 | 对比表和推荐理由 |
 | 用户选定方案 | 得到明确批准再进入交付段 | 问句不算授权（R2） | 决定写进 `docs/00-总览/RECORDS.md`（格式见[共享协议](../product-design-orchestrator/references/shared-protocol.md)）；错了难改的决定另写 ADR（`docs/_templates/adr.md`，[模板原件](../engineering-kit/kit/templates/docs/templates/adr.md)） | 用户的选择，或“按授权采用推荐”的记录 |
 
 “改产品行为?”为“是”时先回设计段修订，再写契约。子代理的报告只当线索，主对话打开产物核对（R9）。项目的源文件和测试文件加起来不超过十个、主对话已经逐个读完时，“探索代码库”可以不派发子代理，过关证据不变，并在汇报里列出读过的文件。
 
 ## 4. 交付段
 
-新项目和加功能共用；修 bug 和缩短路线用它的后半。下表按 `pr` 复审流程的次序写；项目配置为 `pre-push`（默认）时，独立复审排在机械闸门之后、推送之前，两种流程的命令见 [process.md](references/process.md) 的“两种复审流程”。
+新项目和加功能共用；修 bug 和缩短路线用它的后半。下表按 `pr` 复审流程的次序写；项目配置为 `pre-push`（默认）时，独立复审排在机械闸门之后、推送之前，两种流程的命令见 [套件流程文档](../engineering-kit/references/process.md) 第 4 节“套件闸门的两种流程”一段。
 
 | 步骤 | 目标 | 原则 | 工具 | 过关证据 |
 |---|---|---|---|---|
-| 任务拆解 | 拆成纵向切片，每片有验收条件和验证方法 | 每片能独立验证、独立回退；高风险实验排在最前 | 按 [planning.md](references/planning.md) 拆；计划用 `docs/_templates/plan.md` 写在 `docs/04-开发/`（[模板原件](../engineering-kit/kit/templates/docs/templates/plan.md)）；新项目（没有功能契约）在这一步按契约模板的场景表格式为每个功能补出场景表（见 planning.md） | 计划文件；中高风险的经用户看过；新项目的场景表经用户确认 |
-| 测试设计 | 依据场景表先写出测试，预期不从实现倒推 | 由不写实现的独立子代理按场景表写测试，做法见 [build.md](references/build.md) 第 4 节 | 按 [build.md](references/build.md) 的“测试设计”派发宿主的通用子代理：加功能给契约和场景表，新项目给 PRD 的验收标准、实施交接和任务拆解时补出并经用户确认的场景表；都附计划里各片的验收条件，不给实现代码 | 每条测试对应到场景表的哪一行；每片开工时那一片的测试在实现之前运行的输出：新增或改变行为的测试失败，已满足的行测试通过，逐条标明 |
-| 逐片开发 | 每片先写测试、再实现、通过后提交 | 测试先行；用最少的新代码解决整个问题；只动任务范围内的文件；开发中只跑与本片相关的快测 | 按 [build.md](references/build.md) 逐片做；测试先行由闸门里的 `scripts/engineering/gate/check-test-first.mjs` 检查 | 每片一个提交，相关测试通过 |
+| 任务拆解 | 拆成纵向切片，每片有验收条件和验证方法 | 每片能独立验证、独立回退；高风险实验排在最前 | 按 [planning.md](references/planning.md) 拆；计划用 `docs/_templates/plan.md` 写在 `docs/04-开发/`（[模板原件](../engineering-kit/kit/templates/docs/templates/plan.md)）；新项目（没有功能契约）的场景表在这一步补出，来源见 [build.md](references/build.md) 第 4 节 | 计划文件；中高风险的经用户看过；新项目的场景表经用户确认 |
+| 测试设计 | 依据场景表先写出测试，预期不从实现倒推 | 由不写实现的独立子代理按场景表写测试，做法见 [build.md](references/build.md) 第 4 节 | 按 [build.md](references/build.md) 的“测试设计”派发宿主的通用子代理，依据和任务书内容照那里写，不给实现代码 | 每条测试对应到场景表的哪一行；每片开工时那一片的测试在实现之前运行的输出：新增或改变行为的测试失败，已满足的行测试通过，逐条标明 |
+| 逐片开发 | 每片先写测试、再实现、通过后提交 | 测试先行；用最少的新代码解决整个问题；只动任务范围内的文件 | 按 [build.md](references/build.md) 逐片做，开发中跑哪些测试见 [process.md](references/process.md) 的“测试的四个阶段”；测试先行由闸门里的 `scripts/engineering/gate/check-test-first.mjs` 检查 | 每片一个提交，相关测试通过 |
 | 推送前自查 | 作者一侧的问题清零 | 自查不算独立复审（R7）；不靠屏蔽检查或跳过测试变绿（R4） | 按 [self-review.md](references/self-review.md) 的清单逐项过 | 自查发现的问题已修，或写明不修的理由 |
-| 机械闸门 | 静态检查、测试记录都与当前代码一致 | 标准只有达标与未达标；闸门失败就修代码，不改阈值（R4）；首次候选跑全量并做变异检查，复审后的修复只跑受影响的部分 | 首次候选 `node scripts/engineering/gate/gate.mjs`，修复后 `node scripts/engineering/gate/gate.mjs --affected`；各阶段跑什么见 [process.md](references/process.md) 的“测试的四个阶段” | 闸门输出通过；首次候选另有变异检查的输出（反转了哪个条件、哪条测试失败） |
-| PR 与 CI | PR 最终提交上的必需检查全部通过 | 命令返回 0 不等于业务成功（R5）；不绕过失败的检查 | `git push`（推送钩子运行 `scripts/engineering/gate/verify.mjs`）、`gh pr create`、`gh pr checks`；细则见 [process.md](references/process.md) 的“测试、审查与合并” | PR 链接和检查结果 |
-| 独立复审 | 代码复审和一致性审的结论绑定 PR 最终提交 | 复审者独立于作者，模型按 R9 分档；首轮查全、收齐再改、修后只复核修复；高、中级问题合并前修完，低级和提示级的记进后续清单 | 首轮按 [review.md](references/review.md) 第 1、2 节对同一提交并行派发代码复审 `product-dev:code-reviewer`（[定义](../../agents/code-reviewer.md)，中高风险带上同一文件的安全清单）和一致性审；不通过时按同一文件的“一轮与修复循环”处理；报告由主对话原样落盘，核对后用 `node scripts/engineering/gate/review.mjs` 登记，两种流程的登记与延期命令见 [process.md](references/process.md) 的“两种复审流程” | 登记成功的输出；PR 里的复审摘要和后续清单 |
-| 合并与收工 | 经合并入口合并，删除分支和工作树，清理临时文件 | 汇报“完成”前确认已清理（R8、R10）；经验提炼分清用户提出和 agent 总结 | `pr` 流程用 `node scripts/engineering/gate/merge.mjs <PR>`，`pre-push` 流程走项目约定的入口；收工步骤见 [process.md](references/process.md) 的“收工”；之后跑 `node scripts/engineering/gate/hygiene.mjs` | 合并提交；分支与工作树已删；巡检无新增问题 |
-| 验收与发布 | 预发验证、用户验收、灰度上线各留证据 | 实现、CI、验收、上线四种状态不能互相替代（R5）；生产发布和回滚单独授权（R2） | 按 [process.md](references/process.md) 的“预发、生产与事故回归”；验收证据用 `docs/_templates/acceptance-pack.md`（[模板原件](../engineering-kit/kit/templates/docs/templates/acceptance-pack.md)） | `docs/acceptance/`、`docs/release/` 下的记录 |
+| 机械闸门 | 静态检查、测试记录都与当前代码一致 | 标准只有达标与未达标；闸门失败就修代码，不改阈值（R4） | 首次候选 `node scripts/engineering/gate/gate.mjs`，修复后 `node scripts/engineering/gate/gate.mjs --affected`；各阶段跑什么见 [process.md](references/process.md) 的“测试的四个阶段” | 闸门输出通过；首次候选另有变异检查的输出（反转了哪个条件、哪条测试失败） |
+| PR 与 CI | PR 最终提交上的必需检查全部通过 | 命令返回 0 不等于业务成功（R5）；不绕过失败的检查 | `git push`（推送钩子运行 `scripts/engineering/gate/verify.mjs`）、`gh pr create`、`gh pr checks`；细则见 [套件流程文档](../engineering-kit/references/process.md) 第 4 节 | PR 链接和检查结果 |
+| 独立复审 | 代码复审和一致性审的结论绑定 PR 最终提交 | 复审者独立于作者，模型按 R9 分档；首轮查全、收齐再改、修后只复核修复；高、中级问题合并前修完，低级和提示级的记进后续清单 | 必做：任务书用 [review.md](references/review.md) 第 2 节的模板（首轮用首轮任务书，修后用修后复核任务书）原样填写，不自拟；差异先存成文件，路径写进任务书；报告由主对话原样落盘，不改写，核对后再登记。首轮按同一文件第 1、2 节对同一提交并行派发代码复审 `product-dev:code-reviewer`（[定义](../../agents/code-reviewer.md)，中高风险带上同一文件的安全清单）和一致性审；不通过时按同一文件的“一轮与修复循环”处理；登记用 `node scripts/engineering/gate/review.mjs`，两种流程的登记与延期命令见 [套件流程文档](../engineering-kit/references/process.md) 第 4 节“套件闸门的两种流程”一段 | 登记成功的输出；PR 里的复审摘要和后续清单 |
+| 合并与收工 | 经合并入口合并，删除分支和工作树，清理临时文件 | 汇报“完成”前确认已清理（R8、R10）；经验提炼分清用户提出和 agent 总结 | `pr` 流程用 `node scripts/engineering/gate/merge.mjs <PR>`，`pre-push` 流程走项目约定的入口；收工步骤见 [套件流程文档](../engineering-kit/references/process.md) 第 7 节；之后跑 `node scripts/engineering/gate/hygiene.mjs` | 合并提交；分支与工作树已删；巡检无新增问题 |
+| 验收与发布 | 预发验证、用户验收、灰度上线各留证据 | 实现、CI、验收、上线四种状态不能互相替代（R5）；生产发布和回滚单独授权（R2） | 按 [套件流程文档](../engineering-kit/references/process.md) 第 5 节；验收证据用 `docs/_templates/acceptance-pack.md`（[模板原件](../engineering-kit/kit/templates/docs/templates/acceptance-pack.md)） | `docs/acceptance/`、`docs/release/` 下的记录 |
 
 - 复审不通过时不逐条来回改：两份意见收齐、核实后集中修一次，提交后闸门用 `--affected`，再交原复审者只复核修复；`pre-push` 流程在推送前复核和登记，`pr` 流程推送后复核、CI 通过后登记，两种次序见 [review.md](references/review.md) 第 8 节的“收齐再改”。一轮怎样计、满上限后怎样办、争议和中途追加的需求怎样处理，都在 [review.md](references/review.md) 第 8 节。
 - 开发中出现意外的失败（测试、构建、运行时），先停下新功能，按 [debugging.md](references/debugging.md) 处理。
@@ -128,7 +128,7 @@ description: 产品开发的唯一入口。用户提出产品或开发相关的�
 | 最小修复 | 在共用代码里修一次，测试转绿 | 改动越小越好；不顺手重构无关代码；改之前先搜这个函数的全部调用方 | 按 [build.md](references/build.md) 的“修 bug 时” | 该测试通过，其余测试不变红 |
 | 查同类与调用方 | 确认同一个函数的其他调用方没有被改坏 | 同类问题一并列出，范围外的不顺手改 | 宿主的代码搜索；范围大时派发 `product-dev:code-explorer`（[定义](../../agents/code-explorer.md)） | 调用方清单和处理结论；同类问题清单 |
 | 自查到合并 | 走完交付段的自查、闸门、CI、独立复审和合并 | bug 修复不免审；涉及数据库、权限的按中高风险审 | 第 4 节从“推送前自查”到“合并与收工”：[self-review.md](references/self-review.md)、`node scripts/engineering/gate/gate.mjs`、`product-dev:code-reviewer`（[定义](../../agents/code-reviewer.md)） | 同第 4 节对应各步 |
-| 回归入库 | 失败测试留在测试集里；线上事故另查为何漏检 | 每个漏掉的问题都变成可重复的回归用例 | 测试随修复一起合并，闸门的测试记录为证；事故按 [process.md](references/process.md) 的“预发、生产与事故回归” | 测试已在主干；事故有漏检分析 |
+| 回归入库 | 失败测试留在测试集里；线上事故另查为何漏检 | 每个漏掉的问题都变成可重复的回归用例 | 测试随修复一起合并，闸门的测试记录为证；事故按 [套件流程文档](../engineering-kit/references/process.md) 第 5 节 | 测试已在主干；事故有漏检分析 |
 
 “是需求缺口?”为“是”时告诉用户并转第 3 节。前两步里不改文件、不切换检出的部分可以直接做；第一个会改文件或切换检出的动作（加临时日志、人为加延迟、`git bisect`、写失败测试）之前，先按第 1 节得到批准，并做第 3 节的“开工检查”。失败测试不必单独提交：留下它失败时的输出作证据，测试和修复可以放在同一个提交里。
 
@@ -136,10 +136,11 @@ description: 产品开发的唯一入口。用户提出产品或开发相关的�
 
 | 路线 | 步骤（都在第 3、4 节） | 与完整路线的差别 |
 |---|---|---|
-| 小新增 | 开工检查 → 读相关代码 → 逐片开发（测试先行）→ 推送前自查 → 机械闸门 → PR 与 CI → 独立复审 → 合并与收工 | 不派探索子代理，不写功能契约，不做方案对比的三份蓝图、任务拆解和测试设计；“读相关代码”没有单独的表格行：目标是找出要改的模块、它的调用方和测试，原则是主对话亲自读，工具是宿主的读文件和代码搜索，过关证据是汇报里列出读过的文件；预期写进测试和 PR 描述；只做代码复审，一致性审可延期并写明理由 |
-| 小改动 | 开工检查 → 逐片开发（测试先行）→ 推送前自查 → 机械闸门 → PR 与 CI → 独立复审 → 合并与收工 | 不做探索、契约、方案对比、任务拆解和测试设计；只做代码复审，一致性审可延期并写明理由 |
-| 只改文档 | 开工检查 → 直接改 → 机械闸门 → PR 与 CI → 合并与收工 | 不做独立复审（R7）；一致性审并入巡检，由用户或已授权的定时任务触发，见 [process.md](references/process.md) 的“巡检” |
+| 小新增 | 开工检查 → 读相关代码 → 逐片开发（测试先行）→ 推送前自查 → 机械闸门 → PR 与 CI → 独立复审 → 合并与收工 | 不派探索子代理，不写功能契约，不做方案对比的三份蓝图、任务拆解和测试设计；“读相关代码”没有单独的表格行：目标是找出要改的模块、它的调用方和测试，原则是主对话亲自读，工具是宿主的读文件和代码搜索，过关证据是汇报里列出读过的文件；预期写进测试和 PR 描述；只做代码复审，一致性审可延期；两者的做法见表下第一条 |
+| 小改动 | 开工检查 → 逐片开发（测试先行）→ 推送前自查 → 机械闸门 → PR 与 CI → 独立复审 → 合并与收工 | 不做探索、契约、方案对比、任务拆解和测试设计；只做代码复审，一致性审可延期；两者的做法见表下第一条 |
+| 只改文档 | 开工检查 → 直接改 → 机械闸门 → PR 与 CI → 合并与收工 | 不做独立复审（R7）；一致性审并入巡检，由用户或已授权的定时任务触发，见 [套件流程文档](../engineering-kit/references/process.md) 第 8 节 |
 
+- 代码复审照第 4 节“独立复审”一行的必做项派发和登记（review.md 第 2 节的任务书、差异存成文件、报告原样落盘后登记）；一致性审延期也要登记：`node scripts/engineering/gate/review.mjs defer --kind consistency --reason "<理由>"`（`pr` 流程加 `--pr <编号>`）。
 - 次序同第 4 节：`pre-push` 流程下，小新增和小改动的独立复审排在闸门之后、推送之前。
 - 做的过程中发现超出了判断条件（要改接口、动第二个模块、动了 `reviewIgnore` 之外的文件），立刻升档，告诉用户并补上缺的步骤。
 - 规则、技能正文、提示词这类会改变 agent 行为的 Markdown 不算“只改文档”，按它改变的范围定档。项目的 `reviewIgnore` 没有收窄时，闸门和合并入口在机制上不会要求审查它们，复审要按本条主动做（收窄的办法见 [process.md](references/process.md) 的“配置闸门”）。
@@ -170,4 +171,4 @@ description: 产品开发的唯一入口。用户提出产品或开发相关的�
 
 ## 汇报
 
-每个阶段完成时按 [process.md](references/process.md)“收工”里的四段格式汇报；未执行的写未执行（R5）。插件收录的第三方内容及其许可见 [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md)。
+每个阶段完成时按 [套件流程文档](../engineering-kit/references/process.md) 第 7 节第 6 条的四段格式汇报；未执行的写未执行（R5）。插件收录的第三方内容及其许可见 [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md)。

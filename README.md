@@ -121,15 +121,15 @@ codex plugin add product-dev@ac0033-skills
 
 ### 加功能 · 从现状到选定方案
 
-先探索现有代码和行为。改变产品行为时回到设计阶段修订受影响的部分，再确认验收标准与实施方案。
+先探索现有代码和行为。改变产品行为时回到设计阶段修订受影响的部分，再确认验收标准与实施方案。低风险的小新增不走这一节，不做契约和方案对比，见入口的缩短路线。
 
-<a href="docs/images/feature.png"><img src="docs/images/feature.png" width="708" alt="加功能原流程图。开工检查、探索和澄清后判断是否改变产品行为。需要时修订设计，再经过功能契约、方案对比，由用户选定方案。"></a>
+<a href="docs/images/feature.png"><img src="docs/images/feature.png" width="750" alt="加功能流程图。开工检查、探索和澄清后判断是否改变产品行为。需要时回设计段修订，再经过功能契约，方案对比按最小改动、结构清晰、折中三种取向各出一份蓝图（改动很小时由主对话自己比较），由用户选定方案。"></a>
 
 ### 共用交付 · 从任务拆解到发布
 
-图中采用 PR 复审顺序。若项目配置为推送前复审，独立复审在机械闸门通过后、推送前执行。生产发布按任务范围和授权执行。
+图中采用 PR 复审顺序。若项目配置为推送前复审，独立复审在机械闸门通过后、推送前执行。测试设计在逐片开发之前，由不写实现的子代理按场景表先写测试。生产发布按任务范围和授权执行。
 
-<a href="docs/images/delivery.png"><img src="docs/images/delivery.png" width="813" alt="共用交付原流程图。逐片开发后自查并通过机械闸门，再经过 PR 和 CI、独立复审、合并与收工，以及获准的验收与发布。审查发现问题时返回开发。"></a>
+<a href="docs/images/delivery.png"><img src="docs/images/delivery.png" width="750" alt="共用交付流程图。任务拆解后先做测试设计，再逐片开发、推送前自查。机械闸门首次候选跑全量，修复后只跑受影响部分；再经 PR 与 CI、独立复审、合并与收工，以及获准的验收与发布。独立复审首轮查全，要修时回到逐片开发，收齐再改，修后只复核增量。"></a>
 
 ### 修 bug · 从复现到回归入库
 
@@ -139,6 +139,6 @@ codex plugin add product-dev@ac0033-skills
 
 ## 参考与许可
 
-- **完整流程**见[入口技能](plugin/skills/product-dev/SKILL.md)和[工程流程说明](plugin/skills/product-dev/references/process.md)，各阶段的工具、验收证据和复审顺序都在这里。
+- **完整流程**见[入口技能](plugin/skills/product-dev/SKILL.md)：各阶段的目标、工具、过关证据都在它的步骤表里；通用的流程细则（开工、审查分档、复审顺序、收工、巡检等）在工程套件的[流程文档](plugin/skills/engineering-kit/references/process.md)。
 - **组件与版本**见[组件清单](COMPONENTS.md)。可用工具随宿主而异，流程文档说明了按路径读取内部技能和派发子代理的替代方式。
 - **测试与许可**见[测试与行为用例](evals/cases.md)、[MIT](LICENSE)和[第三方声明](plugin/THIRD_PARTY_NOTICES.md)。
