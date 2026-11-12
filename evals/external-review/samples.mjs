@@ -78,29 +78,31 @@ export function paginate(items, page, size) {
   {
     id: 'low-naming',
     title: '低级：新函数和参数命名含糊',
-    base: { 'src/price.mjs': `// 价格：计算订单金额。\nexport function total(lines) {\n  return lines.reduce((n, l) => n + l.price * l.qty, 0);\n}\n` },
+    // 金额一律用整数“分”：2026-11-13 的第一版用浮点元加 Math.round，无意中多带了一个舍入缺陷（中级），已改掉
+    base: { 'src/price.mjs': `// 价格：计算订单金额（单位：分，整数）。\nexport function total(lines) {\n  return lines.reduce((n, l) => n + l.price * l.qty, 0);\n}\n` },
     head: {
-      'src/price.mjs': `// 价格：计算订单金额与折后金额。
+      'src/price.mjs': `// 价格：计算订单金额与折后金额（单位：分，整数）。
 export function total(lines) {
   return lines.reduce((n, l) => n + l.price * l.qty, 0);
 }
 
-// 折后金额：rate 为 0 到 1 之间的折扣率，超出范围时抛错。
+// 折后金额：percent 为 0 到 100 的整数折扣百分比，不是整数或超出范围时抛错；结果向下取整到分。
 export function calc2(tmpArr, x) {
-  if (!(x >= 0 && x <= 1)) throw new RangeError('rate must be within [0, 1]');
-  return Math.round(total(tmpArr) * (1 - x) * 100) / 100;
+  if (!Number.isInteger(x) || x < 0 || x > 100) throw new RangeError('percent must be an integer within [0, 100]');
+  return Math.floor((total(tmpArr) * (100 - x)) / 100);
 }
 `,
       'test/price.test.mjs': `import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { calc2 } from '../src/price.mjs';
 
-test('打八折', () => assert.equal(calc2([{ price: 10, qty: 2 }], 0.2), 16));
-test('折扣率越界', () => assert.throws(() => calc2([], 1.5), RangeError));
-test('不打折', () => assert.equal(calc2([{ price: 3.3, qty: 3 }], 0), 9.9));
+test('打八折', () => assert.equal(calc2([{ price: 1000, qty: 2 }], 20), 1600));
+test('向下取整到分', () => assert.equal(calc2([{ price: 333, qty: 1 }], 10), 299));
+test('不打折与全免', () => { assert.equal(calc2([{ price: 330, qty: 3 }], 0), 990); assert.equal(calc2([{ price: 330, qty: 3 }], 100), 0); });
+test('百分比越界或不是整数', () => { assert.throws(() => calc2([], 101), RangeError); assert.throws(() => calc2([], -1), RangeError); assert.throws(() => calc2([], 0.5), RangeError); assert.throws(() => calc2([], null), RangeError); });
 `,
     },
-    expected: [{ severity: 'low', keywords: ['命名', '名字', '名称', 'calc2', 'tmpArr', 'naming', '变量名', '函数名'] }],
+    expected: [{ severity: 'low', keywords: ['命名', '名字', '名称', 'naming', '变量名', '函数名', '参数名'] }], // 不收 calc2 这类标识符：别的发现顺带提到函数名不算发现了命名问题
   },
   {
     id: 'clean',

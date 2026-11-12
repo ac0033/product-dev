@@ -1,7 +1,7 @@
 // 外部复审模型对比：把合成样例（samples.mjs）逐例造成临时仓库，经外部复审适配器交给候选模型，按级别统计召回、误报、
 // 格式一次通过率、注入是否带偏、只读副本是否不变、耗时与用量。业务含义：给“外部复审默认用哪个模型”提供实测依据。
 // 会真实调用模型并把合成样例外发；只在用户授权后手动运行，不进 CI（文件名不是 *.test.mjs）。
-// 用法：node evals/external-review/compare.mjs run --codebuddy <CodeBuddy CLI 入口> --models m1,m2 [--samples id,...] --out <仓库外目录>
+// 用法：node evals/external-review/compare.mjs run --models m1,m2 [--effort medium] [--codex <命令，默认 codex>] [--samples id,...] --out <仓库外目录>
 //       node evals/external-review/compare.mjs prompts --out <目录>      写出每例的提示（宿主子代理对照组用同一份提示）
 //       node evals/external-review/compare.mjs score --answers <JSON>     给对照组的回答判分（{ <样例id>: <审查 JSON> }）
 import { spawnSync } from 'node:child_process';
@@ -28,13 +28,13 @@ function writeFiles(root, files) {
   }
 }
 
-/** 把一个样例造成临时仓库：main 上是基线和允许 codebuddy 的配置，feat 上是改动。返回 { root, base, head }。 */
+/** 把一个样例造成临时仓库：main 上是基线和允许 codex 的配置，feat 上是改动。返回 { root, base, head }。 */
 export function sampleRepo(sample, parent) {
   const root = fs.mkdtempSync(path.join(parent, `${sample.id}-`));
   git(root, ['init', '-q', '-b', 'main']);
   const config = {
     base: 'main', sourceGlobs: ['src/**/*.mjs'], testGlobs: ['test/**/*.test.mjs'], reviewIgnore: ['**/*.md'], testCommand: 'node --test',
-    reviewers: ['external:codebuddy'], reviewMinChars: 200, reviewKeyword: '结论', reviewFlow: 'pre-push', externalExecutors: ['codebuddy'],
+    reviewers: ['external:codex'], reviewMinChars: 200, reviewKeyword: '结论', reviewFlow: 'pre-push', externalExecutors: ['codex'],
   };
   writeFiles(root, { 'engineering.config.json': `${JSON.stringify(config, null, 2)}\n`, ...sample.base });
   git(root, ['add', '-A']);
@@ -57,9 +57,9 @@ function args(argv) {
 /** 选出要跑的样例。 */
 const pick = (ids) => (ids ? SAMPLES.filter((s) => ids.split(',').includes(s.id)) : SAMPLES);
 
-/** 用 CodeBuddy 跑一个模型的全部样例，返回逐例记录。 */
-async function runModel({ model, samples, codebuddy, out }) {
-  const local = { file: '(compare.mjs)', executors: { codebuddy: { type: 'codebuddy', command: [process.execPath, codebuddy], env: { CODEBUDDY_FORCE_LITE_WB_BUNDLE: '1' } } } };
+/** 用 Codex 跑一个模型的全部样例，返回逐例记录。 */
+async function runModel({ model, effort, samples, codex, out }) {
+  const local = { file: '(compare.mjs)', executors: { codex: { type: 'codex', command: [codex] } } };
   const rows = [];
   for (const sample of samples) {
     const { root } = sampleRepo(sample, fs.mkdtempSync(path.join(os.tmpdir(), 'ek-xr-cmp-')));
@@ -67,7 +67,7 @@ async function runModel({ model, samples, codebuddy, out }) {
     const started = Date.now();
     let res;
     try {
-      res = await runExternalReview({ root, executor: 'codebuddy', model, modelChosenBy: 'user', modelReason: '模型对比评测', localConfig: local, outDir: runDir, limits: { timeoutMs: 10 * 60 * 1000, maxTurns: 20 } });
+      res = await runExternalReview({ root, executor: 'codex', model, effort, modelChosenBy: 'user', modelReason: '模型对比评测', localConfig: local, outDir: runDir, limits: { timeoutMs: 10 * 60 * 1000, maxTurns: 20 } });
     } catch (e) {
       res = { ok: false, message: e.message, result: null, assessment: { reasons: [e.message] } };
     }
@@ -86,11 +86,11 @@ async function runModel({ model, samples, codebuddy, out }) {
   return rows;
 }
 
-/** 汇总一组逐例记录：按级别的召回与级别正确数、干净对照误报、格式一次通过、注入带偏、副本不变、耗时与积分。 */
+/** 汇总一组逐例记录：按级别的召回与级别正确数、干净对照误报、格式一次通过、注入带偏、副本不变、耗时、token 与订阅额度已用百分比的变化。 */
 export function summarize(rows) {
   const by = {};
   for (const r of rows) {
-    const s = (by[r.model] ??= { model: r.model, recall: { high: [0, 0, 0], medium: [0, 0, 0], low: [0, 0, 0] }, cleanFp: null, format: [0, 0], misled: null, copyOk: [0, 0], seconds: 0, credits: 0, tokens: {} });
+    const s = (by[r.model] ??= { model: r.model, recall: { high: [0, 0, 0], medium: [0, 0, 0], low: [0, 0, 0] }, cleanFp: null, format: [0, 0], misled: null, copyOk: [0, 0], seconds: 0, quota: [], tokens: {} });
     for (const e of r.score.expected) {
       const c = s.recall[e.severity];
       c[1]++;
@@ -106,7 +106,7 @@ export function summarize(rows) {
       if (r.copyUnchanged && r.repoUnchanged) s.copyOk[0]++;
     }
     s.seconds += r.seconds;
-    if (typeof r.usage?.credits === 'number') s.credits += r.usage.credits;
+    if (typeof r.usage?.rateLimits?.usedPercent === 'number') s.quota.push(r.usage.rateLimits.usedPercent); // 订阅额度已用百分比，按运行先后
     for (const [k, v] of Object.entries(r.usage?.tokens ?? {})) if (typeof v === 'number') s.tokens[k] = (s.tokens[k] ?? 0) + v;
   }
   return Object.values(by);
@@ -116,9 +116,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const [cmd, ...rest] = process.argv.slice(2);
   const a = args(rest);
   if (cmd === 'run') {
-    if (!a.codebuddy || !a.models || !a.out) throw new Error('run 需要 --codebuddy、--models、--out');
+    if (!a.models || !a.out) throw new Error('run 需要 --models、--out');
     const rows = [];
-    for (const model of a.models.split(',')) rows.push(...(await runModel({ model, samples: pick(a.samples), codebuddy: a.codebuddy, out: path.resolve(a.out) })));
+    for (const model of a.models.split(',')) rows.push(...(await runModel({ model, effort: a.effort, samples: pick(a.samples), codex: a.codex ?? 'codex', out: path.resolve(a.out) })));
     fs.mkdirSync(a.out, { recursive: true });
     fs.writeFileSync(path.join(a.out, 'rows.json'), JSON.stringify(rows, null, 2));
     console.log(JSON.stringify(summarize(rows), null, 2));

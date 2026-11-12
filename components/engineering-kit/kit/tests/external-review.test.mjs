@@ -8,11 +8,10 @@ import { test } from 'node:test';
 import {
   assess,
   buildPrompt,
-  codebuddyArgs,
-  codebuddyEnv,
+  codexArgs,
   guardedGh,
   loadLocalConfig,
-  parseCodebuddyStream,
+  parseCodex,
   renderReport,
   runExternalReview,
   validateResult,
@@ -257,56 +256,87 @@ test('renderReport 自检：只有一处结论，且与判定一致', () => {
   assert.match(text, /外部一致性审报告（修后复核）/);
 });
 
-test('CodeBuddy：参数只读、不带 -y、禁用联网工具；隐式路由指向请求模型', () => {
-  const request = { model: { id: 'deepseek-v4-pro' }, limits: { maxTurns: 9 } };
-  const args = codebuddyArgs(request);
-  assert.ok(!args.includes('-y') && !args.includes('--dangerously-skip-permissions'));
-  assert.equal(args[args.indexOf('--tools') + 1], 'Read,Grep,Glob,LS');
-  assert.match(args[args.indexOf('--disallowedTools') + 1], /Bash.*Write.*Edit.*WebFetch.*WebSearch/);
-  assert.equal(args[args.indexOf('--model') + 1], 'deepseek-v4-pro');
-  const env = codebuddyEnv(request);
-  for (const k of ['CODEBUDDY_SMALL_FAST_MODEL', 'CODEBUDDY_BIG_SLOW_MODEL', 'CODEBUDDY_CODE_SUBAGENT_MODEL']) assert.equal(env[k], 'deepseek-v4-pro');
+/** 假的 codex 命令：按 codex exec --json 的格式输出事件，把会话记录写进 CODEX_HOME，把收到的参数记下来供断言。 */
+const FAKE_CODEX = `
+import fs from 'node:fs';
+import path from 'node:path';
+const argv = process.argv.slice(2);
+const chunks = [];
+for await (const c of process.stdin) chunks.push(c);
+const home = process.env.CODEX_HOME;
+fs.writeFileSync(path.join(home, 'argv.json'), JSON.stringify({ argv, schema: JSON.parse(fs.readFileSync(argv[argv.indexOf('--output-schema') + 1], 'utf8')) }));
+const tid = '01aa-test-thread';
+const model = argv[argv.indexOf('-m') + 1];
+if (process.env.FAKE_CODEX_MODE !== 'nomodel') {
+  const dir = path.join(home, 'sessions', '2026', '11', '13');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'rollout-2026-11-13T00-00-00-' + tid + '.jsonl'), [
+    { type: 'session_meta', payload: { cli_version: '9.9.9', model } },
+    { type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { model } } },
+    { type: 'event_msg', payload: { type: 'token_count', rate_limits: { plan_type: 'prolite', primary: { used_percent: 41, window_minutes: 10080 } } } },
+  ].map((e) => JSON.stringify(e)).join('\\n'));
+}
+const review = { verdict: 'pass', findings: [{ severity: 'low', title: '命名', file: null, line: null, detail: '名字含糊' }], limitations: [], report: ${JSON.stringify(NARRATIVE)} };
+for (const e of [
+  { type: 'thread.started', thread_id: tid },
+  { type: 'item.completed', item: { type: 'error', message: 'Code Mode is unavailable because code-mode host is disabled.' } },
+  { type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(review) } },
+  { type: 'turn.completed', usage: { input_tokens: 100, output_tokens: 20 } },
+]) process.stdout.write(JSON.stringify(e) + '\\n');
+`;
+const fakeCodexPath = path.join(fakeDir, 'fake-codex.mjs');
+fs.writeFileSync(fakeCodexPath, FAKE_CODEX);
+
+/** 用假 codex 跑一次（内置 codex 执行器的完整链路：调用器 → executor codex 子进程 → codex 命令）。 */
+async function runCodex(root, head, mode = 'ok') {
+  const home = tmpDir('ekit-codex-home-');
+  const local = { file: '(测试)', executors: { codex: { type: 'codex', command: [process.execPath, fakeCodexPath], env: { CODEX_HOME: home, FAKE_CODEX_MODE: mode }, defaultModel: 'gpt-test-1', defaultEffort: 'medium' } } };
+  const res = await runExternalReview({ root, executor: 'codex', pr: '7', gh: fakeGh([head]), localConfig: local, outDir: path.join(tmpDir('ekit-xr-'), 'run') });
+  return { res, home };
+}
+
+test('Codex 执行器：完整链路可登记；实际模型取 Codex 生效设置并注明来源；会话记录移进运行目录；工具错误写进局限', async () => {
+  const { root, head } = repo({ allow: ['fake', 'codex'] });
+  const { res, home } = await runCodex(root, head);
+  assert.equal(res.ok, true, res.message);
+  assert.equal(res.result.provenance.actualModel, 'gpt-test-1');
+  assert.equal(res.result.provenance.actualModelSource, 'executor-settings');
+  const text = fs.readFileSync(res.reportPath, 'utf8');
+  assert.match(text, /实际模型：gpt-test-1（来源：执行器记录的生效设置/);
+  assert.match(text, /推理强度 medium/);
+  assert.match(text, /订阅额度（prolite）本周期已用 41%/);
+  assert.match(text, /工具错误：Code Mode is unavailable/);
+  assert.equal(reportVerdict(text).verdict, 'pass');
+  assert.equal(fs.existsSync(path.join(home, 'sessions', '2026', '11', '13', 'rollout-2026-11-13T00-00-00-01aa-test-thread.jsonl')), false, '会话记录已移走');
+  assert.ok(fs.existsSync(path.join(res.runDir, 'raw', 'codex.rollout.jsonl')));
+  const { argv, schema } = JSON.parse(fs.readFileSync(path.join(home, 'argv.json'), 'utf8'));
+  assert.deepEqual(argv.slice(0, 4), ['exec', '--json', '-s', 'read-only']);
+  for (const flag of ['--ignore-user-config', '--ignore-rules', 'project_doc_max_bytes=0', 'web_search="disabled"', 'approval_policy="never"', 'model_reasoning_effort="medium"']) assert.ok(argv.includes(flag), flag);
+  for (const feat of ['multi_agent', 'memories', 'hooks', 'apps']) assert.ok(argv.join(' ').includes(`--disable ${feat}`), feat);
+  assert.ok(!argv.some((x) => /dangerously|workspace-write|danger-full-access/.test(x)));
+  assert.ok(!argv[argv.indexOf('--output-schema') + 1].startsWith(path.join(res.runDir, 'workspace')), '约束文件不在只读副本里');
+  assert.deepEqual(schema.properties.findings.items.required, ['severity', 'title', 'file', 'line', 'detail']);
 });
 
-test('CodeBuddy 输出解析：实际模型只认服务端返回的；total_cost_usd 标为不可靠，积分取 credit 之和', () => {
-  const request = { model: { id: 'deepseek-v4-pro' } };
-  const review = { verdict: 'pass', findings: [], limitations: [], report: NARRATIVE };
-  const init = { type: 'system', subtype: 'init', model: 'deepseek-v4-pro' };
-  const ok = { type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(review), total_cost_usd: 0, usage: { input_tokens: 3 },
-    modelUsage: { 'deepseek-v4-pro': { outputTokens: 50, credit: 1.5 }, 'glm-5.3-flash': { outputTokens: 2, credit: 0.1 } } };
-  const p = parseCodebuddyStream([init, ok].map((e) => JSON.stringify(e)).join('\n'), request);
-  assert.equal(p.status, 'completed');
-  assert.equal(p.provenance.actualModel, 'deepseek-v4-pro');
-  assert.deepEqual(p.provenance.modelsUsed, ['deepseek-v4-pro', 'glm-5.3-flash']);
-  assert.equal(p.usage.credits, 1.6);
-  assert.equal(p.usage.costReliable, false);
-  // 只有 init 里的会话模型：不当实际模型
-  const noUsage = { ...ok, modelUsage: undefined };
-  assert.equal(parseCodebuddyStream([init, noUsage].map((e) => JSON.stringify(e)).join('\n'), request).provenance.actualModel, null);
-  // 没有 result 行（未登录）：失败
-  assert.equal(parseCodebuddyStream('Authentication required', request).status, 'failed');
-  // 代码块包着的 JSON 也认
-  const fenced = { ...ok, result: `说明\n\`\`\`json\n${JSON.stringify(review)}\n\`\`\`` };
-  assert.equal(parseCodebuddyStream(JSON.stringify(fenced), request).review.verdict, 'pass');
+test('Codex 执行器：拿不到会话记录时实际模型为空，不用请求模型冒充，不可登记', async () => {
+  const { root, head } = repo({ allow: ['codex'] });
+  const { res } = await runCodex(root, head, 'nomodel');
+  assert.equal(res.ok, false);
+  assert.equal(res.result.provenance.actualModel, null);
+  assert.match(res.message, /拿不到实际模型/);
 });
 
-test('CodeBuddy 输出解析：路由别名 auto 不算实际模型；未登录（退出码 0、is_error）判为失败并带上原因', () => {
-  const request = { model: { id: 'deepseek-v4-pro' } };
-  // 2.165.0 未登录时的实际输出结构（只保留判定用到的字段）
-  const authFail = [
-    { type: 'system', subtype: 'init', model: 'auto' },
-    { type: 'assistant', message: { model: 'auto', content: [{ type: 'text', text: 'Authentication required. Please use /login command to sign in to your account' }] } },
-    { type: 'result', subtype: 'error_during_execution', is_error: true, total_cost_usd: 0, usage: { input_tokens: 0, output_tokens: 0 },
-      errors: ['Authentication required. Please use /login command to sign in to your account'], modelUsage: { auto: { inputTokens: 0, outputTokens: 0 } } },
-  ];
-  const p = parseCodebuddyStream(authFail.map((e) => JSON.stringify(e)).join('\n'), request);
-  assert.equal(p.status, 'failed');
-  assert.match(p.error, /Authentication required/);
-  assert.equal(p.provenance.actualModel, null);
-  const review = { verdict: 'pass', findings: [], limitations: [], report: NARRATIVE };
-  const viaAuto = { type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(review), modelUsage: { auto: { outputTokens: 40 } } };
-  const q = parseCodebuddyStream([{ type: 'assistant', message: { model: 'auto' } }, viaAuto].map((e) => JSON.stringify(e)).join('\n'), request);
-  assert.equal(q.provenance.actualModel, null, '只知道交给了 auto 路由，不知道实际模型');
+test('Codex 参数：推理强度只认固定的词（拼进 -c 配置）', () => {
+  const request = { model: { id: 'm', effort: 'high"; evil="1' } };
+  assert.throws(() => codexArgs(request, { cwd: '.', schemaFile: 's.json' }), /推理强度只能是/);
+});
+
+test('Codex 输出解析：失败事件、缺会话事件、回答不是 JSON 都判为失败', () => {
+  const request = { model: { id: 'm' } };
+  const ev = (...e) => e.map((x) => JSON.stringify(x)).join('\n');
+  assert.match(parseCodex(ev({ type: 'thread.started', thread_id: 't' }, { type: 'turn.failed', error: { message: 'usage limit reached' } }), null, request).error, /usage limit reached/);
+  assert.match(parseCodex('', null, request).error, /没有输出会话事件/);
+  assert.match(parseCodex(ev({ type: 'thread.started', thread_id: 't' }, { type: 'item.completed', item: { type: 'agent_message', text: '我觉得没问题' } }), null, request).error, /没有可解析的审查 JSON/);
 });
 
 test('提示：被审内容用带随机串的标记包住', () => {
