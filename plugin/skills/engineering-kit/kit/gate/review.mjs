@@ -1,4 +1,4 @@
-// 复审记录：子代理复审（代码复审 code 或一致性审 consistency）后在这里登记。业务含义：复审必须由独立于写代码者的子代理完成（允许名单内）；
+// 复审记录：独立复审（代码复审 code 或一致性审 consistency）后在这里登记。业务含义：复审必须由不共享作者上下文的独立复审者完成——宿主子代理或外部执行器（external-review.mjs，登记名 external:<执行器>），且在允许名单内；
 // 判定策略（复审流程、必需检查名、复审者名单、最少字数、结论关键词、复审轮次上限）取基准提交上的配置，被审分支改了不算数（lib.mjs 的 loadConfig）。
 // 报告要有实质内容，并且有一处明确的结论（写法见 reportVerdict）：登记 pass 要求结论是通过，登记 fail 要求结论是不通过，
 // 找不到明确结论、前后矛盾或与登记不符时拒绝。四种登记：
@@ -136,7 +136,7 @@ export function branchDirName(branch) {
  */
 function checkReport(config, expect, reviewer, reportPath, label = expect) {
   if (!config.reviewers.includes(reviewer)) {
-    return { ok: false, message: `复审者 ${reviewer} 不在允许名单（${config.reviewers.join('、')}）内；复审必须由独立子代理完成` };
+    return { ok: false, message: `复审者 ${reviewer} 不在允许名单（${config.reviewers.join('、')}）内；复审必须由独立复审者（宿主子代理或外部执行器）完成，名单变更合入主干后才生效` };
   }
   if (!reportPath || !fs.existsSync(reportPath)) return { ok: false, message: '找不到复审报告文件' };
   const text = fs.readFileSync(reportPath, 'utf8');
