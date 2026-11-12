@@ -140,6 +140,97 @@ function ownParts(root) {
   ];
 }
 
+/**
+ * impeccable 的技能文本可能领先于它固定的引擎版本（收录的是上游 main，新命令先写进文档、后随引擎发布）。
+ * 这里登记本地适配：去掉引用固定引擎还没有的命令的整节。上游发布带该命令的引擎、升级固定版本后，
+ * 构建会报错，提示删掉对应条目、恢复原文。
+ */
+export const IMPECCABLE_ENGINE_GAPS = [
+  { verb: 'audit-storage', heading: '## Save the Report', files: ['reference/audit.md', 'reference/audit.native.md'] },
+];
+const gapNote = (gap, version) => `<!-- Modified by the product-dev plugin build: removed "${gap.heading.replace(/^#+\s*/, '')}" because the pinned engine ${version} has no \`${gap.verb}\` command. See THIRD_PARTY_NOTICES.md at the plugin root. -->`;
+
+/** 从引擎 Rust 源码的 match 分支里取出命令名（如 `"a" | "b" =>`），以及 `v.starts_with("live")` 这类前缀分派。 */
+export function parseEngineVerbs(source) {
+  const verbs = new Set();
+  const prefixes = new Set();
+  for (const m of source.matchAll(/^\s*("[a-z][a-z0-9-]*"(?:\s*\|\s*"[a-z][a-z0-9-]*")*)\s*=>/gm)) for (const v of m[1].matchAll(/"([^"]+)"/g)) verbs.add(v[1]);
+  for (const m of source.matchAll(/^\s*\w+ if \w+\.starts_with\("([a-z0-9-]+)"\)\s*=>/gm)) prefixes.add(m[1]);
+  return { verbs, prefixes };
+}
+
+/** 技能文本里调用引擎的命令名：`"<skill-base-dir>/scripts/impeccable" <命令>`，返回 命令 → 出现的文件。 */
+export function referencedVerbs(files) {
+  const out = new Map();
+  for (const [rel, buf] of files) {
+    if (!rel.endsWith('.md')) continue;
+    for (const m of buf.toString('utf8').matchAll(/scripts\/impeccable"?\s+([a-z][a-z0-9-]*)/g)) {
+      if (!out.has(m[1])) out.set(m[1], new Set());
+      out.get(m[1]).add(rel);
+    }
+  }
+  return out;
+}
+
+/** 固定引擎是否支持某个命令（engine.verbs 已含 live 子模块的命令）。 */
+const engineSupports = (engine, verb) => engine.verbs.has(verb);
+
+/** 去掉 Markdown 里以 heading 开头的一整节（到下一个同级或更高级标题为止），在原位置留一行改动说明。 */
+export function dropSection(buf, heading, note) {
+  const text = buf.toString('utf8');
+  const lines = text.split('\n');
+  const start = lines.findIndex((l) => l.replace(/\r$/, '') === heading);
+  if (start < 0) throw new Error(`没有找到要去掉的一节：${heading}`);
+  const level = heading.match(/^#+/)[0].length;
+  let end = lines.findIndex((l, i) => i > start && /^#+\s/.test(l) && l.match(/^#+/)[0].length <= level);
+  if (end < 0) end = lines.length;
+  let from = start;
+  while (from > 0 && lines[from - 1].trim() === '') from -= 1;
+  const tail = lines.slice(end);
+  const kept = [...lines.slice(0, from), '', note, ...(tail.length && tail.join('') !== '' ? ['', ...tail] : [''])];
+  return Buffer.from(kept.join('\n'), 'utf8');
+}
+
+/**
+ * 读出固定引擎版本支持的命令：引擎版本取技能目录的 scripts/VERSION，源码取上游仓库的 engine-v<版本> 标签。
+ * 要求 vendor/impeccable 是带标签的 git 检出。
+ */
+function pinnedEngine(repo) {
+  if (!fs.existsSync(path.join(repo, '.git'))) throw new Error(`${repo} 不是 git 检出，无法核对固定引擎支持的命令`);
+  const version = fs.readFileSync(path.join(repo, 'plugin/skills/impeccable/scripts/VERSION'), 'utf8').trim();
+  const tag = `engine-v${version}`;
+  const show = (file) => {
+    try { return git(repo, 'show', `${tag}:${file}`); } catch { throw new Error(`${repo} 里没有 ${tag}:${file}，先 git fetch --tags`); }
+  };
+  const router = parseEngineVerbs(show('crates/cli/src/router.rs'));
+  const live = parseEngineVerbs(show('crates/live/src/lib.rs'));
+  // 前缀分派（live*）交给 live 子模块，子模块里的命令名才算支持
+  const verbs = new Set([...router.verbs, ...(router.prefixes.has('live') ? live.verbs : [])]);
+  return { version, verbs };
+}
+
+/**
+ * 按固定引擎核对并适配 impeccable 技能文本：登记的缺口去掉对应一节；
+ * 适配后仍引用引擎没有的命令，或登记的缺口引擎已经支持，都报错。返回引擎信息供写入锁文件。
+ */
+export function adaptToEngine(files, engine, gaps = IMPECCABLE_ENGINE_GAPS) {
+  for (const gap of gaps) {
+    if (engineSupports(engine, gap.verb)) throw new Error(`固定引擎 ${engine.version} 已支持 ${gap.verb}：删除 IMPECCABLE_ENGINE_GAPS 里的这一条，恢复上游原文`);
+    for (const rel of gap.files) {
+      if (!files.has(rel)) throw new Error(`本地适配要改的文件不存在：${rel}`);
+      files.set(rel, dropSection(files.get(rel), gap.heading, gapNote(gap, engine.version)));
+    }
+  }
+  assertEngineVerbs(files, engine);
+  return { version: engine.version, verbs: [...engine.verbs].sort() };
+}
+
+/** 文本引用的引擎命令都要在固定引擎里，否则报错并列出命令和所在文件。 */
+export function assertEngineVerbs(files, engine) {
+  const missing = [...referencedVerbs(files)].filter(([verb]) => !engineSupports(engine, verb)).map(([verb, where]) => `${verb}（${[...where].sort().join('、')}）`);
+  if (missing.length) throw new Error(`impeccable 的文本引用了固定引擎 ${engine.version} 没有的命令：${missing.join('；')}。升级固定引擎，或在 IMPECCABLE_ENGINE_GAPS 登记本地适配`);
+}
+
 /** 第三方部分；本机没有 vendor 存档时返回 null。 */
 function thirdPartyParts(vendor) {
   const [imp, arc, fd] = ['impeccable', 'archify', 'feature-dev'].map((n) => path.join(vendor, n));
@@ -149,16 +240,23 @@ function thirdPartyParts(vendor) {
   const arcMeta = meta('archify', 'https://github.com/tt-a1i/archify', json(path.join(arc, 'archify/skill-release.json')).version, arc);
   const fdMeta = meta('feature-dev', 'https://github.com/anthropics/claude-plugins-official', json(path.join(fd, '.claude-plugin/plugin.json')).version, fd);
   const arcExcluded = (rel) => /^examples\/[^/]+\.html$/.test(rel);
+  const impFiles = withSkill(merge(vendorFiles(imp, 'plugin/skills/impeccable'), vendorFiles(imp, 'LICENSE'), vendorFiles(imp, 'NOTICE.md')), MODIFIED_NOTE);
+  const pinned = pinnedEngine(imp);
+  const engine = adaptToEngine(impFiles, pinned);
+  const impAgents = vendorFiles(imp, 'plugin/agents');
+  assertEngineVerbs(impAgents, pinned);
+  const gapChanges = IMPECCABLE_ENGINE_GAPS.map((g) => `${g.files.join('、')} 去掉“${g.heading.replace(/^#+\s*/, '')}”一节并留一行改动说明（固定引擎 ${engine.version} 没有 ${g.verb} 命令）`);
   return [
     {
       id: 'impeccable', dest: 'skills/impeccable', ...impMeta,
       from: ['plugin/skills/impeccable/', 'LICENSE', 'NOTICE.md'],
-      changes: 'SKILL.md 头部 user-invocable 由 true 改为 false，并加一行改动说明注释；其余文件原样',
-      files: withSkill(merge(vendorFiles(imp, 'plugin/skills/impeccable'), vendorFiles(imp, 'LICENSE'), vendorFiles(imp, 'NOTICE.md')), MODIFIED_NOTE),
+      changes: ['SKILL.md 头部 user-invocable 由 true 改为 false，并加一行改动说明注释', ...gapChanges].join('；') + '；其余文件原样',
+      engine,
+      files: impFiles,
     },
     {
       id: 'impeccable-agents', dest: 'agents', listFiles: true, ...impMeta,
-      from: ['plugin/agents/'], changes: '无', files: vendorFiles(imp, 'plugin/agents'),
+      from: ['plugin/agents/'], changes: '无', files: impAgents,
     },
     {
       id: 'archify', dest: 'skills/archify', ...arcMeta,

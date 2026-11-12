@@ -14,7 +14,7 @@
   - [skills/impeccable/](skills/impeccable/SKILL.md)：取自上游已构建的 `plugin/skills/impeccable/`
   - [skills/impeccable/LICENSE](skills/impeccable/LICENSE)、[skills/impeccable/NOTICE.md](skills/impeccable/NOTICE.md)：取自上游仓库根目录，原样保留
   - `agents/impeccable-asset-producer.md`、`agents/impeccable-documenter.md`、`agents/impeccable-finish-reviewer.md`、`agents/impeccable-manual-edit-applier.md`：取自上游 `plugin/agents/`
-- 我们的改动：`skills/impeccable/SKILL.md` 文件头的 `user-invocable` 由 `true` 改为 `false`（不出现在命令菜单，由入口技能加载），并加了一行说明改动的注释。其余文件与上游检出的内容相同（文本文件用 LF；`scripts/impeccable.cmd` 按上游的规定用 CRLF）。上游插件的会话钩子（`plugin/hooks/`）没有收录。
+- 我们的改动：`skills/impeccable/SKILL.md` 文件头的 `user-invocable` 由 `true` 改为 `false`（不出现在命令菜单，由入口技能加载），并加了一行说明改动的注释。`skills/impeccable/reference/audit.md` 和 `audit.native.md` 去掉了末尾的“Save the Report”一节，原位置留一行说明改动的注释：该节调用的 `audit-storage` 命令在上游 main 已加入，但收录时固定的引擎 0.1.22 还没有，照原文执行会报 `Unknown command`；上游发布带该命令的引擎、我们升级固定版本后恢复原文。其余文件与上游检出的内容相同（文本文件用 LF；`scripts/impeccable.cmd` 按上游的规定用 CRLF）。上游插件的会话钩子（`plugin/hooks/`）没有收录。
 - 运行时的联网行为（上游原有，我们没有改）：启动脚本 `skills/impeccable/scripts/impeccable`（Windows 上是 `impeccable.cmd`）在本机找不到引擎程序时，会从 <https://github.com/pbakaus/impeccable/releases> 下载对应版本的可执行文件到用户目录的 `.impeccable/`，按 `scripts/engine-checksums.txt` 校验后运行。安装插件本身不会触发下载。
 - impeccable 自己引用的第三方内容（摘自它的 `NOTICE.md`，该文件里的 `skill/reference/` 对应本插件的 `skills/impeccable/reference/`）：
   - `reference/ios.md` 和 `reference/android.md` 提炼自 ehmo 的 platform-design-skills（Apple Human Interface Guidelines 与 Material Design 3 的规则），由 impeccable 改写

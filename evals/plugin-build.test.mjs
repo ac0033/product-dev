@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { assertNotHandwritten, build, ENTRY_SKILL, HANDWRITTEN, hashFiles, hideSkill, isHandwritten, PLUGIN_DIR, readTree, ROOT } from '../tools/build-plugin.mjs';
+import { adaptToEngine, assertEngineVerbs, assertNotHandwritten, build, dropSection, ENTRY_SKILL, HANDWRITTEN, hashFiles, hideSkill, IMPECCABLE_ENGINE_GAPS, isHandwritten, parseEngineVerbs, PLUGIN_DIR, readTree, referencedVerbs, ROOT } from '../tools/build-plugin.mjs';
 
 const PLUGIN = path.join(ROOT, PLUGIN_DIR);
 const LOCK = 'BUILD.lock.json';
@@ -115,6 +115,58 @@ test('没有 vendor 存档：只重建自有部分，第三方部分沿用锁文
     assert.ok(rebuilt.has('skills/engineering-kit/SKILL.md'));
     assert.deepEqual([...rebuilt.keys()].filter((rel) => /^(agents|skills\/(impeccable|archify))\//.test(rel)), []);
   });
+});
+
+// 引擎命令表在有 vendor 存档的机器上从上游 engine-v<版本> 标签读出、写进锁文件；这里不需要存档，用锁文件核对已提交的文本。
+test('impeccable 引擎：文本引用的命令都在固定引擎里，锁文件记录的引擎版本与 scripts/VERSION 一致', () => {
+  const tree = committed();
+  const part = lock().parts.find((p) => p.id === 'impeccable');
+  assert.ok(part?.engine?.verbs?.length >= 20, '锁文件没有记录 impeccable 固定引擎的命令表');
+  assert.equal(tree.get('skills/impeccable/scripts/VERSION').toString('utf8').trim(), part.engine.version, '锁文件的引擎版本与 scripts/VERSION 不一致，要重新构建');
+  const engine = { version: part.engine.version, verbs: new Set(part.engine.verbs) };
+  const texts = new Map([...tree].filter(([rel]) => rel.startsWith('skills/impeccable/') || /^agents\/impeccable-/.test(rel)));
+  assert.ok(referencedVerbs(texts).size >= 15, '没有找到 impeccable 文本里调用引擎的命令');
+  assert.doesNotThrow(() => assertEngineVerbs(texts, engine));
+  // 登记过的本地适配要真的落在成品里
+  for (const gap of IMPECCABLE_ENGINE_GAPS) {
+    assert.ok(!engine.verbs.has(gap.verb), `固定引擎已支持 ${gap.verb}，应删掉这条本地适配`);
+    for (const rel of gap.files) {
+      const text = tree.get(`skills/impeccable/${rel}`).toString('utf8');
+      assert.ok(!text.split('\n').includes(gap.heading), `${rel} 仍有“${gap.heading}”一节`);
+      assert.match(text, /Modified by the product-dev plugin build/, `${rel} 缺少改动说明`);
+    }
+  }
+});
+
+test('impeccable 引擎适配：解析命令表、去掉缺口一节、引擎补上命令或文本引用未知命令时报错', () => {
+  const rust = [
+    '    match verb {',
+    '        "detect" => detect(rest),',
+    '        "ignores" | "ignore" => x(),',
+    '        "comp-diff" => {',
+    '        v if v.starts_with("live") => live(v),',
+    '        _ => other(),',
+    '    }',
+    '    let s = "not-a-verb";',
+  ].join('\n');
+  const parsed = parseEngineVerbs(rust);
+  assert.deepEqual([...parsed.verbs].sort(), ['comp-diff', 'detect', 'ignore', 'ignores']);
+  assert.deepEqual([...parsed.prefixes], ['live']);
+
+  const doc = Buffer.from('# T\n\ntext\n\n## Save\n\nrun `"<skill-base-dir>/scripts/impeccable" gone write x`\n\n### Sub\n\nmore\n\n## Next\n\nkeep\n');
+  assert.equal(dropSection(doc, '## Save', '<!-- note -->').toString(), '# T\n\ntext\n\n<!-- note -->\n\n## Next\n\nkeep\n');
+  assert.equal(dropSection(Buffer.from('# T\n\ntext\n\n## Save\n\nlast\n'), '## Save', '<!-- n -->').toString(), '# T\n\ntext\n\n<!-- n -->\n');
+  assert.throws(() => dropSection(doc, '## Missing', 'n'), /没有找到/);
+
+  const gap = { verb: 'gone', heading: '## Save', files: ['a.md'] };
+  const files = () => new Map([['a.md', doc], ['b.md', Buffer.from('"<skill-base-dir>/scripts/impeccable" detect x')]]);
+  const engine = { version: '9.9.9', verbs: new Set(['detect']) };
+  const adapted = files();
+  assert.deepEqual(adaptToEngine(adapted, engine, [gap]), { version: '9.9.9', verbs: ['detect'] });
+  assert.doesNotMatch(adapted.get('a.md').toString(), /gone write|### Sub/);
+  assert.match(adapted.get('a.md').toString(), /pinned engine 9\.9\.9 has no `gone` command/);
+  assert.throws(() => adaptToEngine(files(), engine, []), /gone（a\.md）/, '未登记的缺口要报错');
+  assert.throws(() => adaptToEngine(files(), { version: '9.9.10', verbs: new Set(['detect', 'gone']) }, [gap]), /已支持 gone/, '引擎补上命令后要提示撤回适配');
 });
 
 test('入口唯一：插件里可由用户调用的技能只有入口一个', () => {
