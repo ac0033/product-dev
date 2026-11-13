@@ -111,7 +111,12 @@ test('双引号里只认 sh 的转义（反斜杠后跟引号、反斜杠、美�
   assert.equal(classify(String.raw`git push origin "--no-\verify"`), 'push');
 });
 
-test('git 只在命令位置才算：带独立值的全局选项、env 的选项、常见前缀之后都认得出；echo 等命令的参数不算（PR #11 后续 2）', () => {
+test('git push 在一段命令里任何位置都算：带独立值的全局选项、env 的选项、任意包装命令之后都认得出；只有只输出文本的命令（echo、grep 等）的参数不算（PR #11 后续 2）', () => {
+  // 任意包装命令（不靠清单）
+  assert.equal(classify('strace git push --no-verify'), 'bypass');
+  assert.equal(classify('ssh h git push --no-verify'), 'bypass');
+  assert.equal(classify('dotenv -- git push --no-verify'), 'bypass');
+  assert.equal(classify('strace -f git push origin feat'), 'push');
   // 带独立值的全局选项
   assert.equal(classify('git --git-dir x push --no-verify'), 'bypass');
   assert.equal(classify('git --work-tree . --git-dir .git push origin feat'), 'push');
@@ -136,10 +141,15 @@ test('git 只在命令位置才算：带独立值的全局选项、env 的选项
   assert.equal(classify('Get-Item . | ForEach-Object { git push --no-verify }'), 'bypass');
   assert.equal(classify('find . -maxdepth 0 -exec git push --no-verify ;'), 'bypass');
   assert.equal(classify('printf y | xargs -I{} git push origin feat'), 'push');
-  // 不在命令位置：echo、printf 的参数；git 别的子命令的参数
+  // 只输出文本的命令的参数不算（前缀之后的命令词也认）
   assert.equal(classify('echo git push --no-verify'), 'other');
   assert.equal(classify('echo git push'), 'other');
   assert.equal(classify('printf "%s" x git push'), 'other');
+  assert.equal(classify('grep -rn git push docs'), 'other');
+  assert.equal(classify('Write-Host git push --no-verify'), 'other');
+  assert.equal(classify('X=1 echo git push --no-verify'), 'other');
+  assert.equal(classify('echo git push; git push origin feat'), 'push');
   assert.equal(classify('git commit -m "说明 git push --no-verify 会被拦"'), 'other');
-  assert.equal(classify('git commit -m x git push'), 'other');
+  // 偏严：git 的子命令不在文本命令清单里，未加引号的参数里的 git push 照样按推送核对（git 实际不会推送）
+  assert.equal(classify('git commit -m x git push'), 'push');
 });
