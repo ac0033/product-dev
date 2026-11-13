@@ -140,5 +140,5 @@ codex plugin add product-dev@ac0033-skills
 ## 参考与许可
 
 - **完整流程**见[入口技能](plugin/skills/product-dev/SKILL.md)：各阶段的目标、工具、过关证据都在它的步骤表里；通用的流程细则（开工、审查分档、复审顺序、收工、巡检等）在工程套件的[流程文档](plugin/skills/engineering-kit/references/process.md)。
-- **组件与版本**见[组件清单](COMPONENTS.md)。可用工具随宿主而异，流程文档说明了按路径读取内部技能和派发子代理的替代方式。
+- **组件与版本**见[组件清单](COMPONENTS.md)。可用工具随宿主而异，[入口技能](plugin/skills/product-dev/SKILL.md)的“工具缺失与宿主差异”一节说明了按路径读取内部技能和派发子代理的替代方式。
 - **测试与许可**见[测试与行为用例](evals/cases.md)、[MIT](LICENSE)和[第三方声明](plugin/THIRD_PARTY_NOTICES.md)。

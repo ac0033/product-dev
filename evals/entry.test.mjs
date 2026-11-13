@@ -344,7 +344,7 @@ test('process.md 不复述套件流程文档：入口版只留入口独有的内
   // 反转旧的“原文保留”：入口版 process.md 原先由套件流程文档重组而来，要求保留 80% 以上的原句；
   // 现在同一内容只写一处（套件版），入口版保留原句反而是重复。口径改为三条：
   // (a) 入口版指向套件版的链接都落在插件内、指到的节存在，且入口点名的每个通用小节都有链接；
-  // (b) 两份文件之间没有同一长句（与 consistency 的重复检查同一口径，那条不查插件手写部分与组件之间）；
+  // (b) 入口全部方法文档与套件版之间没有同一长句（与 consistency 的重复检查同一口径，那条不查插件手写部分与组件之间）；
   // (c) 原来在入口版里检查的具体内容（复审命令、次序、默认值、阶段目录）改查套件版，见“受控的值”“分流与次序”两条。
   // 局限：只能查原句重复，换一种说法的同义复述查不出来，靠独立复审。
   const KIT_LINK = '../../engineering-kit/references/process.md';
@@ -369,9 +369,9 @@ test('process.md 不复述套件流程文档：入口版只留入口独有的内
       assert.ok(kitHeadings.some((h) => h.startsWith(`${m[2]}. `)), `${doc} 指向套件版第 ${m[2]} 节，但没有这一节`);
     }
   }
-  // (b) 无同一长句；入口版本身不应变成套件版的缩写本
+  // (b) 无同一长句：入口全部方法文档（SKILL.md 与 references/*.md，含入口版 process.md）都不与套件版 process.md 出现同一句；入口版本身不应变成套件版的缩写本
   const kitSents = new Set(sentences(kit));
-  assert.deepEqual(sentences(mine).filter((x) => kitSents.has(x)), [], '入口版 process.md 与套件版出现同一句：只写一处');
+  for (const doc of DOCS) assert.deepEqual(sentences(read(doc)).filter((x) => kitSents.has(x)), [], `${doc} 与套件版 process.md 出现同一句：只写一处`);
   assert.ok(sentences(mine).length >= 15, '入口版没有解析到句子（配置闸门、测试的四个阶段应当还在）');
 });
 
