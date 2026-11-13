@@ -1,4 +1,5 @@
-// 复审记录：独立复审（代码复审 code 或一致性审 consistency）后在这里登记。业务含义：复审必须由不共享作者上下文的独立复审者完成——宿主子代理或外部执行器（external-review.mjs，登记名 external:<执行器>），且在允许名单内；
+// 复审记录：独立复审（代码复审 code 或一致性审 consistency）后在这里登记。业务含义：复审必须由不共享作者上下文的独立复审者完成——宿主子代理、外部执行器（external-review.mjs，登记名 external:<执行器>），或宿主没有子代理时用户另开的全新会话（登记名 general-purpose），且在允许名单内；
+// 以 external: 开头的登记名只接受 external-review.mjs 的调用（recordReview 的 viaExternalReview 参数，命令行没有对应的参数），手动 review.mjs 登记一律拒绝；
 // 判定策略（复审流程、必需检查名、复审者名单、必需的节、最少字数、结论关键词、复审轮次上限）取基准提交上的配置，被审分支改了不算数（lib.mjs 的 loadConfig）。
 // 报告要有实质内容：必需的几节（modules.review.reviewSections，默认范围、发现、作者的验证，见 missingSections）齐全且各有内容，
 // 并且有一处明确的结论（写法见 reportVerdict）：登记 pass 要求结论是通过，登记 fail 要求结论是不通过，
@@ -185,6 +186,8 @@ export function missingSections(text, sections) {
 
 /** 审查种类及中文名。 */
 const KINDS = { code: '代码复审', consistency: '一致性审' };
+/** 外部复审者登记名的前缀（external-review.mjs 的 REVIEWER_PREFIX 取它）：这类名字只接受 external-review.mjs 的登记。 */
+export const EXTERNAL_REVIEWER_PREFIX = 'external:';
 
 /** 登记的结论种类。 */
 const VERDICTS = ['pass', 'fail', 'defer', 'accept'];
@@ -205,7 +208,7 @@ export function branchDirName(branch) {
  */
 function checkReport(config, expect, reviewer, reportPath, label = expect) {
   if (!config.reviewers.includes(reviewer)) {
-    return { ok: false, message: `复审者 ${reviewer} 不在允许名单（${config.reviewers.join('、')}）内；复审必须由独立复审者（宿主子代理或外部执行器）完成，名单变更合入主干后才生效` };
+    return { ok: false, message: `复审者 ${reviewer} 不在允许名单（${config.reviewers.join('、')}）内；复审必须由独立复审者（宿主子代理、外部执行器，或宿主没有子代理时用户另开的全新会话，后者登记名用 general-purpose）完成，名单变更合入主干后才生效` };
   }
   if (!reportPath || !fs.existsSync(reportPath)) return { ok: false, message: '找不到复审报告文件' };
   const text = fs.readFileSync(reportPath, 'utf8');
@@ -331,7 +334,10 @@ function argProblem({ verdict, kind, reason, userDecision }) {
  * 登记复审结论。返回 { ok, message, record? }；不通过的登记也会写入（verdict=fail），核对时只认 pass 与 accept（一致性审另认 defer）。
  * pr 流程下 gh 不存在或调用失败时抛错（不放行）；gh 可注入，测试用假的实现。
  */
-export function recordReview({ root, verdict, reviewer, reportPath, summary = '', pr, kind, reason, userDecision, gh = defaultGh }) {
+export function recordReview({ root, verdict, reviewer, reportPath, summary = '', pr, kind, reason, userDecision, gh = defaultGh, viaExternalReview = false }) {
+  if (typeof reviewer === 'string' && reviewer.startsWith(EXTERNAL_REVIEWER_PREFIX) && viaExternalReview !== true) {
+    return { ok: false, message: `复审者名 ${reviewer} 以 ${EXTERNAL_REVIEWER_PREFIX} 开头，只能由 external-review.mjs 登记（它启动执行器、核对副本与最终提交、按发现判定结论后才登记），手动 review.mjs 不接受这类名字；宿主没有子代理而由用户另开全新会话复审的，登记名用 general-purpose` };
+  }
   const config = loadConfig(root);
   assertPolicy(config); // reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewSections、reviewKeyword、maxReviewRounds 取基准提交上的配置，取不到时不按工作区的值登记
   if (config.reviewFlow === 'pr') return recordPrReview({ root, config, verdict, reviewer, reportPath, summary, pr, kind, reason, userDecision, gh });

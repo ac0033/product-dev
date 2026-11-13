@@ -118,7 +118,32 @@ async function run(root, head, mode, extra = {}) {
 }
 
 /** 用适配器的报告登记。 */
-const register = (root, head, verdict, reportPath) => recordReview({ root, verdict, reviewer: 'external:fake', reportPath, summary: 's', pr: '7', kind: 'code', gh: fakeGh([head]) });
+const register = (root, head, verdict, reportPath) => recordReview({ root, verdict, reviewer: 'external:fake', reportPath, summary: 's', pr: '7', kind: 'code', gh: fakeGh([head]), viaExternalReview: true });
+
+test('external: 开头的复审者名不能手动登记：直接调 recordReview 和命令行 review.mjs 都拒绝，适配器自己的登记不受影响', async () => {
+  const { root, head } = repo();
+  const res = await run(root, head, 'pass');
+  assert.equal(res.ok, true, res.message);
+  // 没有 viaExternalReview：与手写报告同一条路径，pass、fail、accept 都拒绝，不写记录
+  const manual = (verdict, extra = {}) => recordReview({ root, verdict, reviewer: 'external:fake', reportPath: res.reportPath, summary: 's', pr: '7', kind: 'code', gh: fakeGh([head]), ...extra });
+  for (const verdict of ['pass', 'fail']) {
+    const r = manual(verdict);
+    assert.equal(r.ok, false, verdict);
+    assert.match(r.message, /只能由 external-review\.mjs 登记/);
+  }
+  const accepted = manual('accept', { userDecision: '用户接受（测试）' });
+  assert.equal(accepted.ok, false);
+  assert.match(accepted.message, /只能由 external-review\.mjs 登记/);
+  // 只有布尔 true 才算适配器登记，别的真值不行
+  assert.equal(manual('pass', { viaExternalReview: 'true' }).ok, false);
+  // 命令行没有办法声明“来自适配器”：附加参数也不起作用
+  const cli = fileURLToPath(new URL('../gate/review.mjs', import.meta.url));
+  const r = spawnSync(process.execPath, [cli, 'pass', '--reviewer', 'external:fake', '--report', res.reportPath, '--summary', 's', '--pr', '7', '--kind', 'code', '--viaExternalReview', 'true'], { cwd: root, encoding: 'utf8' });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout + r.stderr, /只能由 external-review\.mjs 登记/);
+  // 适配器自己的登记照常成功；非 external: 的名字不受这条影响（gate.test.mjs 覆盖）
+  assert.equal(register(root, head, 'pass', res.reportPath).ok, true);
+});
 
 test('通过：生成闸门认可的报告，recordReview 登记 pass 成功、登记 fail 被拒', async () => {
   const { root, head } = repo();
@@ -184,7 +209,7 @@ test('运行中最终提交变化：结论作废；报告生成后 PR 又推送�
   // 复审期间没变，但登记前 PR 又推送：guardedGh 让 recordReview 拒绝
   const res = await run(root, head, 'pass');
   assert.equal(res.ok, true);
-  const later = () => recordReview({ root, verdict: 'pass', reviewer: 'external:fake', reportPath: res.reportPath, summary: 's', pr: '7', kind: 'code', gh: guardedGh(fakeGh(['c'.repeat(40)]), head) });
+  const later = () => recordReview({ root, verdict: 'pass', reviewer: 'external:fake', reportPath: res.reportPath, summary: 's', pr: '7', kind: 'code', gh: guardedGh(fakeGh(['c'.repeat(40)]), head), viaExternalReview: true });
   assert.throws(later, /PR 最终提交已变为 cccccccccccc/); // gh 失败时 recordReview 抛错，不登记
 });
 
