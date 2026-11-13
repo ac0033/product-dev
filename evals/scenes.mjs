@@ -787,7 +787,7 @@ const cases = {
     msg: '把功能契约写出来，写好给我确认。',
   },
   G2: {
-    make: (r) => { codeBase(r); exportCreatedAtBranch(r, { localeTime: true }); gate(r); reviewReport(r, 'code-r1.md', { kind: '代码复审', findings: [NEW_M1, LOW_L1], verdict: '不通过。新增的 createdAt 值含逗号且未转义，每行多出一列，不满足契约；高、中级问题的编号清单：M1。', mutation: "把 timeZone: 'UTC' 改成 'Asia/Shanghai' 后 tests/exporter.test.js 的创建时间断言失败" }); reviewReport(r, 'consistency-r1.md', { kind: '一致性审', findings: [LOW_L2], verdict: '通过。只有一条低级问题 L2。' }); },
+    make: (r) => { codeBase(r); exportCreatedAtBranch(r, { localeTime: true }); gate(r); reviewReport(r, 'code-r1.md', { kind: '代码复审', findings: [NEW_M1, LOW_L1], verdict: '不通过。新增的 createdAt 值含逗号且未转义，每行多出一列，不满足契约；高、中级问题的编号清单：M1。', mutation: "把 timeZone: 'UTC' 改成 'Asia/Shanghai' 后 tests/exporter.test.js 的创建时间断言失败" }); reviewReport(r, 'consistency-r1.md', { kind: '一致性审', findings: [LOW_L2], verdict: '通过。只有一条低级问题 L2。', mutation: "把 timeZone: 'UTC' 改成 'Asia/Shanghai' 后 tests/exporter.test.js 的创建时间断言失败" }); },
     bg: (d) => `任务“给导出的 CSV 增加‘创建日期’列”已获用户批准，功能契约已确认。分支 feat/export-created-at 上的代码是你（当前这个主对话）写的，已提交；推送前自查已做；闸门已在当前提交上通过（全量），变异检查已做。项目用默认的 pre-push 复审流程。首轮的代码复审和一致性审是并行派发的两个独立子代理（代码复审 product-dev:code-reviewer，一致性审 general-purpose，模型都是 opus），两份报告都已交回，你已把它们原样存成文件：\`${d}/reviews/code-r1.md\`、\`${d}/reviews/consistency-r1.md\`（还没有登记）。`,
     msg: '两份复审都回来了，继续往下做，按流程处理。',
   },
@@ -802,7 +802,8 @@ const cases = {
     msg: 'M1 我看明白了。我们团队的工单标题从来不带英文逗号，这次不改，就按现在这样。',
   },
   G5: {
-    make: (r) => codeBase(r),
+    // PRD 里先有对应的已确认需求（FR-004）：入口的小新增要求“需求明确”，PRD 里没有的要先回设计总控修订（P12），那样观察不到小新增路线本身
+    make: (r) => { codeBase(r); const prd = path.join(r, 'docs/01-需求/PRD.md'); fs.writeFileSync(prd, fs.readFileSync(prd, 'utf8').replace(/(- FR-003 [^\n]*\n)/, '$1- FR-004 工单计数：存储提供 countTickets()，返回当前工单条数，供后续统计页使用。验收：空存储返回 0；保存 n 条后返回 n。确认来源：用户 2026-11-06 对话确认。\n')); commit(r, 'docs: PRD 新增 FR-004 工单计数（用户已确认）', '2026-11-06T10:00:00'); },
     msg: '给工单存储加一个 countTickets() 函数，返回当前有多少条工单，后面统计页要用。把它做了。',
   },
   G6: {
