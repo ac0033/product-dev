@@ -35,14 +35,15 @@ const RANK = { other: 0, push: 1, bypass: 2, merge: 3 };
 /**
  * 按 shell 的规则把命令切成段（引号外的 ; & | 换行分段）和词：引号去掉、内容保留（"--no-verify" 与 --no-verify 是同一个词）；
  * 引号外的重定向符（< > 连同前导数字与 &，如 2> &> >&2）切成独立的词（git push --no-verify>out.txt 里的 --no-verify 照样是参数）。
- * 引号外的反斜杠原样保留，不按 sh 当转义：PowerShell 里它是路径分隔符（C:\x\git.exe push），去掉会漏判（局限见套件 SKILL.md 第 6 节）。
- * 双引号里只有 \" \\ \$ \` 是转义（去掉反斜杠），反斜杠加换行是续行（两个字符都去掉），其余反斜杠原样保留（POSIX sh 的规则；
- * PowerShell 双引号里反斜杠不是转义，Windows 路径 "C:\Program Files\Git\cmd\git.exe" 按这条规则同样原样得到）。
- * dialect 为 ps 时按 PowerShell 的引号规则切：双引号里反斜杠原样、反引号转义下一个字符、"" 是一个引号；单引号里 '' 是一个引号；
- * 引号外反引号转义下一个字符（git push --no-ver`ify 即 --no-verify），反引号加换行是续行。
- * 返回 [[词, ...], ...]。只做判断用，不追求完整的 shell 语法（不处理 sh 引号外的换行续行、子命令替换的嵌套等）。
+ * dialect 为 sh（默认）时按 POSIX sh 的引号规则切：引号外的 \x 是 x（echo it\'s 里的 \' 不开引号），反斜杠加换行是续行；
+ * 双引号里只有 \" \\ \$ \` 是转义（去掉反斜杠），反斜杠加换行是续行，其余反斜杠原样保留；单引号里没有转义。
+ * dialect 为 ps 时按 PowerShell 的引号规则切：反斜杠一律原样（C:\x\git.exe、"D:\proj\" 都是路径）；双引号里反引号转义下一个字符、
+ * "" 是一个引号；单引号里 '' 是一个引号；引号外反引号转义下一个字符（git push --no-ver`ify 即 --no-verify），反引号加换行是续行；
+ * here-string（@' 或 @" 后紧跟换行，到行首的 '@ 或 "@ 为止）的内容是一个词，里面的引号不算。
+ * info（可选）：切词中遇到没收尾的引号（或 here-string）时置 info.unclosed = true——这时后面的内容全被当成引号里的文字。
+ * 返回 [[词, ...], ...]。只做判断用，不追求完整的 shell 语法（不处理子命令替换的嵌套等）。
  */
-export function shellSegments(command, dialect = 'sh') {
+export function shellSegments(command, dialect = 'sh', info = {}) {
   const ps = dialect === 'ps';
   const segs = [];
   let words = [];
@@ -61,6 +62,22 @@ export function shellSegments(command, dialect = 'sh') {
     if (ps && ch === '`' && i + 1 < command.length) {
       const next = command[++i]; // PowerShell 引号外的反引号：转义下一个字符，后跟换行是续行
       if (next !== '\n') cur = (cur ?? '') + next;
+    } else if (!ps && ch === '\\' && i + 1 < command.length) {
+      const next = command[++i]; // sh 引号外的反斜杠：转义下一个字符，后跟换行是续行
+      if (next !== '\n') cur = (cur ?? '') + next;
+    } else if (ps && ch === '@' && (command[i + 1] === "'" || command[i + 1] === '"') && /^\r?\n/.test(command.slice(i + 2))) {
+      // PowerShell here-string：@' / @" 加换行开头，到行首的 '@ / "@ 结束，内容原样（不含首尾换行）
+      const q = command[i + 1];
+      const start = i + 2 + (command[i + 2] === '\r' ? 2 : 1);
+      const m = new RegExp(`\\r?\\n${q}@`).exec(command.slice(start));
+      if (m) {
+        cur = (cur ?? '') + command.slice(start, start + m.index);
+        i = start + m.index + m[0].length - 1;
+      } else {
+        info.unclosed = true;
+        cur = (cur ?? '') + command.slice(start);
+        i = command.length;
+      }
     } else if (ch === '"' || ch === "'") {
       let j = i + 1;
       let text = '';
@@ -83,6 +100,7 @@ export function shellSegments(command, dialect = 'sh') {
           if (next !== '\n') text += next;
         } else text += c;
       }
+      if (j >= command.length) info.unclosed = true;
       cur = (cur ?? '') + text;
       i = j; // 停在收尾引号上（没有收尾引号时到结尾）
     } else if (ch === '<' || ch === '>' || (ch === '&' && command[i + 1] === '>')) {
@@ -211,10 +229,11 @@ function envSplitValue(w, next) {
 /**
  * 一段命令的分析：返回 { words, commands: [{ start, at, assigns }] }。
  * words 是去掉了开头的 ( $( @( ` { 与结尾的 ) ` }（括号类符号）的词；env -S 的值按 shell 规则拆开拼回原处——
- * 只在 env 自身的选项区（env 之后、第一个既不是选项也不是赋值的词之前）认，命令词之后的 -S 是那个命令的参数，不拆。
+ * 只在 env 自身的选项区（env 之后、第一个既不是选项也不是赋值的词之前）认，命令词之后的 -S 是那个命令的参数，不拆；
+ * 值按调用方的方言（dialect）拆，与这一段的切词口径一致。
  * commands 是段里各个命令：start 是起点，at 是命令词的下标，assigns 是它前缀里的环境变量赋值，sub 表示它由 ( $( @( ` { 开头。
  */
-function analyzeSegment(segWords) {
+function analyzeSegment(segWords, dialect = 'sh') {
   const words = [];
   const starts = [0];
   const subs = new Set(); // 由 ( $( @( ` { 开头的命令（子命令替换、分组、子表达式、脚本块）的起点
@@ -225,7 +244,7 @@ function analyzeSegment(segWords) {
     if (envOpts) {
       const split = envSplitValue(w, segWords[i + 1]);
       if (split) {
-        words.push(...shellSegments(split.value).flat());
+        words.push(...shellSegments(split.value, dialect).flat());
         i += split.consumed - 1;
         envOpts = false; // -S 的值就是要执行的命令
         continue;
@@ -289,7 +308,7 @@ function mayReexec(command) {
     (d) =>
       /[|>]|<\(/.test(stripQuoted(command, d)) ||
       shellSegments(command, d).some((seg) => {
-        const { words, commands } = analyzeSegment(seg);
+        const { words, commands } = analyzeSegment(seg, d);
         return commands.some((c) => REEXEC_COMMANDS.has(cmdName(words[c.at] ?? '')));
       }),
   );
@@ -300,17 +319,24 @@ function mayReexec(command) {
  * 它在那个命令的命令词之后、而命令词是只输出文本的命令时不算——只在 textExempt 为真（整条命令没有可再执行的结构，见 mayReexec）、
  * 且那个命令不是由 ( $( { 等开头的子表达式时如此（子表达式的输出总会交给别的命令：Set-Content p.ps1 -Value (echo …)）。
  */
-function pushesIn(segWords, textExempt) {
-  const { words, commands } = analyzeSegment(segWords);
-  const pushes = [];
+function pushesIn(segWords, textExempt, dialect) {
+  return scanPushes(segWords, dialect)
+    .filter((x) => !(textExempt && x.textArg))
+    .map((x) => x.push);
+}
+
+/** 一段命令里找到的每个 git push：{ push, textArg }，textArg 表示它在普通命令（非子表达式）里、且是文本命令的参数。 */
+function scanPushes(segWords, dialect) {
+  const { words, commands } = analyzeSegment(segWords, dialect);
+  const found = [];
   for (let i = 0; i < words.length; i++) {
-    const p = gitPushAt(words, i);
-    if (!p) continue;
+    const push = gitPushAt(words, i);
+    if (!push) continue;
     const owner = commands.filter((c) => c.start <= i).at(-1);
-    if (textExempt && owner && !owner.sub && i > owner.at && TEXT_COMMANDS.has(cmdName(words[owner.at] ?? ''))) continue;
-    pushes.push(p);
+    const textArg = Boolean(owner && !owner.sub && i > owner.at && TEXT_COMMANDS.has(cmdName(words[owner.at] ?? '')));
+    found.push({ push, textArg });
   }
-  return pushes;
+  return found;
 }
 
 /**
@@ -321,7 +347,7 @@ function pushesIn(segWords, textExempt) {
  * 理由：要准确判断须追踪变量作用域（前缀赋值只作用于一条命令；单独的赋值语句对已导出的变量会影响之后的 git；export 影响之后全部），
  * 判错就是漏拦；把 core.hooksPath 写进 GIT_CONFIG_* 又和推送写在同一条命令里，正常工作几乎遇不到，误拦代价小。
  */
-function envSetsHooksPath(segs) {
+function envSetsHooksPath(segs, dialect) {
   const hit = (assign) => {
     const m = ASSIGN.exec(assign);
     if (!m) return false;
@@ -338,7 +364,7 @@ function envSetsHooksPath(segs) {
       if (words.slice(1).some(hit)) return true;
       continue;
     }
-    if (analyzeSegment(words).commands.some((c) => c.assigns.some(hit))) return true;
+    if (analyzeSegment(words, dialect).commands.some((c) => c.assigns.some(hit))) return true;
   }
   return false;
 }
@@ -354,10 +380,10 @@ function envSetsHooksPath(segs) {
  */
 function gitPushes(command, textExempt, dialect) {
   const segs = shellSegments(command, dialect);
-  const pushes = segs.flatMap((seg) => pushesIn(seg, textExempt));
+  const pushes = segs.flatMap((seg) => pushesIn(seg, textExempt, dialect));
   if (pushes.length === 0) return { push: false, bypass: false };
   const bypass =
-    pushes.some((p) => p.args.some((a) => /^--no-veri(?:f|fy)?$/.test(a)) || p.globals.some(isHooksPathKey)) || envSetsHooksPath(segs);
+    pushes.some((p) => p.args.some((a) => /^--no-veri(?:f|fy)?$/.test(a)) || p.globals.some(isHooksPathKey)) || envSetsHooksPath(segs, dialect);
   return { push: true, bypass };
 }
 
@@ -368,7 +394,7 @@ function gitPushes(command, textExempt, dialect) {
  * sh -c / bash -c 等的引号载荷再分类一次（bash -c "git push" 拦得住），几种结果取最严的。
  * 依赖引号边界的判断（git push、gh pr create、引号载荷）都按 sh、ps 两种方言各做一遍（见 DIALECTS），取较严的结果。
  */
-export function classify(command, depth = 0, outerReexec = false) {
+function classifyNew(command, depth = 0, outerReexec = false) {
   // gh 允许全局选项（-R owner/repo 等），所以用“同一段命令内出现 pr merge”来判断；gh.exe 与 git.exe 同样识别
   if (/\bgh(?:\.exe)?\b[^\n;&|]*\bpr\s+merge\b/.test(command) || /\bgh(?:\.exe)?\b[^\n]*\/pulls\/\d+\/merge/.test(command)) return 'merge';
   // 外层有可再执行结构（bash -c "echo …" | sh）时，载荷里同样不适用文本命令例外
@@ -390,11 +416,194 @@ export function classify(command, depth = 0, outerReexec = false) {
     ];
     for (const inner of inners) {
       let m;
-      while ((m = inner.exec(command)) !== null) raise(classify(m[1] ?? m[2] ?? '', depth + 1, reexec));
+      while ((m = inner.exec(command)) !== null) raise(classifyNew(m[1] ?? m[2] ?? '', depth + 1, reexec));
     }
   }
   return kind;
 }
+
+/**
+ * 新判定比旧判定松时，能不能取新判定：只有一种情形——命令里找到的 git push 全是文本命令（TEXT_COMMANDS）的参数
+ * （两种方言下都如此，且至少找到一个；在子表达式里的不算文本命令参数），两种方言切词都没有未收尾的引号，
+ * 整条命令也没有可再执行的结构（mayReexec 为假）。这时旧判定的 push / bypass 是把 echo git push 这类文字当成了命令。
+ */
+function relaxable(command) {
+  if (mayReexec(command)) return false;
+  let textPushes = 0;
+  for (const d of DIALECTS) {
+    const info = {};
+    const segs = shellSegments(command, d, info);
+    if (info.unclosed) return false;
+    for (const seg of segs) {
+      for (const x of scanPushes(seg, d)) {
+        if (!x.textArg) return false;
+        textPushes++;
+      }
+    }
+  }
+  return textPushes > 0;
+}
+
+/**
+ * 判断命令属于哪一类：merge（拒绝）、bypass（跳过 git 钩子的推送，拒绝）、push（先核对）、other（放行）。
+ * 结果不比旧判定（legacyClassify，main 上首版的算法）松：取新判定（classifyNew）与旧判定中较严的；
+ * 唯一例外是旧判定判 push / bypass、新判定判 other，且 relaxable 的条件全部满足（文本命令参数里的 git push），这时取新判定。
+ * 这样新判定切词上的任何疏漏（如引号被误判为没收尾、吞掉后面的推送）都不会让结果比旧判定松。
+ */
+export function classify(command) {
+  const fresh = classifyNew(command);
+  const old = legacyClassify(command);
+  if (RANK[fresh] >= RANK[old]) return fresh;
+  if (fresh === 'other' && relaxable(command)) return fresh;
+  return old;
+}
+
+// ---------------------------------------------------------------------------------------------
+// 旧判定（main 上 0.7.0 首版的判定逻辑，原样复制，只把标识符加了 legacy 前缀、去掉 export 和共用的 RANK）。
+// 用途：作为新判定的下限——classify 的结果取两者较严的，新判定只在 relaxable 的条件全部满足时才能比它松
+// （见 classify 上方的说明）。不要修改这一段；要改判定口径，改上面的新判定。
+// ---------------------------------------------------------------------------------------------
+
+/** 把引号里的内容去掉（只留空引号），使提交说明、grep 关键字里的 “git push” 不被当成命令。 */
+function legacyStripQuoted(command) {
+  return command.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '""');
+}
+
+/** 一段 git push 命令：全局选项（-C、-c、--xxx）在第 1 组，push 之后到本段结束（; & | 换行）的参数在第 2 组。 */
+const LEGACY_GIT_PUSH = /\bgit(?:\.exe)?((?:\s+(?:-C\s+\S+|-c\s+\S+|--?[\w-]+(?:=\S+)?))*)\s+push\b([^\n;&|]*)/g;
+
+/**
+ * 按 shell 的规则把命令切成段（引号外的 ; & | 换行分段）和词：引号去掉、内容保留（"--no-verify" 与 --no-verify 是同一个词），
+ * 双引号里认反斜杠转义。返回 [[词, ...], ...]。只做判断用，不追求完整的 shell 语法（不处理换行续行、子命令替换等）。
+ */
+function legacyShellSegments(command) {
+  const segs = [];
+  let words = [];
+  let cur = null;
+  const flush = () => {
+    if (cur !== null) words.push(cur);
+    cur = null;
+  };
+  const endSeg = () => {
+    flush();
+    if (words.length) segs.push(words);
+    words = [];
+  };
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === '"' || ch === "'") {
+      let j = i + 1;
+      let text = '';
+      for (; j < command.length && command[j] !== ch; j++) {
+        if (ch === '"' && command[j] === '\\' && j + 1 < command.length) text += command[++j];
+        else text += command[j];
+      }
+      cur = (cur ?? '') + text;
+      i = j; // 停在收尾引号上（没有收尾引号时到结尾）
+    } else if (/[;&|\n]/.test(ch)) endSeg();
+    else if (/\s/.test(ch)) flush();
+    else cur = (cur ?? '') + ch;
+  }
+  endSeg();
+  return segs;
+}
+
+/** git 的可执行文件名（git、git.exe，允许带路径）。 */
+const LEGACY_GIT_EXE = /(?:^|[\\/])git(?:\.exe)?$/i;
+
+/** 一个配置项写法（core.hooksPath=…，或 --config-env 的 core.hooksPath=ENV）的键是不是 core.hooksPath（不分大小写）。 */
+const legacyIsHooksPathKey = (s) => s.split('=')[0].trim().toLowerCase() === 'core.hookspath';
+
+/**
+ * 一段命令里的 git push：返回 { globals: 全局选项设的配置项, args: push 之后的参数 }，不是 git push 时返回 null。
+ * git 与子命令之间的全局选项：-C <路径>、-c <键=值>、--config-env <键=环境变量>（也可写成 --config-env=…），其余 -x / --xxx[=…] 跳过。
+ */
+function legacyGitPushIn(words) {
+  for (let i = 0; i < words.length; i++) {
+    if (!LEGACY_GIT_EXE.test(words[i])) continue;
+    const globals = [];
+    let j = i + 1;
+    while (j < words.length && words[j].startsWith('-')) {
+      const w = words[j];
+      if (w === '-C' || w === '-c' || w === '--config-env') {
+        if (w !== '-C' && j + 1 < words.length) globals.push(words[j + 1]);
+        j += 2;
+      } else {
+        if (w.startsWith('--config-env=')) globals.push(w.slice('--config-env='.length));
+        j += 1;
+      }
+    }
+    if (words[j] === 'push') return { globals, args: words.slice(j + 1) };
+  }
+  return null;
+}
+
+/**
+ * 命令里的环境变量赋值有没有把 core.hooksPath 交给 git：GIT_CONFIG_KEY_<n>=core.hooksPath，或 GIT_CONFIG_PARAMETERS 里含 core.hooksPath。
+ * 只认赋值位置：一段命令开头的 名字=值（前面可有 env、export、set），以及 PowerShell 的 $env:名字=值（= 两边可有空格）；echo 的参数之类不算。
+ */
+function legacyEnvSetsHooksPath(segs) {
+  const hit = (name, value) =>
+    (/^GIT_CONFIG_KEY_\d+$/i.test(name) && legacyIsHooksPathKey(value)) || (/^GIT_CONFIG_PARAMETERS$/i.test(name) && /core\.hookspath/i.test(value));
+  for (const words of segs) {
+    let i = 0;
+    if (/^\$env:/i.test(words[0] ?? '')) {
+      const joined = words.join(' ');
+      const m = /^\$env:([\w]+)\s*=\s*(.*)$/i.exec(joined);
+      if (m && hit(m[1], m[2])) return true;
+      continue;
+    }
+    if (['env', 'export', 'set'].includes(words[0])) i = 1;
+    for (; i < words.length; i++) {
+      const m = /^([A-Za-z_]\w*)=(.*)$/s.exec(words[i]);
+      if (!m) break;
+      if (hit(m[1], m[2])) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 命令里有没有跳过 git 钩子的 git push（逐段按 shell 词判断，引号里的文字不是参数，但被引号包住的整个词照样是参数）：
+ *   push 的参数里有 --no-verify（git 接受唯一前缀，--no-veri、--no-verif 同样生效）；-n 是 --dry-run，不算；
+ *   git 与 push 之间的全局选项设了 core.hooksPath（-c、--config-env）；
+ *   命令里用环境变量（GIT_CONFIG_KEY_<n>、GIT_CONFIG_PARAMETERS）设了 core.hooksPath，且有 git push。
+ * 局限：换行续行（\ 或 `）、子命令替换、别名、事先 git config 写进配置文件的都不处理。
+ */
+function legacySkipsGitHooks(command) {
+  const segs = legacyShellSegments(command);
+  const pushes = segs.map(legacyGitPushIn).filter(Boolean);
+  if (pushes.length === 0) return false;
+  for (const p of pushes) {
+    if (p.args.some((a) => /^--no-veri(?:f|fy)?$/.test(a))) return true;
+    if (p.globals.some(legacyIsHooksPathKey)) return true;
+  }
+  return legacyEnvSetsHooksPath(segs);
+}
+
+/**
+ * 判断命令属于哪一类：merge（拒绝）、bypass（跳过 git 钩子的推送，拒绝）、push（先核对）、other（放行）。
+ * merge 从严：直接在原始文本上匹配，引号里也拦（gh api "…/merge" 不能绕过）。
+ * push 与 bypass 只看引号外的命令；sh -c / bash -c 等的引号载荷再分类一次（bash -c "git push" 拦得住），几种结果取最严的。
+ */
+function legacyClassify(command, depth = 0) {
+  // gh 允许全局选项（-R owner/repo 等），所以用“同一段命令内出现 pr merge”来判断；gh.exe 与 git.exe 同样识别
+  if (/\bgh(?:\.exe)?\b[^\n;&|]*\bpr\s+merge\b/.test(command) || /\bgh(?:\.exe)?\b[^\n]*\/pulls\/\d+\/merge/.test(command)) return 'merge';
+  const bare = legacyStripQuoted(command);
+  let kind = 'other';
+  if (legacySkipsGitHooks(command)) kind = 'bypass';
+  else if (new RegExp(LEGACY_GIT_PUSH.source).test(bare) || /\bgh(?:\.exe)?\b[^\n;&|]*\bpr\s+create\b/.test(bare)) kind = 'push';
+  if (depth < 3) {
+    const inner = /\b(?:bash|sh|zsh|pwsh|powershell|cmd)\s+(?:-c|-Command|\/c)\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')/gi;
+    let m;
+    while ((m = inner.exec(command)) !== null) {
+      const k = legacyClassify(m[1] ?? m[2] ?? '', depth + 1);
+      if (RANK[k] > RANK[kind]) kind = k;
+    }
+  }
+  return kind;
+}
+// ---------------------------- 旧判定结束 ----------------------------
 
 function main() {
   let input;

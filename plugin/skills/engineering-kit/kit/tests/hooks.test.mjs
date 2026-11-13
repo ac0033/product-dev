@@ -110,7 +110,9 @@ test('双引号里只认 sh 的转义（反斜杠后跟引号、反斜杠、美�
   assert.deepEqual(shellSegments(String.raw`git commit -m "说明 \"git push --no-verify\" 会被拦"`, 'sh'), [['git', 'commit', '-m', '说明 "git push --no-verify" 会被拦']]);
   // 两种方言取严（PR #21 M2）：按 PowerShell 方言 \" 不是转义，git push 露在引号外，判 push（偏严，见 SKILL.md 第 6 节）
   assert.equal(classify(String.raw`git commit -m "说明 \"git push --no-verify\" 会被拦"`), 'push');
-  assert.equal(classify(String.raw`git push origin "--no-\verify"`), 'push');
+  assert.deepEqual(shellSegments(String.raw`git push origin "--no-\verify"`, 'sh'), [['git', 'push', 'origin', String.raw`--no-\verify`]]);
+  // 旧判定兜底（PR #21 M3）：main 的判定把它当作 --no-verify，结果取较严，判 bypass（偏严）
+  assert.equal(classify(String.raw`git push origin "--no-\verify"`), 'bypass');
 });
 
 test('git push 在一段命令里任何位置都算：带独立值的全局选项、env 的选项、任意包装命令之后都认得出；只有只输出文本的命令（echo、grep 等）的参数不算（PR #11 后续 2）', () => {
@@ -226,4 +228,43 @@ test('文本命令例外在 ( $( { 开头的子命令里不适用：子表达式
   assert.equal(classify('Add-Content p.ps1 (Write-Output git push --no-verify); & ./p.ps1'), 'bypass');
   assert.equal(classify('{ echo git push --no-verify; }'), 'bypass');
   assert.equal(classify('echo git push --no-verify'), 'other');
+});
+
+test('引号不被误判为没收尾：sh 的引号外反斜杠转义、PowerShell 的 here-string 都认，后面的推送不被吞掉（PR #21 M3）', () => {
+  assert.equal(classify(String.raw`git commit -m 'don'\''t panic' && git push --no-verify`), 'bypass');
+  assert.equal(classify(String.raw`git commit -m 'fix: don'\''t' ; git push`), 'push');
+  assert.equal(classify(String.raw`echo it\'s; git push --no-verify`), 'bypass');
+  assert.equal(classify(String.raw`git commit -m @'
+fix: don't block
+'@; git push origin feat`), 'push');
+  assert.equal(classify(String.raw`git commit -m @"
+fix: 5" screen
+"@; git push origin feat`), 'push');
+  assert.equal(classify(String.raw`git commit -m @'
+fix: don't block
+'@; git push --no-verify`), 'bypass');
+  // 切词本身：sh 引号外 \x 是 x；PowerShell here-string 的内容是一个词
+  assert.deepEqual(shellSegments(String.raw`echo it\'s`, 'sh'), [['echo', "it's"]]);
+  assert.deepEqual(shellSegments(String.raw`git commit -m @'
+a'b
+'@`, 'ps'), [['git', 'commit', '-m', "a'b"]]);
+  // 文本命令的参数仍不算
+  assert.equal(classify('echo git push --no-verify'), 'other');
+  assert.equal(classify('grep -rn git push docs'), 'other');
+  assert.equal(classify('Write-Host git push --no-verify'), 'other');
+});
+
+test('旧判定兜底：结果不比 main 的判定松，唯一例外是没有未收尾引号、没有可再执行结构时文本命令参数里的 git push（PR #21 M3）', () => {
+  // 只有旧判定认得出的：未收尾的引号把后面吞掉时，旧判定仍按推送核对
+  assert.equal(classify('echo "x; git push --no-verify'), 'push');
+  assert.equal(classify("echo 'x; git push origin feat"), 'push');
+  assert.equal(classify('Write-Host "x; git push --no-verify'), 'push');
+  // 文本命令参数里的 git push 后面跟着未收尾的引号：不适用放宽，取旧判定
+  assert.equal(classify('echo git push --no-verify "unclosed'), 'bypass');
+  assert.equal(classify("Write-Output git push --no-verify 'unclosed"), 'bypass');
+  // 旧判定把 "--no-\verify" 当作 --no-verify：取较严（git 实际收到的是 --no-\verify，接受这个偏严）
+  assert.equal(classify(String.raw`git push origin "--no-\verify"`), 'bypass');
+  // 放宽的条件全部满足时取新判定
+  assert.equal(classify('echo git push --no-verify'), 'other');
+  assert.equal(classify('printf "%s" x git push'), 'other');
 });
