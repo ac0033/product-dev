@@ -554,6 +554,16 @@ test('N2 同一行写法与标题行口径一致：井号后都要有空格', ()
   assert.deepEqual(missingSections('-范围：x\n', ['范围']), ['范围'], '列表符后也要有空格');
 });
 
+test('L1 同一行写法的正则不回溯：很长的嵌套引用、列表符、井号加空白，匹配失败也在短时间内返回', () => {
+  const started = Date.now();
+  for (const unit of ['> ', '-  ', '#  ', '> -  # ', ' \t']) {
+    const line = `${unit.repeat(60)}不是节名`;
+    assert.deepEqual(missingSections(`${line}\n`, ['范围', '发现', '作者的验证']), ['范围', '发现', '作者的验证'], JSON.stringify(unit));
+  }
+  assert.ok(Date.now() - started < 2000, `耗时 ${Date.now() - started} ms，疑似回溯`);
+  assert.deepEqual(missingSections(`${'> '.repeat(30)}范围：x\n`, ['范围']), [], '嵌套引用里的同一行写法照常认');
+});
+
 test('N3 围栏没闭合：其后的节认不出，提示里说明是围栏没闭合并指出行号；闭合后正常', () => {
   const unclosed = '## 范围\n读了。\n```text\n贴的输出\n## 发现\n无\n## 作者的验证\n核对了\n## 结论\n通过。\n';
   assert.deepEqual(missingSections(unclosed, ['范围', '发现', '作者的验证']), ['发现', '作者的验证']);

@@ -868,8 +868,14 @@ export const CODEX_PASSIVE_ITEMS = ['agent_message', 'reasoning', 'error', 'todo
  */
 export const CODEX_VERIFIED = { platforms: ['win32'], versions: ['0.167.0-alpha.3.2'] };
 
-/** 会话记录里工具调用被拒绝的输出特征：关掉 code_mode_host 后是“code-mode host is disabled … fail closed”，宿主程序缺失时是“failed to spawn code-mode host”。 */
-const BLOCKED_TOOL_OUTPUT = /code[- ]mode host|fail(?:s|ed)? closed|code mode is unavailable/i;
+/**
+ * 会话记录里工具调用被拒绝的输出特征：关掉 code_mode_host 后是“Code Mode is unavailable because code-mode host is disabled …”，
+ * 宿主程序缺失时是“failed to spawn code-mode host …”。整段输出必须以这两种开头之一，且是不超过 600 字的单行：
+ * 工具真执行了、输出里只是夹带这几个词（读到含这些词的文件、命令自己 echo）的，不能当成被拒绝。
+ * 取不到的写法一律按“工具执行过”处理（偏严）；Codex 换了拒绝文案时，被拒绝的调用会让复审作废，需要更新这条。
+ */
+const BLOCKED_TOOL_OUTPUT = /^\s*(?:failed to spawn code-mode host\b|Code Mode is unavailable\b)/i;
+const isBlockedOutput = (out) => typeof out === 'string' && out.length <= 600 && !/[\r\n]/.test(out.trim()) && BLOCKED_TOOL_OUTPUT.test(out);
 
 /** 会话记录里 item_completed 事件中不算工具的条目类型（已转成小写加下划线）：用户消息、回答、推理、错误、待办、计划。 */
 const ROLLOUT_PASSIVE_ITEMS = [...CODEX_PASSIVE_ITEMS, 'user_message', 'plan'];
@@ -898,7 +904,7 @@ export function scanCodexTools(events, records) {
     if (!isObj(p) || typeof p.type !== 'string') continue;
     if (r.type === 'response_item' && p.type.endsWith('_call')) {
       const out = p.call_id ? outputs.get(`${p.type}\u0000${p.call_id}`) : undefined;
-      if (out !== undefined && BLOCKED_TOOL_OUTPUT.test(out)) blocked++;
+      if (out !== undefined && isBlockedOutput(out)) blocked++;
       else ran.add(p.type);
     } else if (r.type === 'event_msg') {
       if (/_(begin|end)$/.test(p.type)) ran.add(p.type);
