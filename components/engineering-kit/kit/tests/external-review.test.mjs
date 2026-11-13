@@ -120,6 +120,26 @@ async function run(root, head, mode, extra = {}) {
 /** 用适配器的报告登记。 */
 const register = (root, head, verdict, reportPath) => recordReview({ root, verdict, reviewer: 'external:fake', reportPath, summary: 's', pr: '7', kind: 'code', gh: fakeGh([head]), viaExternalReview: true });
 
+test('external: 开头的复审者名不能手动登记（pre-push 流程）：直接调用和命令行都拒绝，defer 不受影响', () => {
+  const root = featureRepo({ reviewers: ['feature-dev:code-reviewer', 'external:fake'], externalExecutors: ['fake'] });
+  write(root, 'src/auth.ts', '// 权限模块：删除记录前校验所有者。\nexport function canDelete() {\n  return true;\n}\n');
+  commitAll(root, 'feat');
+  const report = path.join(tmpDir('ekit-xr-'), 'report.md');
+  fs.writeFileSync(report, '## 范围\nx\n');
+  for (const verdict of ['pass', 'fail']) {
+    const r = recordReview({ root, verdict, reviewer: 'external:fake', reportPath: report, summary: 's' });
+    assert.equal(r.ok, false, verdict);
+    assert.match(r.message, /只能由 external-review\.mjs 登记/);
+  }
+  const cli = fileURLToPath(new URL('../gate/review.mjs', import.meta.url));
+  const c = spawnSync(process.execPath, [cli, 'pass', '--reviewer', 'external:fake', '--report', report, '--summary', 's'], { cwd: root, encoding: 'utf8' });
+  assert.equal(c.status, 1, c.stdout + c.stderr);
+  assert.match(c.stdout + c.stderr, /只能由 external-review\.mjs 登记/);
+  // 一致性审延期不带复审者名，不受这条限制拦截（被拒也不会是这条原因）
+  const d = recordReview({ root, verdict: 'defer', kind: 'consistency', reason: '测试' });
+  assert.doesNotMatch(d.message, /只能由 external-review\.mjs 登记/);
+});
+
 test('external: 开头的复审者名不能手动登记：直接调 recordReview 和命令行 review.mjs 都拒绝，适配器自己的登记不受影响', async () => {
   const { root, head } = repo();
   const res = await run(root, head, 'pass');
