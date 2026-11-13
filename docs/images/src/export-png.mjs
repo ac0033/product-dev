@@ -15,7 +15,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const prof = fs.mkdtempSync(path.join(os.tmpdir(), 'archify-export-'));
 const proc = spawn(chrome, ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${prof}`, '--no-first-run', '--hide-scrollbars', 'about:blank'], { stdio: 'ignore' });
 let ws;
-const watchdog = setTimeout(() => { console.error('导出失败：总时长超过 ' + TOTAL_MS / 1000 + ' 秒'); proc.kill(); try { fs.rmSync(prof, { recursive: true, force: true }); } catch {} process.exit(1); }, TOTAL_MS);
+// 总时长超时：关掉 Chrome，等它释放用户数据目录里的文件后再删（与 finally 一样等 500 毫秒）。
+const watchdog = setTimeout(async () => { console.error('导出失败：总时长超过 ' + TOTAL_MS / 1000 + ' 秒'); proc.kill(); await sleep(500); try { fs.rmSync(prof, { recursive: true, force: true }); } catch {} process.exit(1); }, TOTAL_MS);
+// 启动失败（可执行文件不存在等）时 spawn 触发 error 事件：照样删临时目录后退出，不留未处理的异常。
+proc.once('error', (e) => { console.error('导出失败：无法启动 Chrome（' + chrome + '）：' + e.message + '；可用环境变量 ARCHIFY_CHROME 指定路径'); clearTimeout(watchdog); try { fs.rmSync(prof, { recursive: true, force: true }); } catch {} process.exit(1); });
 
 // 等条件成立，最多 limitMs；超时抛错而不是继续。
 async function until(what, fn, limitMs) {
