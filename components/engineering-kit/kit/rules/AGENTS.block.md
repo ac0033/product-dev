@@ -8,7 +8,7 @@
 2. 方案：中高风险（跨模块、新接口、数据库结构、权限、费用、服务器配置）先澄清并取得确认，写功能契约（docs/_templates/feature-contract.md）。
 3. 开发：测试先行；源文件要有业务注释；新顶层目录须在白名单内。
 4. 闸门：`node scripts/engineering/gate/gate.mjs` 通过后，才复审或推送（配了测试分组的，修改中可加 `--affected` 只跑受影响的分组，`pre-push` 流程最终推送前跑一次全量）。复审流程看 engineering.config.json 的 `modules.gate.reviewFlow`（`pre-push` 默认，或 `pr`）。
-5. 复审（独立复审者：宿主子代理或外部执行器）：`pre-push` 在推送前做，`node scripts/engineering/gate/review.mjs pass --reviewer <名> --report <报告> --summary "<一句话>"`；`pr` 对 PR 做代码复审和一致性审（只改文档的 PR 不审；复审可以与 CI 并行开始；CI 全部通过后才登记、合并），同一命令加 `--pr <编号> --kind code|consistency`（可延期的一致性审用 `defer --pr <编号> --kind consistency --reason "<理由>"`）；已审满轮次上限仍需再审的，向用户说明后带 `--user-decision "<用户的决定及出处>"` 登记，用户决定接受问题的登记 `accept`。
+5. 复审（独立复审者：宿主子代理、外部执行器，或宿主没有子代理时用户另开的全新会话）：`pre-push` 在推送前做，`node scripts/engineering/gate/review.mjs pass --reviewer <名> --report <报告> --summary "<一句话>"`；`pr` 对 PR 做代码复审和一致性审（只改文档的 PR 不审；复审可以与 CI 并行开始；CI 全部通过后才登记、合并），同一命令加 `--pr <编号> --kind code|consistency`（可延期的一致性审用 `defer --pr <编号> --kind consistency --reason "<理由>"`）；已审满轮次上限仍需再审的，向用户说明后带 `--user-decision "<用户的决定及出处>"` 登记，用户决定接受问题的登记 `accept`。
 6. 推送与合并：pre-push 钩子核对推送；不得直接 `gh pr merge`。`pr` 流程只经 `node scripts/engineering/gate/merge.mjs <PR>` 合并；`pre-push` 流程走项目约定的入口，并等 CI 全部通过。
 7. 收工与巡检：按 R10 收工；定期运行 `node scripts/engineering/gate/hygiene.mjs`。
 

@@ -271,7 +271,7 @@ test('分流与次序：授权的实质句子、缩短路线的步骤、两种�
   assert.ok(ENTRY.includes('独立复审排在机械闸门之后、推送之前'), '入口没有写对 pre-push 流程的次序');
   assert.ok(ENTRY.includes('小改动的独立复审排在闸门之后、推送之前'), '缩短路线没有写对 pre-push 流程的次序');
   const proc = read('skills/engineering-kit/references/process.md'); // 两种流程的次序写在套件版第 4 节，入口版链接过去
-  assert.ok(proc.includes('`gate.mjs` 通过后由独立复审者（宿主子代理或外部执行器，不共享作者上下文）复审') && proc.includes('`gate.mjs` 通过后即可推送'), '套件版 process.md 里两种流程的次序走样了');
+  assert.ok(proc.includes('`gate.mjs` 通过后由独立复审者（宿主子代理、外部执行器，或宿主没有子代理时用户另开的全新会话，都不共享作者上下文）复审') && proc.includes('`gate.mjs` 通过后即可推送'), '套件版 process.md 里两种流程的次序走样了');
 });
 
 test('命令参数：文档里给脚本写的参数，脚本里都有', () => {
