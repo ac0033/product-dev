@@ -663,6 +663,9 @@ test('L-h 会话记录核对：调用条目要有“被拒绝”的输出才算�
   ]) assert.deepEqual(withOutput(out), { ran: ['function_call'], blocked: 0 }, JSON.stringify(out).slice(0, 60));
   assert.deepEqual(withOutput(`  ${blockedOut}  `).blocked, 1, '前后空白允许');
   assert.deepEqual(withOutput('Code Mode is unavailable because code-mode host is disabled.').blocked, 1);
+  // 真实会话记录里的两种拒绝输出原文（codex-cli 0.167.0-alpha.3.2，Windows）：关闭开关后整段只有一句；宿主缺失时带路径和系统错误
+  assert.deepEqual(withOutput('code-mode host is disabled'), { ran: [], blocked: 1 });
+  assert.deepEqual(withOutput('failed to spawn code-mode host C:\\Users\\someone\\AppData\\Roaming\\npm\\codex-code-mode-host.exe: 系统找不到指定的文件。 (os error 2)'), { ran: [], blocked: 1 });
   // 执行事件与不在允许清单里的条目
   assert.deepEqual(scanCodexTools([], [rec('event_msg', { type: 'exec_command_begin' }), rec('event_msg', { type: 'patch_apply_end' })]).ran, ['exec_command_begin', 'patch_apply_end']);
   assert.deepEqual(scanCodexTools([], [rec('event_msg', { type: 'item_completed', item: { type: 'CommandExecution' } })]).ran, ['command_execution']);
@@ -694,7 +697,7 @@ test('L-h Codex 解析：会话记录里的工具调用判失败；被拒绝的�
   assert.equal(ran.status, 'failed');
   assert.match(ran.error, /执行了工具（function_call）.*这次复审作废/);
   // 被拒绝：完成，局限里写明次数；已实测的环境不加“未实测”
-  const denied = { type: 'response_item', payload: { type: 'function_call_output', call_id: 'c1', output: 'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed.' } };
+  const denied = { type: 'response_item', payload: { type: 'function_call_output', call_id: 'c1', output: 'code-mode host is disabled' } };
   const ok = parseCodex(stdout, lines(meta(CODEX_VERIFIED.versions[0]), call, denied), request, { platform: 'win32' });
   assert.equal(ok.status, 'completed');
   assert.ok(ok.review.limitations.some((l) => /模型曾尝试调用工具 1 次，都被拒绝/.test(l)), ok.review.limitations.join('|'));

@@ -869,12 +869,14 @@ export const CODEX_PASSIVE_ITEMS = ['agent_message', 'reasoning', 'error', 'todo
 export const CODEX_VERIFIED = { platforms: ['win32'], versions: ['0.167.0-alpha.3.2'] };
 
 /**
- * 会话记录里工具调用被拒绝的输出特征：关掉 code_mode_host 后是“Code Mode is unavailable because code-mode host is disabled …”，
- * 宿主程序缺失时是“failed to spawn code-mode host …”。整段输出必须以这两种开头之一，且是不超过 600 字的单行：
+ * 会话记录里工具调用被拒绝的输出特征（本机 codex-cli 0.167.0-alpha.3.2 的真实会话记录）：关掉 code_mode_host 后整段输出就是“code-mode host is disabled”，
+ * 宿主程序缺失时是“failed to spawn code-mode host <路径>: …”；事件流的 error 条目里另有“Code Mode is unavailable because …”的写法，一并认。
+ * 整段输出必须以这几种开头之一，且是不超过 600 字的单行：
  * 工具真执行了、输出里只是夹带这几个词（读到含这些词的文件、命令自己 echo）的，不能当成被拒绝。
  * 取不到的写法一律按“工具执行过”处理（偏严）；Codex 换了拒绝文案时，被拒绝的调用会让复审作废，需要更新这条。
+ * 锚定开头的单行仍可被刻意构造（工具真执行了、只输出这样一行）：这条只防误伤，不防对抗；主控制是关闭 code_mode_host，未实测的环境另有“运行环境未实测”标注。
  */
-const BLOCKED_TOOL_OUTPUT = /^\s*(?:failed to spawn code-mode host\b|Code Mode is unavailable\b)/i;
+const BLOCKED_TOOL_OUTPUT = /^\s*(?:failed to spawn code-mode host\b|code-mode host is disabled\b|Code Mode is unavailable\b)/i;
 const isBlockedOutput = (out) => typeof out === 'string' && out.length <= 600 && !/[\r\n]/.test(out.trim()) && BLOCKED_TOOL_OUTPUT.test(out);
 
 /** 会话记录里 item_completed 事件中不算工具的条目类型（已转成小写加下划线）：用户消息、回答、推理、错误、待办、计划。 */

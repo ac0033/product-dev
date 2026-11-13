@@ -81,7 +81,7 @@
 - **会话记录的条目类型（离线核对，没有新调用 Codex）**：取模型对比时留下的 5 份会话记录（gpt-6-luna，Windows，codex-cli 0.167.0-alpha.3.2）统计条目类型。
   - `response_item`：`message`、`reasoning`、`additional_tools`（只是工具清单的声明）、`custom_tool_call`、`custom_tool_call_output`；`event_msg`：`task_started`、`thread_settings_applied`、`item_completed`（只有 `UserMessage`、`AgentMessage`、`Reasoning`）、`token_count`、`task_complete`。
   - 其中有一份里模型尝试调了一次 `exec`（`custom_tool_call`），对应输出是“failed to spawn code-mode host … os error 2”：调用被拒绝，没有工具执行。事件流里这次只有 `error` 条目，所以此前“只出现 `error` 和 `agent_message`”的结论指的是事件流。
-  - 据此，会话记录的核对按“调用条目要有被拒绝的输出才算没执行”写：有对应的拒绝输出只计入局限，没有输出、输出不是拒绝或类型不认识的一律当作工具执行过。“是拒绝”要求整段输出以“failed to spawn code-mode host”或“Code Mode is unavailable”开头、是不超过 600 字的单行（复审时发现子串匹配会被工具输出里夹带的这些词伪装，所以收紧）；Codex 换了拒绝文案时，被拒绝的调用会让复审作废，需要更新这条。这条规则靠离线样例核对，在能执行工具的平台上没有实测。
+  - 据此，会话记录的核对按“调用条目要有被拒绝的输出才算没执行”写：有对应的拒绝输出只计入局限，没有输出、输出不是拒绝或类型不认识的一律当作工具执行过。“是拒绝”要求整段输出以“failed to spawn code-mode host”（宿主缺失）、“code-mode host is disabled”（关闭开关后，真实会话记录里整段输出就是这一句）或“Code Mode is unavailable”（事件流里的写法）开头、是不超过 600 字的单行（复审时发现子串匹配会被工具输出里夹带的这些词伪装，所以收紧）；Codex 换了拒绝文案时，被拒绝的调用会让复审作废，需要更新这条。这条规则靠离线样例核对，在能执行工具的平台上没有实测。
 - **未实测环境的标注**：只有 Windows 加 codex-cli 0.167.0-alpha.3.2 实测过；换平台或版本时，报告的局限里自动写明“运行环境未实测”。
 
 ### CodeBuddy CLI（2.165.0，WorkBuddy AI 内置，放弃）
