@@ -8,7 +8,7 @@ import { checkComments } from '../gate/check-comments.mjs';
 import { checkTestFirst, referencesFile } from '../gate/check-test-first.mjs';
 import { acquireLock, changedFiles, loadConfig, readRecord, recordDir, scopeFiles, treeHash, writeRecord } from '../gate/lib.mjs';
 import { runGate } from '../gate/gate.mjs';
-import { branchDirName, missingSections, recordReview } from '../gate/review.mjs';
+import { branchDirName, markFences, missingSections, recordReview, reportVerdict } from '../gate/review.mjs';
 import { newFileProblems, verify } from '../gate/verify.mjs';
 import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, TEST_CONFIG, tmpRepo, trackTmp, write } from './helpers.mjs';
 
@@ -534,4 +534,67 @@ test('复审记录：reviewSections 可以按项目改写（只要求发现）',
   const root = reviewReadyRepo({ reviewMinChars: undefined, reviewSections: ['发现'] });
   const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile('## 发现\n无\n## 结论\n通过。没有问题。\n'), summary: 's' });
   assert.equal(r.ok, true, r.message);
+});
+
+// ---------- 必需的节与结论：围栏的几种写法（N1–N3 与 reportVerdict 跳过围栏） ----------
+
+test('N1 空围栏不算内容：只有两行围栏标记的节算空；围栏里有字的照常算', () => {
+  assert.deepEqual(missingSections('## 范围\n```\n```\n## 发现\n无\n', ['范围', '发现']), ['范围'], '只有空围栏的节');
+  assert.deepEqual(missingSections('## 范围\n~~~\n\n~~~\n## 发现\n无\n', ['范围', '发现']), ['范围'], '围栏里只有空行，波浪线围栏也一样');
+  assert.deepEqual(missingSections('## 范围\n```text\n```\n## 发现\n无\n', ['范围', '发现']), ['范围'], '带说明文字的空围栏');
+  assert.deepEqual(missingSections('## 范围\n```\n读了 a.ts\n```\n## 发现\n无\n', ['范围', '发现']), [], '围栏里有内容算有内容');
+  assert.deepEqual(missingSections('## 范围\n```\n```\n读了 a.ts\n## 发现\n无\n', ['范围', '发现']), [], '空围栏之外另有内容');
+});
+
+test('N2 同一行写法与标题行口径一致：井号后都要有空格', () => {
+  assert.deepEqual(missingSections('##范围：x\n## 发现\n无\n', ['范围', '发现']), ['范围'], '“##范围：x”不认');
+  assert.deepEqual(missingSections('## 范围：x\n## 发现\n无\n', ['范围', '发现']), [], '“## 范围：x”认');
+  assert.deepEqual(missingSections('##范围\nx\n## 发现\n无\n', ['范围', '发现']), ['范围'], '“##范围”作标题也不认，两种写法同一口径');
+  assert.deepEqual(missingSections('> **范围**：x\n- 发现：无\n', ['范围', '发现']), [], '引用符、列表符、星号照常认');
+  assert.deepEqual(missingSections('-范围：x\n', ['范围']), ['范围'], '列表符后也要有空格');
+});
+
+test('L1 同一行写法的正则不回溯：很长的嵌套引用、列表符、井号加空白，匹配失败也在短时间内返回', () => {
+  const started = Date.now();
+  for (const unit of ['> ', '-  ', '#  ', '> -  # ', ' \t']) {
+    const line = `${unit.repeat(60)}不是节名`;
+    assert.deepEqual(missingSections(`${line}\n`, ['范围', '发现', '作者的验证']), ['范围', '发现', '作者的验证'], JSON.stringify(unit));
+  }
+  assert.ok(Date.now() - started < 2000, `耗时 ${Date.now() - started} ms，疑似回溯`);
+  assert.deepEqual(missingSections(`${'> '.repeat(30)}范围：x\n`, ['范围']), [], '嵌套引用里的同一行写法照常认');
+});
+
+test('N3 围栏没闭合：其后的节认不出，提示里说明是围栏没闭合并指出行号；闭合后正常', () => {
+  const unclosed = '## 范围\n读了。\n```text\n贴的输出\n## 发现\n无\n## 作者的验证\n核对了\n## 结论\n通过。\n';
+  assert.deepEqual(missingSections(unclosed, ['范围', '发现', '作者的验证']), ['发现', '作者的验证']);
+  const root = reviewReadyRepo({ reviewMinChars: undefined });
+  const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile(unclosed), summary: 's' });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /缺少必需的节：发现、作者的验证/);
+  assert.match(r.message, /第 3 行起的代码围栏没有闭合/);
+  const noVerdict = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile('## 范围\n读了。\n## 发现\n无\n## 作者的验证\n核对了\n```\n结论：通过\n'), summary: 's' });
+  assert.equal(noVerdict.ok, false);
+  assert.match(noVerdict.message, /找不到明确的结论.*第 7 行起的代码围栏没有闭合/s);
+  assert.doesNotMatch(recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile('## 范围\n读了。\n'), summary: 's' }).message, /围栏/, '没有围栏问题时不提围栏');
+  const closed = unclosed.replace('贴的输出\n', '贴的输出\n```\n');
+  assert.deepEqual(missingSections(closed, ['范围', '发现', '作者的验证']), []);
+});
+
+test('围栏的闭合规则：闭合要同种字符、个数不少于开头、后面没有文字；四个反引号的围栏里可以放三个反引号的模板', () => {
+  const nested = '## 范围\n````markdown\n```\n## 发现\n无\n```\n````\n';
+  assert.deepEqual(missingSections(nested, ['范围', '发现']), ['发现'], '内层三个反引号不闭合外层，模板里的发现不算');
+  assert.equal(markFences(nested).unclosedAt, null);
+  assert.equal(markFences('```\n~~~\n').unclosedAt, 1, '波浪线不闭合反引号围栏');
+  assert.equal(markFences('````\n```\n').unclosedAt, 1, '较短的围栏不闭合较长的');
+  assert.equal(markFences('```js\n```\n').unclosedAt, null);
+  assert.equal(markFences('行内 ```code``` 不是围栏\n').unclosedAt, null);
+});
+
+test('reportVerdict 跳过代码围栏：围栏里的结论行与围栏里的“第一个非空行”都不算', () => {
+  const template = '## 结论\n```markdown\n结论：不通过。\n```\n';
+  assert.equal(reportVerdict(template).verdict, null, '只有围栏里的结论：认不出');
+  assert.equal(reportVerdict(`${template}\n结论：通过。无高、中级问题。\n`).verdict, 'pass', '围栏里的“不通过”不与围栏外的“通过”冲突');
+  assert.equal(reportVerdict('## 结论\n```\n不通过\n```\n通过。理由。\n').verdict, 'pass', '标题行之后跳过围栏找第一个非空行');
+  assert.equal(reportVerdict('````\n```\n结论：通过。\n```\n````\n').verdict, null, '嵌套围栏里的结论也不算');
+  assert.equal(reportVerdict('结论：通过。\n').verdict, 'pass', '没有围栏时照旧');
 });

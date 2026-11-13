@@ -87,9 +87,44 @@ function clauseVerdict(s) {
 }
 
 /**
+ * 逐行标出代码围栏。围栏用三个以上的反引号或波浪线开头（开头行的说明文字允许有，反引号围栏的说明文字里不能再有反引号），
+ * 闭合行要用同一种字符、个数不少于开头、后面没有别的文字（CommonMark 的写法），所以四个反引号的围栏里可以放三个反引号的模板。
+ * 比 CommonMark 宽松的地方：围栏标记前的缩进不限（CommonMark 只允许三个空格内，便于列表里缩进的围栏）；写在引用块（“>”开头）里的围栏不认。
+ * 返回 { lines, unclosedAt }：lines 的每项是 { text, fenced, marker }（fenced 是在围栏内，含两条围栏标记行；marker 是围栏标记行本身）；
+ * unclosedAt 是没闭合的围栏开头所在行号（从 1 数），都闭合了为 null。围栏没闭合时，其后的全部行都按围栏内处理。
+ */
+export function markFences(text) {
+  const lines = [];
+  let open = null; // { ch, len, at }
+  String(text).split(/\r?\n/).forEach((raw, i) => {
+    if (open) {
+      const close = /^\s*(`{3,}|~{3,})\s*$/.exec(raw);
+      if (close && close[1][0] === open.ch && close[1].length >= open.len) {
+        open = null;
+        lines.push({ text: raw, fenced: true, marker: true });
+      } else lines.push({ text: raw, fenced: true, marker: false });
+      return;
+    }
+    const start = /^\s*(`{3,}|~{3,})(.*)$/.exec(raw);
+    if (start && !(start[1][0] === '`' && start[2].includes('`'))) {
+      open = { ch: start[1][0], len: start[1].length, at: i + 1 };
+      lines.push({ text: raw, fenced: true, marker: true });
+    } else lines.push({ text: raw, fenced: false, marker: false });
+  });
+  return { lines, unclosedAt: open ? open.at : null };
+}
+
+/** 围栏没闭合时给提示用的说明：围栏里的行不能当标题或结论，没闭合时其后的内容全被当成围栏。没有未闭合的围栏返回空串。 */
+function fenceHint(text) {
+  const { unclosedAt } = markFences(text);
+  return unclosedAt === null ? '' : `；报告里第 ${unclosedAt} 行起的代码围栏没有闭合（要用同一种围栏符号再写一行结束），围栏里的行不当标题或结论，其后的各节和结论都会认不出`;
+}
+
+/**
  * 从报告里找出明确的结论。认两种写法（keyword 默认是“结论”，可配置），判定规则相同（clauseVerdict）：
  *   同一行：`结论：……`，行首允许井号、引用符、列表符，词两边允许星号，判定冒号后的文字。
  *   标题行：只有关键词的一行（如 `## 结论`），判定其后第一个非空行。
+ * 代码围栏里的行（含围栏标记行）不参与：报告把第 7 节模板原样放进围栏时，里面的“结论：通过”不能当真，标题行之后找“第一个非空行”也跳过围栏。
  * 返回 { verdict: 'pass'|'fail'|null, conflict, bracketed }：找不到时 verdict 为 null；出现多处且不一致时 conflict 为 true、verdict 为 null；
  * bracketed 表示有结论词后带括号的写法（没认作结论），提示里据此说明。
  */
@@ -97,13 +132,14 @@ export function reportVerdict(text, keyword = '结论') {
   const k = escapeRe(keyword);
   const heading = new RegExp(`^[\\s>#*_-]*${k}[\\s*_]*[:：]?[\\s*_]*$`);
   const inline = new RegExp(`^[\\s>#*_-]*${k}(?:[\\s*_]*[:：]|[\\s*_]+)[\\s*_]*(.+)$`);
-  const lines = String(text).split(/\r?\n/);
+  const { lines } = markFences(text);
   const found = [];
   let bracketed = false;
   for (let i = 0; i < lines.length; i++) {
+    if (lines[i].fenced) continue;
     let body = null;
-    if (heading.test(lines[i])) body = lines.slice(i + 1).find((l) => l.trim() !== '') ?? null;
-    else body = inline.exec(lines[i])?.[1] ?? null;
+    if (heading.test(lines[i].text)) body = lines.slice(i + 1).find((l) => !l.fenced && l.text.trim() !== '')?.text ?? null;
+    else body = inline.exec(lines[i].text)?.[1] ?? null;
     if (body === null) continue;
     const v = clauseVerdict(body);
     if (v.bracketed) bracketed = true;
@@ -117,23 +153,20 @@ export function reportVerdict(text, keyword = '结论') {
 
 /**
  * 报告里缺哪几节。一节算有，要同时满足：
- *   标题行：井号加空格开头（可带编号，如“## 1. 范围”“### 一、范围”），标题文字以节名开头，其后是空白、括号、冒号或行尾；或同一行写“节名：内容”（行首允许井号、引用符、列表符、星号）；
+ *   标题行：井号加空格开头（可带编号，如“## 1. 范围”“### 一、范围”），标题文字以节名开头，其后是空白、括号、冒号或行尾；或同一行写“节名：内容”
+ *     （行首可以有引用符、列表符、星号；有井号的话和标题行一样，井号后要有空格，“##范围：x”不认）；
  *   有内容：标题行之后、下一个同级或更高级标题之前至少有一个非空、非标题的行（更深一级的子标题本身不算内容）；同一行写法的冒号后要有字。
- * 代码围栏（```）里的行不能当标题，防止把模板原样放进围栏冒充各节；围栏里写的内容算所在一节的内容（例如“作者的验证”下直接贴测试输出）。节名只比较文字，不分大小写。
+ * 代码围栏（```）里的行不能当标题，防止把模板原样放进围栏冒充各节；围栏里写的内容算所在一节的内容（例如“作者的验证”下直接贴测试输出），
+ * 但围栏标记行本身不算：只有两行围栏标记、里面什么也没有的空围栏不算有内容。围栏没闭合时其后的行都按围栏内处理（markFences）。节名只比较文字，不分大小写。
  */
 export function missingSections(text, sections) {
-  // 逐行记下是否在代码围栏里：围栏里的行不能当标题（防止把模板原样放进围栏冒充各节），但围栏里写的内容算所在一节的内容
-  const lines = [];
-  let fenced = false;
-  for (const raw of String(text).split(/\r?\n/)) {
-    if (/^\s*(```|~~~)/.test(raw)) { fenced = !fenced; lines.push({ text: raw, fenced: true }); continue; }
-    lines.push({ text: raw, fenced });
-  }
+  const { lines } = markFences(text);
   const level = (l) => (l.fenced ? 0 : (/^\s{0,3}(#{1,6})\s/.exec(l.text)?.[1].length ?? 0));
   return sections.filter((name) => {
     const n = escapeRe(name);
     const head = new RegExp(`^\\s{0,3}(#{1,6})\\s+(?:\\d+[.、)）]?\\s*|[一二三四五六七八九十]+[、.]\\s*)?[*_]*${n}[*_]*(?:[\\s（(:：]|$)`, 'i');
-    const inline = new RegExp(`^[\\s>#*_-]*${n}[\\s*_]*[:：][\\s*_]*\\S`, 'i');
+    // 行首的引用符、列表符、井号各自吃掉自己后面的空白，组内不再另留 \s*：同一段空白只有一种分法，匹配失败时回溯量与行长成正比（有计时测试）
+    const inline = new RegExp(`^\\s*(?:(?:#{1,6}|[-*+])[ \\t]+|>[ \\t]*)*[*_]*${n}[\\s*_]*[:：][\\s*_]*\\S`, 'i');
     for (let i = 0; i < lines.length; i++) {
       if (lines[i].fenced) continue;
       if (inline.test(lines[i].text)) return false;
@@ -143,7 +176,7 @@ export function missingSections(text, sections) {
       for (let j = i + 1; j < lines.length; j++) {
         const lv = level(lines[j]);
         if (lv > 0 && lv <= depth) break;
-        if (lv === 0 && lines[j].text.trim() !== '') return false;
+        if (lv === 0 && !lines[j].marker && lines[j].text.trim() !== '') return false;
       }
     }
     return true;
@@ -181,16 +214,17 @@ function checkReport(config, expect, reviewer, reportPath, label = expect) {
   }
   const missing = missingSections(text, config.reviewSections);
   if (missing.length > 0) {
-    return { ok: false, message: `复审报告缺少必需的节：${missing.join('、')}（每节要有单独的标题行，如“## ${missing[0]}”，或同一行写“${missing[0]}：内容”，标题下要有内容；必需的节由 modules.review.reviewSections 配置，当前是 ${config.reviewSections.join('、')}；结论一节另按“${config.reviewKeyword}”判定）` };
+    return { ok: false, message: `复审报告缺少必需的节：${missing.join('、')}（每节要有单独的标题行，如“## ${missing[0]}”，或同一行写“${missing[0]}：内容”，标题下要有内容；必需的节由 modules.review.reviewSections 配置，当前是 ${config.reviewSections.join('、')}；结论一节另按“${config.reviewKeyword}”判定）${fenceHint(text)}` };
   }
   const kw = config.reviewKeyword;
   const how = `写法：同一行写“${kw}：通过。理由”或“${kw}：不通过。理由”，或者单独一行“## ${kw}”、其后第一个非空行写“通过。理由”或“不通过。理由”；结论词只认中文的通过、不通过、未通过，要单独成一个小句，结论词后不要加括号；全文只写一处结论`;
   if (!text.includes(kw)) return { ok: false, message: `复审报告缺少“${kw}”一节（${how}）` };
+  const hint = fenceHint(text);
   const found = reportVerdict(text, kw);
   if (found.conflict) return { ok: false, message: `复审报告里有多处结论且不一致，无法判定（${how}）` };
   if (!found.verdict) {
     const why = found.bracketed ? '：结论词后带了括号（如“通过（待 M2 修复后）”），这种写法不认，结论词后不要加括号' : '';
-    return { ok: false, message: `复审报告里找不到明确的结论${why}（${how}）` };
+    return { ok: false, message: `复审报告里找不到明确的结论${why}（${how}）${hint}` };
   }
   if (found.verdict !== expect) {
     if (label === 'accept') return { ok: false, message: `accept 要求报告结论为不通过（用户接受的是报告里未修复的问题），这份报告的结论是“通过”，应登记为 pass（${how}）` };

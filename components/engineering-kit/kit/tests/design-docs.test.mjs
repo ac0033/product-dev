@@ -154,6 +154,8 @@ test('升级：旧版扁平配置按顶层键判断——没写 requiredChecks�
   const bare = hints(flat);
   assert.ok(bare.some((m) => /modules\.gate\.requiredChecks/.test(m)), JSON.stringify(bare));
   assert.ok(bare.some((m) => /没有写 rules\.reviewIgnore/.test(m)), JSON.stringify(bare));
+  assert.match(bare.find((m) => /没有写 rules\.reviewIgnore/.test(m)), /有意用当前默认值的，把这个默认值原样写进配置也一样，写了以后同步不再提示/, '提示里说明怎样不再提示（F2）');
+  assert.deepEqual(hints({ ...flat, requiredChecks: [], reviewIgnore: template.rules.reviewIgnore }), [], '照抄默认值写进配置后不再提示');
   const set = hints({ ...flat, requiredChecks: [], reviewIgnore: ['docs/**/*.md'] });
   assert.deepEqual(set, [], '扁平配置写了这两个键就不提示');
   // profile 配置看 rules.reviewIgnore：模板写了就不提示“没有写”，删掉才提示
@@ -161,6 +163,21 @@ test('升级：旧版扁平配置按顶层键判断——没写 requiredChecks�
   const { reviewIgnore, ...rules } = template.rules;
   assert.ok(reviewIgnore);
   assert.ok(hints({ ...template, rules }).some((m) => /没有写 rules\.reviewIgnore/.test(m)));
+});
+
+test('L2 升级入口：旧版扁平配置显式写了 reviewMinChars: 0，同步升成 profile 后保留这个 0；没写的不凭空多出', () => {
+  const root = installedProject();
+  const flat = { base: 'main', reviewFlow: 'pre-push', sourceGlobs: ['src/**/*.ts'], testGlobs: ['test/**/*.ts'], reviewMinChars: 0, requiredChecks: [], reviewIgnore: ['docs/**/*.md'] };
+  write(root, 'engineering.config.json', JSON.stringify(flat, null, 2));
+  assert.equal(syncKit({ target: root, hooks: false }).ok, true);
+  const up = JSON.parse(read(root, 'engineering.config.json'));
+  assert.equal(up.profile, 2);
+  assert.equal(up.modules.review.reviewMinChars, 0, '显式的 0 保留');
+  const { reviewMinChars, ...noMin } = flat;
+  assert.ok(reviewMinChars === 0);
+  write(root, 'engineering.config.json', JSON.stringify(noMin, null, 2));
+  assert.equal(syncKit({ target: root, hooks: false }).ok, true);
+  assert.equal('reviewMinChars' in JSON.parse(read(root, 'engineering.config.json')).modules.review, false, '没写的不凭空多出');
 });
 
 test('升级：配置已是当前默认时不给升级提示', () => {
