@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { classify } from '../hooks/pre-bash.mjs';
+import { classify, shellSegments } from '../hooks/pre-bash.mjs';
 import { featureRepo } from './helpers.mjs';
 
 /** Claude 推送钩子脚本（按真实方式起子进程、从 stdin 传 JSON）。 */
@@ -107,7 +107,9 @@ test('双引号里只认 sh 的转义（反斜杠后跟引号、反斜杠、美�
   assert.equal(classify(String.raw`& "C:\Program Files\Git\cmd\git.exe" push --no-verify`), 'bypass');
   assert.equal(classify(String.raw`"C:\Program Files\Git\cmd\git.exe" -c core.hooksPath=NUL push`), 'bypass');
   // sh 的转义照常：\" 是一个引号（整段仍是提交说明），"--no-\verify" 里的 \v 原样保留（git 收到的就不是 --no-verify）
-  assert.equal(classify(String.raw`git commit -m "说明 \"git push --no-verify\" 会被拦"`), 'other');
+  assert.deepEqual(shellSegments(String.raw`git commit -m "说明 \"git push --no-verify\" 会被拦"`, 'sh'), [['git', 'commit', '-m', '说明 "git push --no-verify" 会被拦']]);
+  // 两种方言取严（PR #21 M2）：按 PowerShell 方言 \" 不是转义，git push 露在引号外，判 push（偏严，见 SKILL.md 第 6 节）
+  assert.equal(classify(String.raw`git commit -m "说明 \"git push --no-verify\" 会被拦"`), 'push');
   assert.equal(classify(String.raw`git push origin "--no-\verify"`), 'push');
 });
 
@@ -197,4 +199,31 @@ test('PR #21 低级项：重定向切成独立词、env -S 只认 env 的选项�
   assert.equal(classify('env -P /bin echo git push --no-verify'), 'other');
   assert.equal(classify('sudo -h host echo git push --no-verify'), 'other');
   assert.equal(classify('sudo -c cls echo git push --no-verify'), 'other');
+});
+
+test('两种引号方言各切一遍取较严：PowerShell 里以反斜杠结尾的双引号路径不吞掉后面的命令，引号外反引号转义也认（PR #21 M2）', () => {
+  assert.equal(classify(String.raw`cd "D:\proj\"; git push --no-verify`), 'bypass');
+  assert.equal(classify(String.raw`git -C "D:\proj\" push --no-verify`), 'bypass');
+  assert.equal(classify(String.raw`git -C "D:\proj\" push origin x`), 'push');
+  assert.equal(classify(String.raw`cd "D:\proj\" ; gh pr create --title "t"`), 'push');
+  assert.equal(classify(String.raw`cd "D:\proj\"; GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_COUNT=1 git push`), 'bypass');
+  assert.equal(classify(String.raw`cd "D:\proj\" | echo "x"; echo git push --no-verify`), 'bypass');
+  // 反过来：按 PowerShell 方言 \" 不转义会吞掉后面的命令，sh 方言才认得出（两种方言缺一不可）
+  assert.equal(classify(String.raw`git commit -m "a\"b" && git push --no-verify`), 'bypass');
+  // PowerShell 方言的切词：引号里连写两个引号是一个引号，引号外反引号转义下一个字符
+  assert.deepEqual(shellSegments('echo "a""b" \'it\'\'s\'', 'ps'), [['echo', 'a"b', "it's"]]);
+  assert.deepEqual(shellSegments('git push --no-ver`ify', 'ps'), [['git', 'push', '--no-verify']]);
+  assert.equal(classify(String.raw`& "C:\Program Files\Git\cmd\git.exe" push --no-verify`), 'bypass');
+  assert.equal(classify('git push --no-ver`ify'), 'bypass');
+  assert.equal(classify("git commit -m 'it''s fine' && git push --no-verify"), 'bypass');
+  // sh 方言的转义：按 PowerShell 方言 \" 不是转义，提交说明里的 git push 会露在引号外，取严后判 push（偏严，见 SKILL.md 第 6 节）
+  assert.equal(classify(String.raw`git commit -m "a \"git push --no-verify\" b"`), 'push');
+  assert.equal(classify('git commit -m "说明 git push --no-verify 会被拦"'), 'other');
+});
+
+test('文本命令例外在 ( $( { 开头的子命令里不适用：子表达式的输出总会交给别的命令（PR #21 L1）', () => {
+  assert.equal(classify('Set-Content p.ps1 -Value (echo git push --no-verify); & ./p.ps1'), 'bypass');
+  assert.equal(classify('Add-Content p.ps1 (Write-Output git push --no-verify); & ./p.ps1'), 'bypass');
+  assert.equal(classify('{ echo git push --no-verify; }'), 'bypass');
+  assert.equal(classify('echo git push --no-verify'), 'other');
 });
