@@ -862,6 +862,64 @@ export const CODEX_DISABLED_FEATURES = ['apps', 'code_mode_host', 'goals', 'hook
 /** 不算工具调用的 Codex 事件条目：回答、推理、错误、待办。其余条目类型一律当作工具执行过（允许清单，新出现的类型也拦下）。 */
 export const CODEX_PASSIVE_ITEMS = ['agent_message', 'reasoning', 'error', 'todo_list'];
 
+/**
+ * 已实测过“关掉 code_mode_host 就没有工具”的运行环境：Windows 上的 codex-cli 0.167.0-alpha.3.2。
+ * 在其他平台或版本上运行时，报告的局限里自动标注“未实测”，让复审的使用者知道这一点（见 unverifiedNote）。
+ */
+export const CODEX_VERIFIED = { platforms: ['win32'], versions: ['0.167.0-alpha.3.2'] };
+
+/** 会话记录里工具调用被拒绝的输出特征：关掉 code_mode_host 后是“code-mode host is disabled … fail closed”，宿主程序缺失时是“failed to spawn code-mode host”。 */
+const BLOCKED_TOOL_OUTPUT = /code[- ]mode host|fail(?:s|ed)? closed|code mode is unavailable/i;
+
+/** 会话记录里 item_completed 事件中不算工具的条目类型（已转成小写加下划线）：用户消息、回答、推理、错误、待办、计划。 */
+const ROLLOUT_PASSIVE_ITEMS = [...CODEX_PASSIVE_ITEMS, 'user_message', 'plan'];
+
+const snake = (s) => String(s).replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+
+/**
+ * 核对 Codex 有没有执行过工具：事件流（stdout）里出现回答、推理、错误、待办以外的条目，会话记录里出现下面几类，都算执行过：
+ *   - response_item 里以 _call 结尾的调用条目（function_call、custom_tool_call、local_shell_call、web_search_call 等），
+ *     除非能按 call_id 找到对应的 _call_output，且输出是“工具被拒绝”（BLOCKED_TOOL_OUTPUT）——模型尝试调用、被关闭的宿主挡住，这是预期的，只计入 blocked；
+ *   - event_msg 里的 *_begin、*_end 执行事件（exec_command_begin、mcp_tool_call_begin、patch_apply_begin 等）；
+ *   - event_msg 的 item_completed 里不在 ROLLOUT_PASSIVE_ITEMS 的条目。
+ * 允许清单：新出现的类型也拦下。返回 { ran, blocked }：ran 是执行过的工具类型（去重），blocked 是被拒绝的调用次数。
+ * 失败和超时的路径也用它，把“工具可能已读到本机文件”的提示带出来。
+ */
+export function scanCodexTools(events, records) {
+  const ran = new Set(events.filter((e) => /^item\./.test(e.type) && e.item?.type && !CODEX_PASSIVE_ITEMS.includes(e.item.type)).map((e) => e.item.type));
+  const outputs = new Map();
+  for (const r of records) {
+    const p = r.payload;
+    if (r.type === 'response_item' && typeof p?.type === 'string' && p.type.endsWith('_call_output') && p.call_id) outputs.set(`${p.type.slice(0, -'_output'.length)}\u0000${p.call_id}`, typeof p.output === 'string' ? p.output : JSON.stringify(p.output ?? ''));
+  }
+  let blocked = 0;
+  for (const r of records) {
+    const p = r.payload;
+    if (!isObj(p) || typeof p.type !== 'string') continue;
+    if (r.type === 'response_item' && p.type.endsWith('_call')) {
+      const out = p.call_id ? outputs.get(`${p.type}\u0000${p.call_id}`) : undefined;
+      if (out !== undefined && BLOCKED_TOOL_OUTPUT.test(out)) blocked++;
+      else ran.add(p.type);
+    } else if (r.type === 'event_msg') {
+      if (/_(begin|end)$/.test(p.type)) ran.add(p.type);
+      else if (p.type === 'item_completed' && isObj(p.item) && typeof p.item.type === 'string' && !ROLLOUT_PASSIVE_ITEMS.includes(snake(p.item.type))) ran.add(snake(p.item.type));
+    }
+  }
+  return { ran: [...ran], blocked };
+}
+
+/** 发现工具执行时的提示文字（作废的原因，或附在失败、超时的原因后面）。 */
+const toolNote = (ran) => `Codex 执行了工具（${ran.join('、')}），违反“复审不给工具”的设定；工具可能已读到本机文件并发给模型提供方，请检查 Codex 版本与 code_mode_host 开关`;
+
+/**
+ * 在没有实测过“不给工具”的平台或 Codex 版本上运行时的标注（写进报告的局限）；已实测的环境返回 null。
+ * 工具执行核对（scanCodexTools）是事后的，在未实测的环境上，关掉 code_mode_host 是否真的让工具失败即关闭还不确定，使用前应先复测。
+ */
+export function unverifiedNote(version, platform = process.platform) {
+  if (CODEX_VERIFIED.platforms.includes(platform) && CODEX_VERIFIED.versions.includes(version)) return null;
+  return `运行环境未实测：“关掉 code_mode_host 就没有工具”只在 ${CODEX_VERIFIED.platforms.join('、')} 上的 codex-cli ${CODEX_VERIFIED.versions.join('、')} 实测过，这次是 ${platform} 上的 codex-cli ${version ?? '（版本未知）'}；工具是否真的没有执行，只靠会话记录事后核对`;
+}
+
 /** 推理强度只认这些词（拼进 Codex 的 -c 配置，不能带任意字符）。 */
 export const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -973,14 +1031,16 @@ export function findCodexRollout(codexHome, threadId) {
  * Codex 的事件和记录里都没有服务端回传的模型名，实际模型取会话记录里 Codex 实际生效的设置（thread_settings_applied、turn_context），
  * 来源记为 executor-settings；拿不到记录时为 null，不用请求的模型代替。订阅额度取记录里最后一次 rate_limits。
  */
-export function parseCodex(stdout, rollout, request) {
+export function parseCodex(stdout, rollout, request, { platform = process.platform } = {}) {
   const events = jsonLines(stdout);
   const records = jsonLines(rollout);
   const threadId = events.find((e) => e.type === 'thread.started')?.thread_id ?? null;
   const messages = events.filter((e) => e.type === 'item.completed' && e.item?.type === 'agent_message').map((e) => e.item.text);
   const toolErrors = [...new Set(events.filter((e) => e.type === 'item.completed' && e.item?.type === 'error').map((e) => oneLine(e.item.message).slice(0, 200)))];
-  // 复审时不给工具：出现回答、推理、错误、待办以外的任何条目（命令执行、文件改动、MCP 调用、联网搜索等），都说明工具真的跑了
-  const ran = [...new Set(events.filter((e) => /^item\./.test(e.type) && e.item?.type && !CODEX_PASSIVE_ITEMS.includes(e.item.type)).map((e) => e.item.type))];
+  // 复审时不给工具：事件流和会话记录里出现回答、推理、错误、待办以外的任何条目（命令执行、文件改动、MCP 调用、联网搜索等），都说明工具真的跑了
+  const { ran, blocked } = scanCodexTools(events, records);
+  // 失败的路径也带上这个提示：会话没跑完不等于工具没读到本机文件
+  const toolWarning = ran.length > 0 ? `；另外${toolNote(ran)}` : '';
   const failures = events.filter((e) => e.type === 'turn.failed' || e.type === 'error').map((e) => oneLine(e.error?.message ?? e.message ?? e.type));
   const tokens = {};
   for (const e of events.filter((x) => x.type === 'turn.completed')) {
@@ -1008,10 +1068,10 @@ export function parseCodex(stdout, rollout, request) {
     credits: null,
     totalCostUsd: null,
   };
-  if (!threadId) return { status: 'failed', error: 'Codex 没有输出会话事件（常见原因：未登录、参数不被这一版支持）', provenance, usage, review: null };
-  if (failures.length > 0) return { status: 'failed', error: `Codex 返回错误：${failures.join('；').slice(0, 300)}`, provenance, usage, review: null };
+  if (!threadId) return { status: 'failed', error: `Codex 没有输出会话事件（常见原因：未登录、参数不被这一版支持）${toolWarning}`, provenance, usage, review: null };
+  if (failures.length > 0) return { status: 'failed', error: `Codex 返回错误：${failures.join('；').slice(0, 300)}${toolWarning}`, provenance, usage, review: null };
   if (ran.length > 0) {
-    return { status: 'failed', error: `Codex 执行了工具（${ran.join('、')}），违反“复审不给工具”的设定，这次复审作废；工具可能已读到本机文件并发给模型提供方，请检查 Codex 版本与 code_mode_host 开关`, provenance, usage, review: null };
+    return { status: 'failed', error: `${toolNote(ran)}，这次复审作废`, provenance, usage, review: null };
   }
   const review = extractReview(messages[messages.length - 1]);
   if (!review) return { status: 'failed', error: '模型的最终回答里没有可解析的审查 JSON', provenance, usage, review: null };
@@ -1026,6 +1086,9 @@ export function parseCodex(stdout, rollout, request) {
     const byDesign = toolErrors.filter((t) => /code-mode host is disabled/i.test(t));
     if (byDesign.length > 0) review.limitations.push('执行器按设计不给工具（关闭了 code_mode_host），复审只依据提示里的 diff，没有查看仓库里的其他文件');
     for (const t of toolErrors.filter((x) => !byDesign.includes(x))) review.limitations.push(`执行器报告的工具错误：${t}`);
+    if (blocked > 0) review.limitations.push(`模型曾尝试调用工具 ${blocked} 次，都被拒绝（会话记录里的调用输出是宿主已关闭或缺失的错误），没有工具真正执行`);
+    const unverified = unverifiedNote(provenance.executorVersion, platform);
+    if (unverified) review.limitations.push(unverified);
   }
   return { status: 'completed', error: null, provenance, usage, review };
 }
@@ -1067,7 +1130,12 @@ export async function codexExecutor({ stdin, env = process.env, cwd = process.cw
     fs.writeFileSync(path.join(raw, 'codex.rollout.jsonl'), rollout);
     fs.rmSync(rolloutFile, { force: true });
   }
-  if (proc.timedOut) return { ...base, execution: { status: 'timeout', error: 'Codex 超时', durationMs: proc.durationMs }, review: incompleteReview('超时') };
+  if (proc.timedOut) {
+    // 超时也核对工具条目（已收到的事件与记录）：没跑完不等于工具没读到本机文件
+    const { ran } = scanCodexTools(jsonLines(proc.stdout), jsonLines(rollout));
+    const warn = ran.length > 0 ? `；另外${toolNote(ran)}` : '';
+    return { ...base, execution: { status: 'timeout', error: `Codex 超时${warn}`, durationMs: proc.durationMs }, review: incompleteReview(`超时${warn}`) };
+  }
   const parsed = parseCodex(proc.stdout, rollout, request);
   const status = parsed.status === 'completed' && proc.exitCode !== 0 ? 'failed' : parsed.status;
   const error = parsed.error ?? (proc.exitCode !== 0 ? `Codex 退出码 ${proc.exitCode}` : null);

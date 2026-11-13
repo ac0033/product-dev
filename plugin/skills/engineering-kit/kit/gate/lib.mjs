@@ -538,10 +538,12 @@ const CI_SOFT_OK = new Set(['SKIPPED', 'NEUTRAL']);
 
 /**
  * 一项检查的显示名、所属工作流与结论：检查运行（CheckRun）看 name、workflowName 与 conclusion（未完成时为空），
- * 提交状态（StatusContext）看 context 与 state（没有工作流，记为空串）。
+ * 提交状态（StatusContext）看 context 与 state（没有工作流，记为空串）；kind 是 gh 给的 __typename（CheckRun 或 StatusContext，没有时为空串）。
+ * 通过 Checks API 上报的第三方检查运行（如 CodeRabbit、codecov/patch），gh 给的 workflowName 也是空串（2026-11 在公开仓库的 PR 上核对过），
+ * 所以分组还要带上 kind，不与同名的提交状态混成一组；两个第三方应用上报的同名检查运行仍分不开（gh 不给来源应用），属“只按名字比对”的局限。
  */
 function checkInfo(c) {
-  return { name: c.name || c.context || '（未命名）', workflow: c.workflowName || '', result: String(c.conclusion || c.state || '').toUpperCase(), shown: c.conclusion || c.state || c.status || '运行中' };
+  return { name: c.name || c.context || '（未命名）', workflow: c.workflowName || '', kind: c.__typename || '', result: String(c.conclusion || c.state || '').toUpperCase(), shown: c.conclusion || c.state || c.status || '运行中' };
 }
 
 /**
@@ -551,36 +553,42 @@ function checkInfo(c) {
  * 运行中等结论就不通过；至少一份成功、其余只有跳过或中性的算成功；全是跳过或中性的，必需检查不通过，非必需检查放行。
  * 不同工作流里的同名检查各算一组，不互相抵：必需检查名出现在几个工作流里，每一组都要满足。
  * 列出的必需检查在 PR 上一项都找不到（没有运行或改了名）按未通过，提示里列出本次看到的检查名，便于改正配置。一项检查都没有视为未通过。
- * 返回 { problems, passed, skipped }：problems 是未通过的原因（空数组表示通过），passed 是成功的检查（{ name, required }），
- * skipped 是被放行的跳过或中性的非必需检查（{ name, result }），供合并入口分开报告。
+ * 返回 { problems, passed, skipped }：problems 是未通过的原因（空数组表示通过），passed 是成功的检查（{ name, label, required }），
+ * skipped 是被放行的跳过或中性的非必需检查（{ name, label, result }），供合并入口分开报告；name 是检查名（与必需检查名同一写法），
+ * label 是报告里的显示名：同名的检查分在几组时带上工作流名或种类，便于分辨，否则与 name 相同。
  */
 export function ciStatus(checks, requiredChecks = []) {
   if (!Array.isArray(checks) || checks.length === 0) {
     return { problems: ['PR 上没有任何 CI 检查（视为未通过；没有 CI 的项目应使用 pre-push 流程）'], passed: [], skipped: [] };
   }
   const listed = requiredChecks.length > 0;
-  const groups = new Map(); // 工作流名加检查名 → 同组的各份检查，保持首次出现的顺序
+  const groups = new Map(); // 种类、工作流名加检查名 → 同组的各份检查，保持首次出现的顺序
   for (const c of checks) {
     const info = checkInfo(c);
-    const key = `${info.workflow}\u0000${info.name}`;
+    const key = `${info.kind}\u0000${info.workflow}\u0000${info.name}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(info);
   }
+  // 同名的检查分在几组时（不同工作流，或检查运行与提交状态），报告里的显示名要能分开：加上工作流名，没有工作流名的加上种类，否则会打印“test、test”
+  const groupsByName = new Map();
+  for (const runs of groups.values()) groupsByName.set(runs[0].name, (groupsByName.get(runs[0].name) ?? 0) + 1);
+  const labelOf = ({ name, workflow, kind }) => (groupsByName.get(name) > 1 ? `${workflow ? `${workflow} / ` : ''}${name}${workflow || !kind ? '' : `（${kind}）`}` : name);
   const problems = [];
   const passed = [];
   const skipped = [];
   for (const runs of groups.values()) {
     const { name } = runs[0];
+    const label = labelOf(runs[0]);
     const required = !listed || requiredChecks.includes(name);
     const bad = runs.filter((r) => r.result !== 'SUCCESS' && !CI_SOFT_OK.has(r.result));
     if (bad.length > 0) {
-      for (const r of bad) problems.push(`CI 检查未通过：${name}（${r.shown}）`);
+      for (const r of bad) problems.push(`CI 检查未通过：${label}（${r.shown}）`);
     } else if (runs.some((r) => r.result === 'SUCCESS')) {
-      passed.push({ name, required });
+      passed.push({ name, label, required });
     } else if (required) {
-      problems.push(`必需检查没有成功：${name}（${runs.map((r) => r.shown).join('、')}；必需检查须为成功，跳过、中性只放行非必需检查${listed ? '' : '。未配置 modules.gate.requiredChecks 时每一项检查都算必需'}）`);
+      problems.push(`必需检查没有成功：${label}（${runs.map((r) => r.shown).join('、')}；必需检查须为成功，跳过、中性只放行非必需检查${listed ? '' : '。未配置 modules.gate.requiredChecks 时每一项检查都算必需'}）`);
     } else {
-      skipped.push({ name, result: [...new Set(runs.map((r) => r.result))].join('、') });
+      skipped.push({ name, label, result: [...new Set(runs.map((r) => r.result))].join('、') });
     }
   }
   const names = [...new Set(checks.map((c) => checkInfo(c).name))];

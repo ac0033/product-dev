@@ -8,7 +8,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { normalizeConfig, toFlat, toProfile } from '../gate/config.mjs';
 import { runGate } from '../gate/gate.mjs';
-import { readRecord } from '../gate/lib.mjs';
+import { ciStatus, readRecord } from '../gate/lib.mjs';
 import { ciLines, mergePr } from '../gate/merge.mjs';
 import { recordReview } from '../gate/review.mjs';
 import { runSmoke } from '../gate/smoke.mjs';
@@ -143,8 +143,8 @@ test('必需检查：列出 requiredChecks 后，必需检查须成功，跳过�
   const res = mergePr({ root, pr: '7', gh });
   assert.equal(res.ok, true, JSON.stringify(res.problems));
   assert.ok(merged(gh));
-  assert.deepEqual(res.ci.passed, [{ name: 'test', required: true }, { name: 'lint', required: true }, { name: 'docs', required: false }]);
-  assert.deepEqual(res.ci.skipped, [{ name: 'e2e', result: 'SKIPPED' }, { name: 'info', result: 'NEUTRAL' }]);
+  assert.deepEqual(res.ci.passed, [{ name: 'test', label: 'test', required: true }, { name: 'lint', label: 'lint', required: true }, { name: 'docs', label: 'docs', required: false }]);
+  assert.deepEqual(res.ci.skipped, [{ name: 'e2e', label: 'e2e', result: 'SKIPPED' }, { name: 'info', label: 'info', result: 'NEUTRAL' }]);
   assert.deepEqual(ciLines(res.ci), [
     'CI 必需检查成功：test、lint',
     'CI 非必需检查成功：docs',
@@ -163,7 +163,7 @@ test('必需检查：列出 requiredChecks 后，必需检查须成功，跳过�
   }
 });
 
-test('必需检查：同名的检查合在一起判定（同一个 job 跑了两份）：一份成功、其余跳过算成功，有失败或运行中仍拦', () => {
+test('必需检查：同一工作流里同名的检查合在一起判定（同一个 job 跑了两份）：一份成功、其余跳过算成功，有失败或运行中仍拦；不同工作流的同名检查各算一组', () => {
   const run = (conclusion) => ({ __typename: 'CheckRun', name: 'test', status: conclusion ? 'COMPLETED' : 'IN_PROGRESS', conclusion });
   const lint = GREEN[1];
   const repo = () => featureRepo({ reviewFlow: 'pr', requiredChecks: ['test', 'lint'] });
@@ -181,7 +181,7 @@ test('必需检查：同名的检查合在一起判定（同一个 job 跑了两
   const crossWf = [{ ...run('SKIPPED'), workflowName: 'CI' }, { ...run('SUCCESS'), workflowName: 'Release' }, lint];
   const cross = register(repo(), fakeGh(prView({ checks: crossWf })), 'code');
   assert.equal(cross.ok, false, '跨工作流同名的成功不能抵掉被跳过的必需检查');
-  assert.match(cross.message, /必需检查没有成功：test（SKIPPED；/);
+  assert.match(cross.message, /必需检查没有成功：CI \/ test（SKIPPED；/, '同名的检查分在几组时，显示名带上工作流名');
   // 同一工作流里的两份（push 与 pull_request）照常合并
   const sameWf = [{ ...run('SKIPPED'), workflowName: 'CI' }, { ...run('SUCCESS'), workflowName: 'CI' }, lint];
   assert.equal(register(repo(), fakeGh(prView({ checks: sameWf })), 'code').ok, true);
@@ -192,7 +192,33 @@ test('必需检查：同名的检查合在一起判定（同一个 job 跑了两
   register(root, fakeGh(view), 'consistency');
   const res = mergePr({ root, pr: '7', gh: fakeGh(view) });
   assert.equal(res.ok, true, JSON.stringify(res.problems));
-  assert.deepEqual(res.ci.skipped, [{ name: 'e2e', result: 'SKIPPED、NEUTRAL' }]);
+  assert.deepEqual(res.ci.skipped, [{ name: 'e2e', label: 'e2e', result: 'SKIPPED、NEUTRAL' }]);
+});
+
+test('F4 同名的检查分在几组时，报告里的显示名带上工作流名，不打印“test、test”', () => {
+  const run = (workflowName, conclusion = 'SUCCESS') => ({ __typename: 'CheckRun', name: 'test', workflowName, status: 'COMPLETED', conclusion });
+  const ok = ciStatus([run('CI'), run('Release'), GREEN[1]], ['test', 'lint']);
+  assert.deepEqual(ok.problems, []);
+  assert.deepEqual(ok.passed.map((p) => p.label), ['CI / test', 'Release / test', 'lint']);
+  assert.deepEqual(ok.passed.map((p) => p.name), ['test', 'test', 'lint'], 'name 仍是与必需检查名同一写法的检查名');
+  assert.deepEqual(ciLines(ok), ['CI 必需检查成功：CI / test、Release / test、lint']);
+  const bad = ciStatus([run('CI'), run('Release', 'FAILURE'), GREEN[1]]);
+  assert.deepEqual(bad.problems, ['CI 检查未通过：Release / test（FAILURE）']);
+  const soft = ciStatus([run('CI', 'SKIPPED'), run('Release', 'NEUTRAL'), GREEN[1]], ['lint']);
+  assert.deepEqual(ciLines(soft), ['CI 必需检查成功：lint', 'CI 非必需检查跳过或中性（放行，不算通过）：CI / test（SKIPPED）、Release / test（NEUTRAL）']);
+});
+
+test('F7 第三方检查运行（工作流名为空）与同名的提交状态不混成一组：被跳过的检查运行不能被同名的成功状态抵掉', () => {
+  // gh 对通过 Checks API 上报的第三方检查运行（如 CodeRabbit、codecov/patch）给的 workflowName 是空串，核对过公开仓库的 PR
+  const app = { __typename: 'CheckRun', name: 'codecov/patch', workflowName: '', status: 'COMPLETED', conclusion: 'SKIPPED' };
+  const status = { __typename: 'StatusContext', context: 'codecov/patch', state: 'SUCCESS' };
+  const r = ciStatus([app, status], ['codecov/patch']);
+  assert.equal(r.problems.length, 1, r.problems.join('\n'));
+  assert.match(r.problems[0], /必需检查没有成功：codecov\/patch（CheckRun）（SKIPPED；/);
+  assert.deepEqual(r.passed.map((p) => p.label), ['codecov/patch（StatusContext）']);
+  // 单独出现时仍用检查名；没有 __typename 的旧输出照旧合并
+  assert.deepEqual(ciStatus([status], ['codecov/patch']).passed, [{ name: 'codecov/patch', label: 'codecov/patch', required: true }]);
+  assert.deepEqual(ciStatus([{ name: 'x', status: 'COMPLETED', conclusion: 'SKIPPED' }, { name: 'x', status: 'COMPLETED', conclusion: 'SUCCESS' }], ['x']).problems, []);
 });
 
 test('必需检查：requiredChecks 是判定策略字段，取基准提交上的配置，分支自己改的不生效', () => {

@@ -253,7 +253,7 @@ function configContent(existingRaw, templateRaw, wantFormat) {
     return `${JSON.stringify(wantFormat === 'profile' ? templateRaw : toFlat(templateRaw), null, 2)}\n`;
   }
   const isProfile = existingRaw.profile === 2;
-  if (wantFormat === 'profile' && !isProfile) return `${JSON.stringify(toProfile(normalizeConfig(existingRaw)), null, 2)}\n`;
+  if (wantFormat === 'profile' && !isProfile) return `${JSON.stringify(toProfile(normalizeConfig(existingRaw), { keepZeroMinChars: existingRaw.reviewMinChars === 0 }), null, 2)}\n`;
   if (wantFormat === 'flat' && isProfile) return `${JSON.stringify(toFlat(existingRaw), null, 2)}\n`;
   return null;
 }
@@ -291,7 +291,7 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
     if (missReviewers.length) messages.push(`升级提示：engineering.config.json 的 modules.review.reviewers 里没有 ${missReviewers.join('、')}，用这些名字登记复审会被拒；同步不改项目配置，要用的请手动加上，且须合入主干后才生效（不用可忽略）`);
     // 没写 rules.reviewIgnore 的配置（含旧版扁平配置）按当前默认值：0.7.0 起口径变窄，升级后会开始要求审查规则、技能正文、提示词，所以提示
     const hasIgnore = cfgRaw.profile === undefined ? cfgRaw.reviewIgnore !== undefined : cfgRaw.rules?.reviewIgnore !== undefined;
-    if (!hasIgnore) messages.push(`升级提示：engineering.config.json 没有写 rules.reviewIgnore，按当前默认值 ${tpl.reviewIgnore.join('、')}；0.7.0 起规则、技能正文、提示词、可执行原型不再免审，升级后改了它们的提交要过复审。要用别的口径的，在配置里写明（判定策略字段，须合入主干后才生效）`);
+    if (!hasIgnore) messages.push(`升级提示：engineering.config.json 没有写 rules.reviewIgnore，按当前默认值 ${tpl.reviewIgnore.join('、')}；0.7.0 起规则、技能正文、提示词、可执行原型不再免审，升级后改了它们的提交要过复审。要用别的口径的，在配置里写明；有意用当前默认值的，把这个默认值原样写进配置也一样，写了以后同步不再提示（判定策略字段，须合入主干后才生效）`);
     const wide = BEHAVIOR_PROBES.filter((f) => cur.reviewIgnore.some((g) => path.matchesGlob(f, g)));
     if (wide.length) messages.push(`升级提示：engineering.config.json 的 rules.reviewIgnore（${cur.reviewIgnore.join('、')}）把 ${wide.join('、')} 这类规则、技能正文、提示词、可执行原型也当成文档免审，合并入口还会把只改它们的 PR 当成只改文档放行。0.7.0 起新装项目的默认值是 ${tpl.reviewIgnore.join('、')}；同步不改项目配置，请收窄到真正的纯说明文件，且须合入主干后才生效`);
     // 0.7.0 起 pr 流程的必需检查须为成功：没列必需检查名时每一项都算必需，按条件跳过的检查会拦下登记与合并，所以提示。

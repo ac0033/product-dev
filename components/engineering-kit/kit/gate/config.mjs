@@ -177,14 +177,15 @@ function expand(raw) {
  * 扁平配置 → profile 结构（同步器写入新格式时使用）。扁平结构里 _profile 段保存的布局与巡检设置原样恢复。
  * 测试分组、必需检查名、最少字数和外部复审的两项是可选项：没有时不写，迁移旧配置不凭空多出一项。
  */
-export function toProfile(flat) {
+export function toProfile(flat, { keepZeroMinChars = false } = {}) {
   const f = normalizeConfig(flat);
   const { sourceGlobs, testGlobs, stages, topLevelAllowed } = { ...f.layout, sourceGlobs: f.sourceGlobs, testGlobs: f.testGlobs };
   const gate = { base: f.base, testCommand: f.testCommand, testEnv: f.testEnv, lockMaxAgeMinutes: f.lockMaxAgeMinutes, reviewFlow: f.reviewFlow };
   if (f.testGroups.length > 0) gate.testGroups = f.testGroups;
   if (f.requiredChecks.length > 0) gate.requiredChecks = f.requiredChecks;
   const review = { reviewers: f.reviewers, reviewSections: f.reviewSections, reviewKeyword: f.reviewKeyword, maxReviewRounds: f.maxReviewRounds };
-  if (f.reviewMinChars > 0) review.reviewMinChars = f.reviewMinChars;
+  // 显式写了 0 的旧配置（keepZeroMinChars，由调用方按原始文件判断）保留这个 0：回滚时 toFlat 据此继续写出 0，旧版不会回到自己的默认字数
+  if (f.reviewMinChars > 0 || (keepZeroMinChars && f.reviewMinChars === 0)) review.reviewMinChars = f.reviewMinChars;
   if (f.externalExecutors.length > 0) review.externalExecutors = f.externalExecutors;
   if (f.externalExclude.length > 0) review.externalExclude = f.externalExclude;
   return {
@@ -207,8 +208,10 @@ export function toFlat(profile) {
   const eff = normalizeConfig(profile);
   const out = {};
   for (const k of FLAT_KEYS) out[k] = eff[k];
-  // 旧版套件只认字数：默认的 0 不写出去，让旧版用它自己的默认值（回滚后恢复旧行为），显式写了正数的照常保留
-  if (out.reviewMinChars === 0) delete out.reviewMinChars;
+  // 旧版套件只认字数：默认的 0 不写出去，让旧版用它自己的默认值（回滚后恢复旧行为），显式写了正数的照常保留；
+  // 项目显式写了 0（明确不要字数检查）的也保留：旧版同样按 0 不检查，删掉它会让旧版回到自己的默认字数，回滚后检查反而变严
+  const explicit = isObject(profile?.modules?.review) ? profile.modules.review.reviewMinChars : undefined;
+  if (out.reviewMinChars === 0 && explicit !== 0) delete out.reviewMinChars;
   out._profile = { layout: { stages: eff.layout.stages, topLevelAllowed: eff.layout.topLevelAllowed }, hygiene: eff.hygiene };
   return out;
 }

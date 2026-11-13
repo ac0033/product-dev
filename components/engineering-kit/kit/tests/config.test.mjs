@@ -120,3 +120,15 @@ test('回滚到扁平格式：默认的 reviewMinChars 0 不写出去（旧版�
   assert.equal('reviewMinChars' in toFlat(normalizeConfig({ profile: 2 })), false);
   assert.equal(toFlat(normalizeConfig({ profile: 2, modules: { review: { reviewMinChars: 150 } } })).reviewMinChars, 150);
 });
+
+test('N4 显式写了 reviewMinChars: 0 的项目：回滚到扁平格式保留这个 0（旧版同样按 0 不检查），再升级也不丢', () => {
+  const explicit = { profile: 2, modules: { review: { reviewMinChars: 0 } } };
+  assert.equal(toFlat(explicit).reviewMinChars, 0, '显式的 0 写出去，旧版不会回到自己的默认字数');
+  assert.equal('reviewMinChars' in toFlat({ profile: 2, modules: { review: {} } }), false, '没写的仍不写');
+  assert.equal('reviewMinChars' in toFlat({ profile: 2 }), false, '没有 modules.review 段也不写');
+  // 扁平 → profile：调用方按原始文件判断是否显式写了 0；回滚再升级一圈后 0 仍在
+  const flat = toFlat(explicit);
+  assert.equal(toProfile(normalizeConfig(flat), { keepZeroMinChars: flat.reviewMinChars === 0 }).modules.review.reviewMinChars, 0);
+  assert.equal(toFlat(toProfile(normalizeConfig(flat), { keepZeroMinChars: true })).reviewMinChars, 0, '来回一圈不变');
+  assert.equal(toProfile(normalizeConfig(flat)).modules.review.reviewMinChars, undefined, '不带标记时 0 仍视为默认，不写');
+});

@@ -111,11 +111,11 @@ export function mergePr({ root, pr, method = 'squash', gh = defaultGh }) {
 export function ciLines(ci) {
   const out = [];
   if (!ci) return out;
-  const req = ci.passed.filter((p) => p.required).map((p) => p.name);
-  const opt = ci.passed.filter((p) => !p.required).map((p) => p.name);
+  const req = ci.passed.filter((p) => p.required).map((p) => p.label ?? p.name);
+  const opt = ci.passed.filter((p) => !p.required).map((p) => p.label ?? p.name);
   if (req.length) out.push(`CI 必需检查成功：${req.join('、')}`);
   if (opt.length) out.push(`CI 非必需检查成功：${opt.join('、')}`);
-  if (ci.skipped.length) out.push(`CI 非必需检查跳过或中性（放行，不算通过）：${ci.skipped.map((s) => `${s.name}（${s.result}）`).join('、')}`);
+  if (ci.skipped.length) out.push(`CI 非必需检查跳过或中性（放行，不算通过）：${ci.skipped.map((s) => `${s.label ?? s.name}（${s.result}）`).join('、')}`);
   return out;
 }
 

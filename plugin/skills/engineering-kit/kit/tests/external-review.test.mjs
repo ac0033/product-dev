@@ -13,7 +13,9 @@ import { loadConfig } from '../gate/lib.mjs';
 import {
   assess,
   buildPrompt,
+  CODEX_VERIFIED,
   codexArgs,
+  codexExecutor,
   executorEnv,
   guardedGh,
   loadLocalConfig,
@@ -24,6 +26,8 @@ import {
   renderReport,
   runExternalReview,
   runProcess,
+  scanCodexTools,
+  unverifiedNote,
   validateResult,
 } from '../gate/external-review.mjs';
 import { missingSections, recordReview, reportVerdict } from '../gate/review.mjs';
@@ -284,6 +288,12 @@ if (process.env.FAKE_CODEX_MODE !== 'nomodel') {
     { type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { model } } },
     { type: 'event_msg', payload: { type: 'token_count', rate_limits: { plan_type: 'prolite', primary: { used_percent: 41, window_minutes: 10080 } } } },
   ].map((e) => JSON.stringify(e)).join('\\n'));
+}
+if (process.env.FAKE_CODEX_MODE === 'hang-tool') {
+  // 先报一个命令执行条目，再一直挂着不退出：测超时路径也带出工具提示
+  for (const e of [{ type: 'thread.started', thread_id: tid }, { type: 'item.started', item: { type: 'command_execution', command: 'cat ~/.ssh/id_rsa' } }]) process.stdout.write(JSON.stringify(e) + '\\n');
+  setInterval(() => {}, 1000);
+  await new Promise(() => {});
 }
 const review = { verdict: 'pass', findings: [{ severity: 'low', title: '命名', file: null, line: null, detail: '名字含糊' }], limitations: [], report: ${JSON.stringify(NARRATIVE)} };
 for (const e of [
@@ -571,6 +581,118 @@ test('L-f 补登：运行目录里的任务被改过（被审提交、哈希对�
   const r = registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh(['d'.repeat(40)]) });
   assert.equal(r.ok, false);
   assert.match(r.message, /互相对不上/);
+});
+
+// ── 后续清单（PR #18）：L-g、L-h、P-c ──
+
+test('P-c 补登：assessment.json 里的复审者不是 external: 开头时拒绝', async () => {
+  const { root, head } = repo();
+  const res = await run(root, head, 'pass');
+  const file = path.join(res.runDir, 'assessment.json');
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(saved.meta.reviewer, 'external:fake');
+  fs.writeFileSync(file, JSON.stringify({ ...saved, meta: { ...saved.meta, reviewer: 'feature-dev:code-reviewer' } }));
+  const r = registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh([head]) });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /互相对不上.*assessment\.json 的复审者不是外部复审者/);
+  fs.writeFileSync(file, JSON.stringify(saved));
+  assert.equal(registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh([head]) }).ok, true, '改回后可以补登');
+});
+
+test('P-c 补登：报告里的输入哈希被改时拒绝（其余文件都对得上也不行）', async () => {
+  const { root, head } = repo();
+  const res = await run(root, head, 'pass');
+  const text = fs.readFileSync(res.reportPath, 'utf8');
+  assert.match(text, /输入哈希：sha256:[0-9a-f]{64}/);
+  fs.writeFileSync(res.reportPath, text.replace(/输入哈希：sha256:[0-9a-f]{64}/, `输入哈希：sha256:${'0'.repeat(64)}`));
+  const r = registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh([head]) });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /互相对不上.*报告里的输入哈希与 request\.json 不符/);
+  assert.doesNotMatch(r.message, /input\.sha256|被审提交|复审者不是/, '只有这一处对不上');
+});
+
+test('L-g Codex：失败路径（回合失败、没有会话事件）也带出“工具可能已读到本机文件”的提示', () => {
+  const request = { model: { id: 'm' } };
+  const ev = (...e) => e.map((x) => JSON.stringify(x)).join('\n');
+  const failed = parseCodex(ev({ type: 'thread.started', thread_id: 't' }, { type: 'item.started', item: { type: 'command_execution', command: 'cat ~/.ssh/id_rsa' } }, { type: 'turn.failed', error: { message: 'usage limit reached' } }), null, request);
+  assert.equal(failed.status, 'failed');
+  assert.match(failed.error, /usage limit reached.*执行了工具（command_execution）.*工具可能已读到本机文件/);
+  const clean = parseCodex(ev({ type: 'thread.started', thread_id: 't' }, { type: 'turn.failed', error: { message: 'usage limit reached' } }), null, request);
+  assert.doesNotMatch(clean.error, /工具/, '没有工具条目时不加提示');
+  // 工具条目只在会话记录里时同样带出
+  const rollout = ev({ type: 'response_item', payload: { type: 'local_shell_call', call_id: 'c1' } });
+  const viaRollout = parseCodex(ev({ type: 'thread.started', thread_id: 't' }, { type: 'turn.failed', error: { message: 'boom' } }), rollout, request);
+  assert.match(viaRollout.error, /boom.*执行了工具（local_shell_call）/);
+});
+
+test('L-g Codex 超时：已收到的事件里有工具条目时，超时的原因里带出提示（执行器返回 timeout，不是 failed）', async () => {
+  const home = tmpDir('ekit-codex-home-');
+  const raw = tmpDir('ekit-codex-raw-');
+  const request = { version: 1, model: { id: 'gpt-test-1' }, limits: { timeoutMs: 3000 }, context: { instructions: '要求', project: null, priorReport: null }, target: { baseSha: 'b'.repeat(40), headSha: 'a'.repeat(40), diff: 'diff' } };
+  const env = { ...process.env, EK_CODEX_COMMAND: JSON.stringify([process.execPath, fakeCodexPath]), CODEX_HOME: home, FAKE_CODEX_MODE: 'hang-tool', EK_EXTERNAL_REVIEW_RAW_DIR: raw };
+  const res = await codexExecutor({ stdin: JSON.stringify(request), env, cwd: raw });
+  assert.equal(res.execution.status, 'timeout');
+  assert.match(res.execution.error, /超时.*执行了工具（command_execution）.*工具可能已读到本机文件/);
+  assert.match(res.review.limitations[0], /执行了工具/);
+  assert.equal(res.review.verdict, 'incomplete');
+});
+
+test('L-h 会话记录核对：调用条目要有“被拒绝”的输出才算没执行；被拒绝的计入局限，其余一律算执行过', () => {
+  const rec = (type, payload) => ({ type, payload });
+  const blockedOut = 'failed to spawn code-mode host C:/x/codex-code-mode-host.exe: os error 2';
+  // 真实会话里的形状：模型尝试调用 exec，宿主缺失，输出是错误
+  const attempted = [rec('response_item', { type: 'custom_tool_call', call_id: 'c1', name: 'exec', input: 'ls' }), rec('response_item', { type: 'custom_tool_call_output', call_id: 'c1', output: blockedOut })];
+  assert.deepEqual(scanCodexTools([], attempted), { ran: [], blocked: 1 });
+  assert.deepEqual(scanCodexTools([], [rec('response_item', { type: 'function_call', call_id: 'c2' }), rec('response_item', { type: 'function_call_output', call_id: 'c2', output: 'Code Mode is unavailable: code-mode host is disabled, fail closed' })]), { ran: [], blocked: 1 });
+  // 输出不是被拒绝的错误、没有输出、输出对不上 call_id、没有 call_id：都算执行过
+  assert.deepEqual(scanCodexTools([], [rec('response_item', { type: 'function_call', call_id: 'c3' }), rec('response_item', { type: 'function_call_output', call_id: 'c3', output: 'total 8\ndrwx' })]).ran, ['function_call']);
+  assert.deepEqual(scanCodexTools([], [rec('response_item', { type: 'function_call', call_id: 'c4' })]).ran, ['function_call']);
+  assert.deepEqual(scanCodexTools([], [rec('response_item', { type: 'custom_tool_call', call_id: 'c5' }), rec('response_item', { type: 'function_call_output', call_id: 'c5', output: blockedOut })]).ran, ['custom_tool_call'], '输出类型对不上');
+  assert.deepEqual(scanCodexTools([], [rec('response_item', { type: 'web_search_call' })]).ran, ['web_search_call']);
+  // 执行事件与不在允许清单里的条目
+  assert.deepEqual(scanCodexTools([], [rec('event_msg', { type: 'exec_command_begin' }), rec('event_msg', { type: 'patch_apply_end' })]).ran, ['exec_command_begin', 'patch_apply_end']);
+  assert.deepEqual(scanCodexTools([], [rec('event_msg', { type: 'item_completed', item: { type: 'CommandExecution' } })]).ran, ['command_execution']);
+  assert.deepEqual(scanCodexTools([], [rec('event_msg', { type: 'item_completed', item: { type: 'McpToolCall' } })]).ran, ['mcp_tool_call']);
+  // 正常会话条目与工具清单声明不算
+  const normal = [
+    rec('session_meta', { cli_version: 'x' }),
+    rec('response_item', { type: 'additional_tools', tools: [] }),
+    rec('response_item', { type: 'message', role: 'assistant' }),
+    rec('response_item', { type: 'reasoning' }),
+    rec('event_msg', { type: 'task_started' }),
+    rec('event_msg', { type: 'token_count' }),
+    rec('event_msg', { type: 'item_completed', item: { type: 'UserMessage' } }),
+    rec('event_msg', { type: 'item_completed', item: { type: 'AgentMessage' } }),
+    rec('event_msg', { type: 'item_completed', item: { type: 'Reasoning' } }),
+  ];
+  assert.deepEqual(scanCodexTools([], normal), { ran: [], blocked: 0 });
+});
+
+test('L-h Codex 解析：会话记录里的工具调用判失败；被拒绝的调用只写进局限；未实测的平台与版本自动标注', () => {
+  const request = { model: { id: 'm' } };
+  const review = { verdict: 'pass', findings: [], limitations: [], report: NARRATIVE };
+  const lines = (...e) => e.map((x) => JSON.stringify(x)).join('\n');
+  const stdout = lines({ type: 'thread.started', thread_id: 't' }, { type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(review) } });
+  const meta = (v) => ({ type: 'session_meta', payload: { cli_version: v } });
+  const call = { type: 'response_item', payload: { type: 'function_call', call_id: 'c1' } };
+  // 工具真的跑了：作废
+  const ran = parseCodex(stdout, lines(meta(CODEX_VERIFIED.versions[0]), call), request, { platform: 'win32' });
+  assert.equal(ran.status, 'failed');
+  assert.match(ran.error, /执行了工具（function_call）.*这次复审作废/);
+  // 被拒绝：完成，局限里写明次数；已实测的环境不加“未实测”
+  const denied = { type: 'response_item', payload: { type: 'function_call_output', call_id: 'c1', output: 'code-mode host is disabled' } };
+  const ok = parseCodex(stdout, lines(meta(CODEX_VERIFIED.versions[0]), call, denied), request, { platform: 'win32' });
+  assert.equal(ok.status, 'completed');
+  assert.ok(ok.review.limitations.some((l) => /模型曾尝试调用工具 1 次，都被拒绝/.test(l)), ok.review.limitations.join('|'));
+  assert.ok(!ok.review.limitations.some((l) => /运行环境未实测/.test(l)));
+  // 平台或版本不同、版本未知：标注
+  for (const [version, platform] of [[CODEX_VERIFIED.versions[0], 'linux'], [CODEX_VERIFIED.versions[0], 'darwin'], ['0.168.0', 'win32'], [null, 'win32']]) {
+    const p = parseCodex(stdout, version === null ? null : lines(meta(version)), request, { platform });
+    assert.equal(p.status, 'completed');
+    assert.ok(p.review.limitations.some((l) => l.includes('运行环境未实测') && l.includes(platform) && l.includes(version ?? '版本未知')), `${platform} ${version}`);
+  }
+  assert.equal(unverifiedNote(CODEX_VERIFIED.versions[0], CODEX_VERIFIED.platforms[0]), null);
+  assert.match(unverifiedNote('9.9.9', 'win32'), /只在 win32 上的 codex-cli 0\.167\.0-alpha\.3\.2 实测过/);
 });
 
 test('passEnv：本机配置列出的变量名从当前环境放行，其余照样拦下', () => {

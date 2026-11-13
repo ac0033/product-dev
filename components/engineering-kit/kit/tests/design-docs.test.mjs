@@ -154,6 +154,8 @@ test('升级：旧版扁平配置按顶层键判断——没写 requiredChecks�
   const bare = hints(flat);
   assert.ok(bare.some((m) => /modules\.gate\.requiredChecks/.test(m)), JSON.stringify(bare));
   assert.ok(bare.some((m) => /没有写 rules\.reviewIgnore/.test(m)), JSON.stringify(bare));
+  assert.match(bare.find((m) => /没有写 rules\.reviewIgnore/.test(m)), /有意用当前默认值的，把这个默认值原样写进配置也一样，写了以后同步不再提示/, '提示里说明怎样不再提示（F2）');
+  assert.deepEqual(hints({ ...flat, requiredChecks: [], reviewIgnore: template.rules.reviewIgnore }), [], '照抄默认值写进配置后不再提示');
   const set = hints({ ...flat, requiredChecks: [], reviewIgnore: ['docs/**/*.md'] });
   assert.deepEqual(set, [], '扁平配置写了这两个键就不提示');
   // profile 配置看 rules.reviewIgnore：模板写了就不提示“没有写”，删掉才提示
