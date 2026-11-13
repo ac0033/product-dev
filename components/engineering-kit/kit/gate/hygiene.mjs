@@ -189,15 +189,16 @@ export function runHygiene(root) {
   const modified = new Set();
   const removed = new Set();
   const mb = base ? git(root, ['merge-base', base, 'HEAD']) : null;
-  // 工作区里删除、改名走的是不是“旧文件”：有基准提交时以它为准（功能分支上自己新加、还没进基准的不算）；没有基准时都算
+  // 工作区里删除、改名走的是不是“旧文件”：有基准提交时以它为准（功能分支上自己新加、还没进基准的不算）；没有基准时都算。
+  // 只对记录类文件调用（调用处先判 isRecord）：每次调用起一个 git 子进程，删除、改名很多时不为记录目录之外的文件逐个查。
   const atBase = (f) => !mb?.ok || git(root, ['cat-file', '-e', `${mb.out.trim()}:${f}`]).ok;
   const status = git(root, ['status', '--porcelain', '-uall', '-z']);
   if (status.ok) {
     for (const { code, file: f, from } of parseStatusZ(status.out)) {
       if (from) {
-        if (code.includes('R') && atBase(f)) removed.add(f); // 改名的旧路径；复制（C）的来源没有变，不计
+        if (code.includes('R') && isRecord(f) && atBase(f)) removed.add(f); // 改名的旧路径；复制（C）的来源没有变，不计
       } else if (code[0] === 'D' || (code[1] === 'D' && (code[0] === ' ' || code[0] === 'M'))) {
-        if (atBase(f)) removed.add(f); // 已跟踪的文件被删除（暂存或未暂存）；刚暂存新增又删掉的（AD）和改名后又删掉新路径的（RD）不是旧文件
+        if (isRecord(f) && atBase(f)) removed.add(f); // 已跟踪的文件被删除（暂存或未暂存）；刚暂存新增又删掉的（AD）和改名后又删掉新路径的（RD）不是旧文件
       } else if (code.includes('M') && code[0] !== 'R' && code[0] !== 'C') {
         modified.add(f); // 改名、复制得到的新路径（RM、CM）是新文件，改它不算改旧记录（旧路径已按删除计）
       }

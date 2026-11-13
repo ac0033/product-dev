@@ -33,6 +33,9 @@ export function sha(buf) {
  * 套件文件的内容哈希：先把 CRLF 换成 LF 再算。业务含义：项目的 .gitattributes 没写 eol=lf、又开着 core.autocrlf 时，
  * 重新检出后套件文件是 CRLF，内容并没有变；按字节比会被当成“本地修改”，升级时报冲突、漂移检查报 modified。
  * 套件源文件本身是 LF，所以对已有的锁文件记录（按字节算的 LF 内容）结果不变。
+ * 前提：用它比较的套件文件（kind 为 gate、hooks 的全部文件，同步与漂移检查都用它）都是文本，且没有必须保留 CRLF 的文件。
+ * 往 gate/、hooks/ 里加二进制文件（字节里碰巧有 CR LF）或必须是 CRLF 的文件（如 .bat、.cmd）时，只差 CR 的改动会被当成未修改，
+ * 须先给那类文件改用按字节的 sha。
  */
 export function contentSha(buf) {
   // latin1 一字节对一个字符，换完再按 latin1 编回字节：只去掉 CR LF 里的 CR，其余字节原样（UTF-8 中文不受影响）
