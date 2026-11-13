@@ -100,3 +100,46 @@ test('环境变量设 core.hooksPath（GIT_CONFIG_KEY_n、GIT_CONFIG_PARAMETERS�
   assert.equal(classify('GIT_CONFIG_KEY_0=core.editor GIT_CONFIG_COUNT=1 git push'), 'push');
   assert.equal(classify('echo "GIT_CONFIG_KEY_0=core.hooksPath" && git push origin feat'), 'push');
 });
+
+test('双引号里只认 sh 的转义（反斜杠后跟引号、反斜杠、美元符、反引号、换行），其余反斜杠原样保留：带空格的 Windows 引号路径照样认得出 git，推送与跳过钩子都识别（PR #11 后续 1）', () => {
+  assert.equal(classify(String.raw`"C:\Program Files\Git\cmd\git.exe" push origin feat`), 'push');
+  assert.equal(classify(String.raw`& "C:\Program Files\Git\cmd\git.exe" push origin feat`), 'push');
+  assert.equal(classify(String.raw`& "C:\Program Files\Git\cmd\git.exe" push --no-verify`), 'bypass');
+  assert.equal(classify(String.raw`"C:\Program Files\Git\cmd\git.exe" -c core.hooksPath=NUL push`), 'bypass');
+  // sh 的转义照常：\" 是一个引号（整段仍是提交说明），"--no-\verify" 里的 \v 原样保留（git 收到的就不是 --no-verify）
+  assert.equal(classify(String.raw`git commit -m "说明 \"git push --no-verify\" 会被拦"`), 'other');
+  assert.equal(classify(String.raw`git push origin "--no-\verify"`), 'push');
+});
+
+test('git 只在命令位置才算：带独立值的全局选项、env 的选项、常见前缀之后都认得出；echo 等命令的参数不算（PR #11 后续 2）', () => {
+  // 带独立值的全局选项
+  assert.equal(classify('git --git-dir x push --no-verify'), 'bypass');
+  assert.equal(classify('git --work-tree . --git-dir .git push origin feat'), 'push');
+  assert.equal(classify('git --namespace ns push --no-verify'), 'bypass');
+  // env 自身的选项之后的赋值
+  assert.equal(classify('env -i GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git push'), 'bypass');
+  assert.equal(classify('env -u HOME GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_COUNT=1 git push origin feat'), 'bypass');
+  assert.equal(classify('env -i git push --no-verify'), 'bypass');
+  assert.equal(classify('env -S "git push --no-verify"'), 'bypass');
+  // 常见前缀与复合命令
+  assert.equal(classify('sudo -u root git push --no-verify'), 'bypass');
+  assert.equal(classify('command git push origin feat'), 'push');
+  assert.equal(classify('time git push origin feat'), 'push');
+  assert.equal(classify('nohup git push origin feat'), 'push');
+  assert.equal(classify('timeout 60 git push --no-verify'), 'bypass');
+  assert.equal(classify('if git push origin feat; then echo ok; fi'), 'push');
+  assert.equal(classify('(git push --no-verify)'), 'bypass');
+  assert.equal(classify('echo $(git push origin feat)'), 'push');
+  assert.equal(classify('echo `git push --no-verify`'), 'bypass');
+  assert.equal(classify('{ git push origin feat; }'), 'push');
+  assert.equal(classify('cmd /c git push origin feat'), 'push');
+  assert.equal(classify('Get-Item . | ForEach-Object { git push --no-verify }'), 'bypass');
+  assert.equal(classify('find . -maxdepth 0 -exec git push --no-verify ;'), 'bypass');
+  assert.equal(classify('printf y | xargs -I{} git push origin feat'), 'push');
+  // 不在命令位置：echo、printf 的参数；git 别的子命令的参数
+  assert.equal(classify('echo git push --no-verify'), 'other');
+  assert.equal(classify('echo git push'), 'other');
+  assert.equal(classify('printf "%s" x git push'), 'other');
+  assert.equal(classify('git commit -m "说明 git push --no-verify 会被拦"'), 'other');
+  assert.equal(classify('git commit -m x git push'), 'other');
+});

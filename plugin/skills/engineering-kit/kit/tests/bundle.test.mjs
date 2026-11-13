@@ -205,7 +205,7 @@ test('--from-tag：用完删除导出的临时目录', () => {
   assert.deepEqual(fs.readdirSync(tmp), [], '临时目录应已清理');
 });
 
-test('仓库根的 .gitattributes 与模板一致（同步按字节复制，CRLF 检出会弄坏脚本与哈希）', () => {
+test('仓库根的 .gitattributes 与模板一致（同步按字节写出套件文件；CRLF 检出会弄坏 shell 脚本，比较哈希虽不计换行风格，仍要求 eol=lf）', () => {
   const top = spawnSync('git', ['-C', BUNDLE_ROOT, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).stdout.trim();
   assert.equal(read(top, '.gitattributes').trim(), read(BUNDLE_ROOT, 'kit/templates/gitattributes').trim());
 });

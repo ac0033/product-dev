@@ -4,7 +4,7 @@
 // 跳过 git 钩子的推送（git push --no-verify 及其缩写、git -c core.hooksPath=… push）一律拒绝：本钩子只核对工作区，
 // 实际推送的引用（推别的分支、显式 refspec）由 git 的 pre-push 钩子交给 verify.mjs --pre-push 核对，跳过它就没人核对引用了。
 // 输入：stdin 的 JSON（tool_input.command、cwd）。退出码 2 表示拒绝，原因写到 stderr 反馈给 agent。
-// 局限：按命令文本正则判断，防误操作，挡不住刻意绕过；终端里直接 git push 不经过本钩子，靠 git pre-push 钩子兜底。
+// 局限：按命令文本切词判断，防误操作，挡不住刻意绕过；终端里直接 git push 不经过本钩子，靠 git pre-push 钩子兜底。
 // 钩子自身出错时放行并打印提示，避免钩子故障把整个工作流卡死。
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -15,7 +15,7 @@ import { isMain } from '../gate/lib.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const VERIFY = path.join(here, '..', 'gate', 'verify.mjs');
 
-/** 把引号里的内容去掉（只留空引号），使提交说明、grep 关键字里的 “git push” 不被当成命令。 */
+/** 把引号里的内容去掉（只留空引号），使提交说明、grep 关键字里的 “gh pr create” 不被当成命令。 */
 function stripQuoted(command) {
   return command.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '""');
 }
@@ -23,12 +23,11 @@ function stripQuoted(command) {
 /** 分类结果的优先级：同一条命令里出现多种时取最严的（合并 > 跳过钩子的推送 > 推送 > 其他）。 */
 const RANK = { other: 0, push: 1, bypass: 2, merge: 3 };
 
-/** 一段 git push 命令：全局选项（-C、-c、--xxx）在第 1 组，push 之后到本段结束（; & | 换行）的参数在第 2 组。 */
-const GIT_PUSH = /\bgit(?:\.exe)?((?:\s+(?:-C\s+\S+|-c\s+\S+|--?[\w-]+(?:=\S+)?))*)\s+push\b([^\n;&|]*)/g;
-
 /**
- * 按 shell 的规则把命令切成段（引号外的 ; & | 换行分段）和词：引号去掉、内容保留（"--no-verify" 与 --no-verify 是同一个词），
- * 双引号里认反斜杠转义。返回 [[词, ...], ...]。只做判断用，不追求完整的 shell 语法（不处理换行续行、子命令替换等）。
+ * 按 shell 的规则把命令切成段（引号外的 ; & | 换行分段）和词：引号去掉、内容保留（"--no-verify" 与 --no-verify 是同一个词）。
+ * 双引号里只有 \" \\ \$ \` 是转义（去掉反斜杠），反斜杠加换行是续行（两个字符都去掉），其余反斜杠原样保留（POSIX sh 的规则；
+ * PowerShell 双引号里反斜杠不是转义，Windows 路径 "C:\Program Files\Git\cmd\git.exe" 按这条规则同样原样得到）。
+ * 返回 [[词, ...], ...]。只做判断用，不追求完整的 shell 语法（不处理引号外的换行续行、子命令替换的嵌套等）。
  */
 export function shellSegments(command) {
   const segs = [];
@@ -49,8 +48,11 @@ export function shellSegments(command) {
       let j = i + 1;
       let text = '';
       for (; j < command.length && command[j] !== ch; j++) {
-        if (ch === '"' && command[j] === '\\' && j + 1 < command.length) text += command[++j];
-        else text += command[j];
+        const next = command[j + 1];
+        if (ch === '"' && command[j] === '\\' && next !== undefined && '"\\$`\n'.includes(next)) {
+          j++;
+          if (next !== '\n') text += next;
+        } else text += command[j];
       }
       cur = (cur ?? '') + text;
       i = j; // 停在收尾引号上（没有收尾引号时到结尾）
@@ -68,85 +70,199 @@ const GIT_EXE = /(?:^|[\\/])git(?:\.exe)?$/i;
 /** 一个配置项写法（core.hooksPath=…，或 --config-env 的 core.hooksPath=ENV）的键是不是 core.hooksPath（不分大小写）。 */
 const isHooksPathKey = (s) => s.split('=')[0].trim().toLowerCase() === 'core.hookspath';
 
+/** 环境变量赋值词：名字=值。 */
+const ASSIGN = /^([A-Za-z_]\w*)=(.*)$/s;
+
 /**
- * 一段命令里的 git push：返回 { globals: 全局选项设的配置项, args: push 之后的参数 }，不是 git push 时返回 null。
- * git 与子命令之间的全局选项：-C <路径>、-c <键=值>、--config-env <键=环境变量>（也可写成 --config-env=…），其余 -x / --xxx[=…] 跳过。
+ * 命令位置的识别。git 只在命令位置才算命令，echo、printf 等命令的参数里的 git 不算。命令位置是：
+ *   一段的开头；子命令替换与分组的开头（词以 ( $( ` { 开头，或单独的 {，含 PowerShell 的脚本块 { … }）；find 的 -exec、-execdir、-ok、-okdir 之后。
+ * 从命令位置起依次跳过下面这些前缀，跳完的第一个词才是命令名：
+ *   环境变量赋值（名字=值，收集起来供 core.hooksPath 判断）；重定向（>file、2> file）；
+ *   shell 关键字 if then else elif do while until !；
+ *   包装命令及其选项（见 WRAPPERS：env、command、builtin、exec、sudo、doas、nohup、time、nice、ionice、timeout、stdbuf、
+ *   xargs、watch，Windows 的 cmd /c、pwsh / powershell、Start-Process）。选项以 - 开头（cmd 还有 / 开头），
+ *   表里列出的选项带一个独立的值，一并跳过；env -S（--split-string）把它的值按 shell 规则拆开接着判断。
+ * 局限：不在这张表里的包装命令（如 strace、ssh、dotenv）后面的 git 不认；
+ * 以前按正则在整条命令里找 git push，这类写法碰巧也能拦到，现在改为只认命令位置（防误操作的定位不变：agent 正常推送不会这样包装）。
  */
-function gitPushIn(words) {
-  for (let i = 0; i < words.length; i++) {
-    if (!GIT_EXE.test(words[i])) continue;
-    const globals = [];
-    let j = i + 1;
-    while (j < words.length && words[j].startsWith('-')) {
-      const w = words[j];
-      if (w === '-C' || w === '-c' || w === '--config-env') {
-        if (w !== '-C' && j + 1 < words.length) globals.push(words[j + 1]);
-        j += 2;
-      } else {
-        if (w.startsWith('--config-env=')) globals.push(w.slice('--config-env='.length));
-        j += 1;
-      }
+const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!']);
+const WRAPPERS = {
+  env: { values: ['-u', '--unset', '-C', '--chdir'] },
+  command: { values: [] },
+  builtin: { values: [] },
+  exec: { values: ['-a'] },
+  sudo: { values: ['-u', '-g', '-p', '-C', '-D', '-r', '-t', '-U', '-T', '-R', '--user', '--group', '--prompt', '--close-from', '--chdir', '--role', '--type', '--other-user', '--command-timeout', '--chroot'] },
+  doas: { values: ['-u', '-C'] },
+  nohup: { values: [] },
+  time: { values: ['-f', '--format', '-o', '--output'] },
+  nice: { values: ['-n', '--adjustment'] },
+  ionice: { values: ['-c', '--class', '-n', '--classdata'] },
+  timeout: { values: ['-s', '--signal', '-k', '--kill-after'], positional: 1 }, // 时长是一个位置参数
+  stdbuf: { values: ['-i', '-o', '-e'] },
+  xargs: { values: ['-I', '-n', '-P', '-L', '-d', '-E', '-s', '-a', '--max-args', '--max-procs', '--max-lines', '--delimiter', '--eof', '--max-chars', '--arg-file'] },
+  watch: { values: ['-n', '--interval'] },
+  cmd: { values: [], slash: true },
+  pwsh: { values: ['-executionpolicy', '-ex', '-workingdirectory', '-wd', '-windowstyle', '-outputformat', '-inputformat'], ci: true },
+  powershell: { values: ['-executionpolicy', '-ex', '-workingdirectory', '-windowstyle', '-outputformat', '-inputformat'], ci: true },
+  'start-process': { values: ['-workingdirectory', '-verb', '-windowstyle', '-redirectstandardoutput', '-redirectstandarderror', '-redirectstandardinput', '-credential'], ci: true },
+};
+
+/** 命令名：去掉路径和 .exe，转小写（PowerShell 命令不分大小写；/usr/bin/env 与 env 同样识别）。 */
+const cmdName = (w) => w.replace(/^.*[\\/]/, '').replace(/\.exe$/i, '').toLowerCase();
+
+/**
+ * 从命令位置 i 起跳过前缀（规则见上），返回 [词, 命令名所在的下标]；前缀里的环境变量赋值追加到 assigns。
+ * env -S 会把值拆开拼回词表，所以返回的词表可能与传入的不同。
+ */
+function commandAt(words, i, assigns) {
+  while (i < words.length) {
+    const w = words[i];
+    if (w === '') {
+      i++;
+      continue;
     }
-    if (words[j] === 'push') return { globals, args: words.slice(j + 1) };
+    if (ASSIGN.test(w)) {
+      assigns.push(w);
+      i++;
+      continue;
+    }
+    if (/^\d*[<>]/.test(w)) {
+      i += /^\d*[<>]+$/.test(w) ? 2 : 1; // 单独的 > 后面一个词是重定向目标
+      continue;
+    }
+    const name = cmdName(w);
+    if (KEYWORDS.has(name)) {
+      i++;
+      continue;
+    }
+    const wrapper = Object.hasOwn(WRAPPERS, name) ? WRAPPERS[name] : null;
+    if (!wrapper) return [words, i];
+    i++;
+    let positional = wrapper.positional ?? 0;
+    while (i < words.length) {
+      const o = words[i];
+      if (name === 'env' && (o === '-S' || o === '--split-string') && i + 1 < words.length) {
+        words = [...words.slice(0, i), ...shellSegments(words[i + 1]).flat(), ...words.slice(i + 2)];
+        continue;
+      }
+      if (o.startsWith('-') || (wrapper.slash && o.startsWith('/'))) {
+        i += wrapper.values.includes(wrapper.ci ? o.toLowerCase() : o) ? 2 : 1;
+        continue;
+      }
+      if (positional > 0) {
+        positional--;
+        i++;
+        continue;
+      }
+      break; // 包装命令的选项结束：接下来回到外层循环，可能还有赋值（env 的）或另一层包装
+    }
   }
-  return null;
+  return [words, i];
+}
+
+/** git 与子命令之间带一个独立值的全局选项（git.c 的 handle_options；--exec-path 不带独立值，单写时只打印路径就退出）。 */
+const GIT_VALUE_OPTS = new Set(['-C', '-c', '--config-env', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--attr-source']);
+
+/**
+ * 一段命令里的各个命令：返回 [{ words, at, assigns }]，at 是命令名的下标，assigns 是它前面的环境变量赋值。
+ * 词先去掉开头的 ( $( ` { 与结尾的 ) ` }（子命令替换、分组、脚本块的括号），再按命令位置规则找命令。
+ */
+function commandsIn(segWords) {
+  const words = segWords.map((w) => w.replace(/^(?:\$?\(|@\(|`|\{)+/, '').replace(/[)`}]+$/, ''));
+  const starts = [0];
+  segWords.forEach((w, i) => {
+    if (i > 0 && /^(?:\$?\(|@\(|`|\{)/.test(w)) starts.push(i);
+    if (/^-(?:exec|execdir|ok|okdir)$/.test(w)) starts.push(i + 1);
+  });
+  return starts.map((s) => {
+    const assigns = [];
+    const [ws, at] = commandAt(words, s, assigns);
+    return { words: ws, at, assigns };
+  });
+}
+
+/**
+ * 一个命令是不是 git push：返回 { globals: 全局选项设的配置项, args: push 之后的参数（到本段结束）}，不是时返回 null。
+ * 全局选项：-C、-c、--config-env、--git-dir、--work-tree、--namespace 等带独立值（见 GIT_VALUE_OPTS），
+ * -c 与 --config-env（也可写成 --config-env=…）的值收集起来；其余 -x / --xxx[=…] 跳过。
+ */
+function gitPushIn({ words, at }) {
+  if (at >= words.length || !GIT_EXE.test(words[at])) return null;
+  const globals = [];
+  let j = at + 1;
+  while (j < words.length && words[j].startsWith('-')) {
+    const w = words[j];
+    if (GIT_VALUE_OPTS.has(w)) {
+      if ((w === '-c' || w === '--config-env') && j + 1 < words.length) globals.push(words[j + 1]);
+      j += 2;
+    } else {
+      if (w.startsWith('--config-env=')) globals.push(w.slice('--config-env='.length));
+      j += 1;
+    }
+  }
+  return words[j] === 'push' ? { globals, args: words.slice(j + 1) } : null;
 }
 
 /**
  * 命令里的环境变量赋值有没有把 core.hooksPath 交给 git：GIT_CONFIG_KEY_<n>=core.hooksPath，或 GIT_CONFIG_PARAMETERS 里含 core.hooksPath。
- * 只认赋值位置：一段命令开头的 名字=值（前面可有 env、export、set），以及 PowerShell 的 $env:名字=值（= 两边可有空格）；echo 的参数之类不算。
+ * 只认赋值位置：命令前缀里的 名字=值（含 env [选项] 之后的，见 commandAt）、单独一条的赋值语句、export / set 的参数，
+ * 以及 PowerShell 的 $env:名字=值（= 两边可有空格）；echo 的参数之类不算。
+ * 偏严：不要求赋值作用于那条 git push——同一条命令里任何一处这样的赋值都算（例如 GIT_CONFIG_KEY_0=core.hooksPath git status; git push）。
+ * 理由：要准确判断须追踪变量作用域（前缀赋值只作用于一条命令；单独的赋值语句对已导出的变量会影响之后的 git；export 影响之后全部），
+ * 判错就是漏拦；把 core.hooksPath 写进 GIT_CONFIG_* 又和推送写在同一条命令里，正常工作几乎遇不到，误拦代价小。
  */
 function envSetsHooksPath(segs) {
-  const hit = (name, value) =>
-    (/^GIT_CONFIG_KEY_\d+$/i.test(name) && isHooksPathKey(value)) || (/^GIT_CONFIG_PARAMETERS$/i.test(name) && /core\.hookspath/i.test(value));
+  const hit = (assign) => {
+    const m = ASSIGN.exec(assign);
+    if (!m) return false;
+    const [, name, value] = m;
+    return (/^GIT_CONFIG_KEY_\d+$/i.test(name) && isHooksPathKey(value)) || (/^GIT_CONFIG_PARAMETERS$/i.test(name) && /core\.hookspath/i.test(value));
+  };
   for (const words of segs) {
-    let i = 0;
     if (/^\$env:/i.test(words[0] ?? '')) {
-      const joined = words.join(' ');
-      const m = /^\$env:([\w]+)\s*=\s*(.*)$/i.exec(joined);
-      if (m && hit(m[1], m[2])) return true;
+      const m = /^\$env:([\w]+)\s*=\s*(.*)$/i.exec(words.join(' '));
+      if (m && hit(`${m[1]}=${m[2]}`)) return true;
       continue;
     }
-    if (['env', 'export', 'set'].includes(words[0])) i = 1;
-    for (; i < words.length; i++) {
-      const m = /^([A-Za-z_]\w*)=(.*)$/s.exec(words[i]);
-      if (!m) break;
-      if (hit(m[1], m[2])) return true;
+    if (['export', 'set'].includes(words[0])) {
+      if (words.slice(1).some(hit)) return true;
+      continue;
     }
+    if (commandsIn(words).some((c) => c.assigns.some(hit))) return true;
   }
   return false;
 }
 
 /**
- * 命令里有没有跳过 git 钩子的 git push（逐段按 shell 词判断，引号里的文字不是参数，但被引号包住的整个词照样是参数）：
+ * 命令里的 git push 与它有没有跳过 git 钩子（逐段按 shell 词判断，引号里的文字不是参数，但被引号包住的整个词照样是参数）：
  *   push 的参数里有 --no-verify（git 接受唯一前缀，--no-veri、--no-verif 同样生效）；-n 是 --dry-run，不算；
  *   git 与 push 之间的全局选项设了 core.hooksPath（-c、--config-env）；
- *   命令里用环境变量（GIT_CONFIG_KEY_<n>、GIT_CONFIG_PARAMETERS）设了 core.hooksPath，且有 git push。
- * 局限：换行续行（\ 或 `）、子命令替换、别名、事先 git config 写进配置文件的都不处理。
+ *   命令里用环境变量（GIT_CONFIG_KEY_<n>、GIT_CONFIG_PARAMETERS）设了 core.hooksPath，且有 git push（偏严，见 envSetsHooksPath）。
+ * 返回 { push: 有没有 git push, bypass: 有没有跳过钩子 }。
+ * 局限：换行续行（\ 或 `）、变量展开、别名、事先 git config 写进配置文件的都不处理。
  */
-function skipsGitHooks(command) {
+function gitPushes(command) {
   const segs = shellSegments(command);
-  const pushes = segs.map(gitPushIn).filter(Boolean);
-  if (pushes.length === 0) return false;
-  for (const p of pushes) {
-    if (p.args.some((a) => /^--no-veri(?:f|fy)?$/.test(a))) return true;
-    if (p.globals.some(isHooksPathKey)) return true;
-  }
-  return envSetsHooksPath(segs);
+  const pushes = segs.flatMap(commandsIn).map(gitPushIn).filter(Boolean);
+  if (pushes.length === 0) return { push: false, bypass: false };
+  const bypass =
+    pushes.some((p) => p.args.some((a) => /^--no-veri(?:f|fy)?$/.test(a)) || p.globals.some(isHooksPathKey)) || envSetsHooksPath(segs);
+  return { push: true, bypass };
 }
 
 /**
  * 判断命令属于哪一类：merge（拒绝）、bypass（跳过 git 钩子的推送，拒绝）、push（先核对）、other（放行）。
  * merge 从严：直接在原始文本上匹配，引号里也拦（gh api "…/merge" 不能绕过）。
- * push 与 bypass 只看引号外的命令；sh -c / bash -c 等的引号载荷再分类一次（bash -c "git push" 拦得住），几种结果取最严的。
+ * git push 按 shell 词与命令位置判断（gitPushes）；gh pr create 只看引号外的命令；
+ * sh -c / bash -c 等的引号载荷再分类一次（bash -c "git push" 拦得住），几种结果取最严的。
  */
 export function classify(command, depth = 0) {
   // gh 允许全局选项（-R owner/repo 等），所以用“同一段命令内出现 pr merge”来判断；gh.exe 与 git.exe 同样识别
   if (/\bgh(?:\.exe)?\b[^\n;&|]*\bpr\s+merge\b/.test(command) || /\bgh(?:\.exe)?\b[^\n]*\/pulls\/\d+\/merge/.test(command)) return 'merge';
-  const bare = stripQuoted(command);
+  const git = gitPushes(command);
   let kind = 'other';
-  if (skipsGitHooks(command)) kind = 'bypass';
-  else if (new RegExp(GIT_PUSH.source).test(bare) || /\bgh(?:\.exe)?\b[^\n;&|]*\bpr\s+create\b/.test(bare)) kind = 'push';
+  if (git.bypass) kind = 'bypass';
+  else if (git.push || /\bgh(?:\.exe)?\b[^\n;&|]*\bpr\s+create\b/.test(stripQuoted(command))) kind = 'push';
   if (depth < 3) {
     const inner = /\b(?:bash|sh|zsh|pwsh|powershell|cmd)\s+(?:-c|-Command|\/c)\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')/gi;
     let m;

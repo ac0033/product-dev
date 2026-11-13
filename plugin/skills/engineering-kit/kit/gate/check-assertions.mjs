@@ -68,6 +68,8 @@ function renamePairs(root, baseRev) {
  *   改名（git 配上对的）：按改名前的文件比较，提示多带 from（旧路径）。
  *   配不上对的（内容改得太多、或只在工作区 mv 而没 git add）：已删除的测试文件的用例总数，与新增的测试文件（基准上没有）的用例总数比较，
  *   新增的少时提示一条 { file: null, deleted, added, before, after, removed }。删掉测试文件、没有新增的，同样提示。
+ *   局限（按总数比较的代价，见套件 SKILL.md 第 6 节）：同一分支上新增的无关测试文件会把减少的用例抵消掉（漏提示）；
+ *   把一个测试文件的用例并进另一个已有文件再删掉它，并进去的用例不计入新增，会被提示为减少（误报）。只提示不拦截，所以不再细分。
  */
 function caseHints(root, tests, baseRev) {
   const hints = [];
