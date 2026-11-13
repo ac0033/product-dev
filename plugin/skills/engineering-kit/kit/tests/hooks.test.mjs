@@ -153,3 +153,48 @@ test('git push 在一段命令里任何位置都算：带独立值的全局选�
   // 偏严：git 的子命令不在文本命令清单里，未加引号的参数里的 git push 照样按推送核对（git 实际不会推送）
   assert.equal(classify('git commit -m x git push'), 'push');
 });
+
+test('文本命令例外只在命令里没有可再执行结构时适用：管道、重定向、子命令替换、eval / source / iex / . 一出现就按推送判（PR #21 M1）', () => {
+  assert.equal(classify('echo git push --no-verify origin | sh'), 'bypass');
+  assert.equal(classify('echo git push --no-verify origin | bash'), 'bypass');
+  assert.equal(classify('Write-Output git push --no-verify | Invoke-Expression'), 'bypass');
+  assert.equal(classify('Write-Output git push --no-verify | iex'), 'bypass');
+  assert.equal(classify('printf "%s " git push --no-verify | sh'), 'bypass');
+  assert.equal(classify('sudo echo git push --no-verify | sudo sh'), 'bypass');
+  assert.equal(classify('$(echo git push --no-verify origin)'), 'bypass');
+  assert.equal(classify('`echo git push --no-verify origin`'), 'bypass');
+  assert.equal(classify('eval $(echo git push --no-verify)'), 'bypass');
+  assert.equal(classify('echo git push --no-verify > p.sh; sh p.sh'), 'bypass');
+  assert.equal(classify('bash -c "echo git push --no-verify | sh"'), 'bypass');
+  assert.equal(classify('bash -c "echo git push --no-verify" | sh'), 'bypass');
+  assert.equal(classify('source <(echo git push --no-verify)'), 'bypass');
+  assert.equal(classify('. <(echo git push --no-verify)'), 'bypass');
+  assert.equal(classify('iex "x"; echo git push --no-verify'), 'bypass');
+  // 没有可再执行结构时，文本命令的参数照旧不算
+  assert.equal(classify('echo git push --no-verify'), 'other');
+  assert.equal(classify('grep -rn git push docs'), 'other');
+  assert.equal(classify('Write-Host git push --no-verify'), 'other');
+});
+
+test('PR #21 低级项：重定向切成独立词、env -S 只认 env 的选项区、--shallow-file、export/set 不分大小写、包装命令选项值补全（L1–L5、L7）', () => {
+  // L1 引号外的 < > 连同前导数字与 & 切成独立词
+  assert.equal(classify('git push>/dev/null'), 'push');
+  assert.equal(classify('git push --no-verify>out.txt'), 'bypass');
+  assert.equal(classify('git push origin feat 2>&1'), 'push');
+  assert.equal(classify('git push --no-verify&>log.txt'), 'bypass');
+  // L3、L5 env -S 只在 env 自身的选项区认，支持 -S<值> 与 --split-string=<值>
+  assert.equal(classify('env X=1 git commit -m msg -S "note git push --no-verify"'), 'other');
+  assert.equal(classify('env -S"git push --no-verify"'), 'bypass');
+  assert.equal(classify('env --split-string="git push --no-verify"'), 'bypass');
+  assert.equal(classify('env -i -S "git push --no-verify"'), 'bypass');
+  // L4 --shallow-file 带独立值
+  assert.equal(classify('git --shallow-file x push --no-verify'), 'bypass');
+  // L7 export / set 不分大小写（cmd 的 Set）
+  assert.equal(classify('Set GIT_CONFIG_KEY_0=core.hooksPath && git push'), 'bypass');
+  assert.equal(classify('EXPORT GIT_CONFIG_KEY_0=core.hooksPath; git push'), 'bypass');
+  // L2 包装命令带值的选项：值不被当成命令词，命令词仍是 echo
+  assert.equal(classify('doas -a style echo git push --no-verify'), 'other');
+  assert.equal(classify('env -P /bin echo git push --no-verify'), 'other');
+  assert.equal(classify('sudo -h host echo git push --no-verify'), 'other');
+  assert.equal(classify('sudo -c cls echo git push --no-verify'), 'other');
+});
