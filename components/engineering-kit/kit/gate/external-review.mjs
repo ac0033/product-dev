@@ -28,7 +28,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { baseRevision, defaultGh, EMPTY_TREE, git, isMain, loadConfig, readPr, repoRoot } from './lib.mjs';
-import { missingSections, recordReview, reportVerdict } from './review.mjs';
+import { EXTERNAL_REVIEWER_PREFIX, missingSections, recordReview, reportVerdict } from './review.mjs';
 
 /** 协议版本：任务与结果 JSON 的 version 字段。 */
 export const PROTOCOL_VERSION = 1;
@@ -39,7 +39,7 @@ export const EXECUTION_STATUSES = ['completed', 'failed', 'timeout', 'cancelled'
 /** 执行器给出的结论：通过、不通过、未完成。 */
 export const RESULT_VERDICTS = ['pass', 'fail', 'incomplete'];
 /** 外部复审者登记用的名字前缀：external:<执行器名>，按真实名字加进项目的 reviewers。 */
-export const REVIEWER_PREFIX = 'external:';
+export const REVIEWER_PREFIX = EXTERNAL_REVIEWER_PREFIX;
 /** 模型自己写的审查说明最少字数：只有“没问题”一句的不算实质内容。 */
 export const MIN_NARRATIVE_CHARS = 80;
 
@@ -806,7 +806,7 @@ export function registerReport({ root, headSha, kind, verdict, reviewer, reportP
     }
   }
   try {
-    return recordReview({ root, verdict, reviewer, reportPath, summary, pr: pr === undefined ? undefined : String(pr), kind, gh: guardedGh(gh, headSha) });
+    return recordReview({ root, verdict, reviewer, reportPath, summary, pr: pr === undefined ? undefined : String(pr), kind, gh: guardedGh(gh, headSha), viaExternalReview: true });
   } catch (e) {
     return { ok: false, message: `登记出错：${e.message}` };
   }

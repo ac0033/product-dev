@@ -135,6 +135,9 @@ test('复审记录：复审者不在允许名单 → 拒绝', () => {
   const r = recordReview({ root, verdict: 'pass', reviewer: 'me-myself', reportPath: rp, summary: 's' });
   assert.equal(r.ok, false);
   assert.match(r.message, /复审者/);
+  // 拒绝提示与规则块 R9 同样列三类复审者：宿主子代理、外部执行器、用户另开的全新会话（登记名 general-purpose）
+  assert.match(r.message, /宿主子代理、外部执行器，或宿主没有子代理时用户另开的全新会话/);
+  assert.match(r.message, /general-purpose/);
 });
 
 test('复审记录：报告结论写“不通过”却记 pass → 拒绝', () => {
