@@ -137,8 +137,14 @@ if (isMain(import.meta.url)) {
       code = bad.length === 0 ? 0 : 1;
     } else {
       let env = null;
-      if (process.argv.includes('--env') && a.env !== 'recommended') throw new Error('--env 只能是 recommended（把没选的项按推荐补全）；只给用户的选择时用 --choice');
-      if (process.argv.includes('--env') || a.choices.length > 0) env = resolveEnvironment(path.resolve(a.target), { recommended: a.env === 'recommended', choices: parseChoices(a.choices) });
+      const envFlags = process.argv.filter((x) => x === '--env').length;
+      if (envFlags > 1 || (envFlags === 1 && a.env !== 'recommended')) throw new Error('--env 只能写一次，且值只能是 recommended（把没选的项按推荐补全）；只给用户的选择时用 --choice');
+      if (envFlags === 1 || a.choices.length > 0) {
+        // 项目已有配置时环境选择不生效（同步只提示）：不再解析校验，免得无效组合在提示前就退出
+        env = fs.existsSync(path.join(path.resolve(a.target), 'engineering.config.json'))
+          ? { values: {}, facts: null }
+          : resolveEnvironment(path.resolve(a.target), { recommended: a.env === 'recommended', choices: parseChoices(a.choices) });
+      }
       const r = syncKit({ target: a.target, dryRun: a.dryRun, force: a.force, hooks: a.hooks, bundleRoot, init: a.init, preset: a.profile ? PRESETS[a.profile] : null, env });
       console.log(`${r.dryRun ? '[试运行] ' : ''}整包版本 ${r.version}${a.fromTag ? `（来自标签 ${a.fromTag}）` : ''}`);
       for (const x of r.actions) console.log(`  [${x.type}] ${x.file}`);

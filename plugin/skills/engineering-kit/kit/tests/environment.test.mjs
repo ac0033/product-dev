@@ -117,37 +117,56 @@ test('工作流：草稿 PR 不跑、只改文档跳过但汇总检查仍成功�
   assert.match(y, /ready_for_review/);
   assert.match(y, /github\.event\.pull_request\.draft != true/);
   assert.match(y, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
-  assert.match(y, /group: ci-\$\{\{ github\.event\.pull_request\.number \|\| github\.sha \}\}/, '推送到 main 每次一组，排队中的运行不会被后一次推送顶掉');
-  assert.match(y, /git diff --no-renames --name-only/, '改名按旧路径删除加新路径新增算，源码改名进 docs 不会被当成只改文档');
+  assert.match(y, /group: ci-\$\{\{ github\.event\.pull_request\.number \|\| github\.run_id \}\}/, '每次推送各占一组：同一 SHA 先后推到 main 和 release 分支，排队中的运行也不会被顶掉');
+  assert.match(y, /git -c core\.quotepath=false diff --no-renames --name-only -z/, '改名按旧路径删除加新路径新增算；-z 输出让中文路径不被转义');
   assert.match(y, /ci-gate:\n\s+name: ci-gate/);
   assert.match(y, /if: always\(\)/);
   assert.match(y, /runs-on: ubuntu-latest/);
   assert.match(y, /run: npm test/);
   assert.match(y, /setup-node/);
   assert.ok(!/windows-latest|macos-latest/.test(y));
-  // 只改文档的判断：glob 转成 shell 的 case 模式
-  assert.match(y, /docs\/\*\.md\|README\.md\)/);
+  // 只改文档的判断：与闸门同一套 glob 语义（Node 的 path.matchesGlob），项目配置、豁免表、套件脚本永远算代码
+  assert.match(y, /matchesGlob/);
+  assert.match(y, /IGNORE: '\["docs\/\*\*\/\*\.md","README\.md"\]'/);
+  assert.match(y, /ALWAYS: '\["engineering\.config\.json","scripts\/engineering\/\*\*"\]'/);
+  assert.ok(!/case "\$f" in/.test(y), '不再用 shell case 判断（它的 * 能匹配斜杠，与闸门的 glob 不一致）');
   assert.ok(!/\t/.test(y));
+  // 判断脚本本身能跑：用同一段 JS 对几组路径求值
+  const code = (files) => {
+    const ignore = ['docs/**/*.md', 'README.md'];
+    const always = ['engineering.config.json', 'scripts/engineering/**'];
+    const doc = (f) => !always.some((g) => path.matchesGlob(f, g)) && ignore.some((g) => path.matchesGlob(f, g));
+    return files.length === 0 || files.some((f) => !doc(f));
+  };
+  assert.equal(code(['docs/a.md', 'docs/guides/b.md', 'README.md']), false);
+  assert.equal(code(['docs/01-需求/PRD.md']), false);
+  assert.equal(code(['docs/images/src/export.mjs']), true);
+  assert.equal(code(['src/parser.ts', 'docs/parser.md']), true);
+  assert.equal(code([]), true);
 });
 
-test('工作流：按选择生成——多系统矩阵、自托管后备用仓库变量切换、Python 栈、没有免审文档时总是跑', () => {
+test('工作流：按选择生成——多系统矩阵、自托管后备用仓库变量切换、Python 栈、没有免审文档时总是跑、testEnv 带进测试步骤', () => {
   const multi = renderCiWorkflow({ ...WF, ciOs: ['linux', 'windows', 'macos'] });
   assert.match(multi, /os: windows\n\s+runner: windows-latest/);
   assert.match(multi, /os: macos\n\s+runner: macos-latest/);
+  const EXT = "\(github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.repo\.full_name != github\.repository\)";
+  const SELF = "fromJSON\('\[\"self-hosted\",\"linux\"\]'\)";
   const fb = renderCiWorkflow({ ...WF, ciFallback: 'self-hosted' });
-  assert.match(fb, /vars\.CI_RUNNER == 'self-hosted' && github\.event\.pull_request\.head\.repo\.fork != true && fromJSON\('\["self-hosted","linux"\]'\) \|\| 'ubuntu-latest'/, '自托管只给仓库自己的提交和 PR，fork 的 PR 一律走托管 runner；带 linux 标签，不会被 Windows 自托管机接走');
+  assert.match(fb, new RegExp(`vars\.CI_RUNNER == 'self-hosted' && !${EXT} && ${SELF} \|\| 'ubuntu-latest'`), '自托管只给仓库自己的提交和 PR（按来源仓库比较，fork 仓库自己的分支 PR 不误判）；带 linux 标签，不会被 Windows 自托管机接走');
   const selfFirst = renderCiWorkflow({ ...WF, ciRunner: 'self-hosted', ciFallback: 'github-hosted' });
-  assert.match(selfFirst, /\(vars\.CI_RUNNER == 'github-hosted' \|\| github\.event\.pull_request\.head\.repo\.fork == true\) && 'ubuntu-latest' \|\| fromJSON\('\["self-hosted","linux"\]'\)/);
+  assert.match(selfFirst, new RegExp(`\(vars\.CI_RUNNER == 'github-hosted' \|\| ${EXT}\) && 'ubuntu-latest' \|\| ${SELF}`));
   const selfOnly = renderCiWorkflow({ ...WF, ciRunner: 'self-hosted' });
-  assert.match(selfOnly, /runner: \$\{\{ github\.event\.pull_request\.head\.repo\.fork == true && 'ubuntu-latest' \|\| fromJSON\('\["self-hosted","linux"\]'\) \}\}/);
+  assert.match(selfOnly, new RegExp(`runner: \$\{\{ ${EXT} && 'ubuntu-latest' \|\| ${SELF} \}\}`));
   assert.match(selfOnly, /不要把自托管 runner 用在接受外部 PR 的公开仓库/, '说明自托管 runner 的安全风险');
   const py = renderCiWorkflow({ ...WF, testCommand: 'python -m pytest -q' });
   assert.match(py, /setup-python/);
   assert.match(py, /run: python -m pip install pytest/, '干净环境里先装 pytest');
-  assert.ok(!/setup-node/.test(py));
+  assert.ok(!/node-version[\s\S]*python -m pytest/.test(py.split('  test:')[1]), '测试作业里不装 Node');
   const none = renderCiWorkflow({ ...WF, reviewIgnore: [] });
   assert.match(none, /code=true/);
-  assert.ok(!/case "\$f" in/.test(none), '没有免审文档时不生成 case 判断');
+  assert.ok(!/matchesGlob/.test(none), '没有免审文档时不生成判断脚本');
+  const withEnv = renderCiWorkflow({ ...WF, testEnv: { PYTHONPATH: 'src' } });
+  assert.match(withEnv, /- run: npm test\n\s+env:\n\s+PYTHONPATH: "src"/, 'testEnv 写进测试步骤的环境变量');
 });
 
 test('应用到配置：写入 gate 与 environment，并把汇总检查列为必需检查；不改入参', () => {
@@ -172,6 +191,9 @@ test('resolveEnvironment：推荐模式补全没选的项；只给选择时只�
   assert.deepEqual(only.values, { fullTests: 'local' });
   assert.throws(() => resolveEnvironment(root, { recommended: false, choices: { fullTests: 'ci' } }, LAPTOP), /pr 流程|ciRunner/);
 });
+
+/** 项目已有的 CI 工作流（有一个叫 ci 的 job）。 */
+const MINE = 'name: mine\njobs:\n  ci:\n    runs-on: ubuntu-latest\n';
 
 /** 在空目录里用 ts 预设首次安装。 */
 function install(extra = {}) {
@@ -208,15 +230,17 @@ test('同步：已有配置时环境选择不生效（只提示）；已有 ci.y
 
   const dir2 = path.join(tmpDir('ekit-env-'), 'proj');
   fs.mkdirSync(path.join(dir2, '.github/workflows'), { recursive: true });
-  write(dir2, '.github/workflows/ci.yml', 'name: mine\n');
+  write(dir2, '.github/workflows/ci.yml', MINE);
   // 已有 ci.yml：套件不能确认它跑全量测试，fullTests=ci 时必须由用户写明哪些必需检查跑全量，否则拒绝安装
   assert.throws(() => syncKit({ target: dir2, init: true, preset: PRESETS.ts, env }), /requiredChecks/);
   assert.ok(!fs.existsSync(path.join(dir2, 'engineering.config.json')), '拒绝时不留半成品');
-  const named = { values: { ...env.values, requiredChecks: ['unit (ubuntu-latest)'] }, facts: LAPTOP };
+  // 写错的检查名（在已有工作流里找不到）也拒绝
+  assert.throws(() => syncKit({ target: dir2, init: true, preset: PRESETS.ts, env: { values: { ...env.values, requiredChecks: ['nonexistent'] }, facts: LAPTOP } }), /找不到/);
+  const named = { values: { ...env.values, requiredChecks: ['ci (ubuntu-latest)'] }, facts: LAPTOP };
   const r = syncKit({ target: dir2, init: true, preset: PRESETS.ts, env: named });
   assert.equal(r.ok, true, r.messages.join('\n'));
-  assert.equal(read(dir2, '.github/workflows/ci.yml'), 'name: mine\n');
-  assert.deepEqual(JSON.parse(read(dir2, 'engineering.config.json')).modules.gate.requiredChecks, ['unit (ubuntu-latest)']);
+  assert.equal(read(dir2, '.github/workflows/ci.yml'), MINE);
+  assert.deepEqual(JSON.parse(read(dir2, 'engineering.config.json')).modules.gate.requiredChecks, ['ci (ubuntu-latest)']);
   assert.ok(r.messages.some((m) => /ci\.yml/.test(m)), r.messages.join('\n'));
   // fullTests=local 时已有 ci.yml 不受影响
   const dir3 = path.join(tmpDir('ekit-env-'), 'proj');
@@ -247,4 +271,15 @@ test('命令行：environment.mjs detect 输出事实与推荐（JSON），--cho
     assert.match(miss.stderr, /--env/);
   }
   assert.ok(!fs.existsSync(path.join(dir2, 'engineering.config.json')));
+});
+
+test('推荐：公开仓库不推荐也不允许自托管；自托管须用 hasServer=true 明确确认；detect 阶段就列出安装会报的配置错误', () => {
+  const pub = { ...LAPTOP, repoPublic: true };
+  assert.equal(recommend(pub, { hasServer: true }).values.ciFallback, null, '公开仓库不设自托管后备');
+  assert.ok(recommend(pub, { hasServer: true, ciRunner: 'self-hosted' }).conflicts.some((c) => /公开/.test(c)));
+  assert.ok(recommend(LAPTOP, { publicRepo: true, hasServer: true, ciFallback: 'self-hosted' }).conflicts.some((c) => /公开/.test(c)));
+  assert.ok(recommend(LAPTOP, { ciRunner: 'self-hosted' }).conflicts.some((c) => /hasServer=true/.test(c)), '没声明有没有服务器也要确认');
+  // 主备同名：config 校验才会报，detect 也要报
+  assert.ok(recommend(LAPTOP, { hasServer: true, ciFallback: 'github-hosted' }).conflicts.length > 0);
+  assert.throws(() => resolveEnvironment(tmpRepo(), { recommended: false, choices: { ciRunner: 'self-hosted', hasServer: true, publicRepo: true, fullTests: 'local' } }, LAPTOP), /公开/);
 });

@@ -290,12 +290,16 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
         if (v.fullTests === 'ci' && !(v.requiredChecks && v.requiredChecks.length > 0)) {
           throw new Error(`项目已有 ${CI_WORKFLOW_REL}，套件无法确认它跑全量测试：fullTests 为 ci 时请用 --choice requiredChecks=<跑全量测试的检查名，逗号分隔> 写明（检查名查法见 process.md 第 4 节），或先删除/改名已有工作流让套件生成，或用 fullTests=local 安装；不写 requiredChecks 会让合并入口把任何一项成功的检查当作全量通过`);
         }
+        // 防写错检查名：每个名字（去掉矩阵后缀）至少要在已有工作流文本里出现过；套件无法保证它真跑全量，名字仍由用户负责
+        const wfText = fs.readFileSync(wfAbs, 'utf8');
+        const unknown = (v.requiredChecks || []).filter((n) => !wfText.includes(n.replace(/\s*\(.*\)\s*$/, '')));
+        if (unknown.length > 0) throw new Error(`requiredChecks 里的 ${unknown.join('、')} 在已有的 ${CI_WORKFLOW_REL} 里找不到（检查名写 job 名，含矩阵后缀，查法见 process.md 第 4 节）；写错会让合并入口拦下所有 PR 或放行没跑全量的 PR`);
         actions.push({ type: 'keep', file: CI_WORKFLOW_REL });
         messages.push(`项目已有 ${CI_WORKFLOW_REL}，没有生成 CI 工作流${v.fullTests === 'ci' ? `；必需检查按你写明的 ${v.requiredChecks.join('、')} 配置` : ''}`);
         if (v.fullTests === 'ci') requiredChecks = v.requiredChecks;
       } else {
         const gate = (newCfgRaw.modules || {}).gate || {};
-        const content = renderCiWorkflow({ ciRunner: v.ciRunner, ciFallback: v.ciFallback ?? null, ciOs: v.ciOs || ['linux'], testCommand: gate.testCommand || 'npm test', reviewIgnore: (newCfgRaw.rules || {}).reviewIgnore || [] });
+        const content = renderCiWorkflow({ ciRunner: v.ciRunner, ciFallback: v.ciFallback ?? null, ciOs: v.ciOs || ['linux'], testCommand: gate.testCommand || 'npm test', testEnv: gate.testEnv || {}, reviewIgnore: (newCfgRaw.rules || {}).reviewIgnore || [] });
         ops.push({ rel: CI_WORKFLOW_REL, abs: wfAbs, content, action: 'create' });
         actions.push({ type: 'create', file: CI_WORKFLOW_REL });
         if (v.reviewFlow === 'pr') requiredChecks = [CI_GATE_JOB];

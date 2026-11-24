@@ -12,7 +12,7 @@ import { verify } from '../gate/verify.mjs';
 import { commitAll, featureRepo, git, SRC_HEADER, TEST_CONFIG, write } from './helpers.mjs';
 
 /** ci 模式的合法配置片段。 */
-const CI = { reviewFlow: 'pr', fullTests: 'ci', ciRunner: 'github-hosted' };
+const CI = { reviewFlow: 'pr', fullTests: 'ci', ciRunner: 'github-hosted', requiredChecks: ['test'] };
 
 /** 在功能分支上改 dedup（源文件与带断言的测试一起改）并提交。 */
 function changeDedup(root, tag = 'sorted') {
@@ -158,4 +158,26 @@ test('模板与说明：配置模板写明两项，默认 local；说明里讲�
   assert.match(tpl._说明, /fullTests/);
   assert.match(tpl._说明, /ciRunner/);
   assert.equal(normalizeConfig(tpl).fullTests, 'local');
+});
+
+test('配置：fullTests 为 ci 须在 requiredChecks 里写明跑全量的检查（空表示每项检查都必需，一个只跑 lint 的 CI 也会放行）', () => {
+  assert.throws(() => normalizeConfig(profile({ reviewFlow: 'pr', fullTests: 'ci', ciRunner: 'github-hosted' })), /requiredChecks/);
+  assert.throws(() => normalizeConfig(profile({ reviewFlow: 'pr', fullTests: 'ci', ciRunner: 'github-hosted', requiredChecks: [] })), /requiredChecks/);
+  assert.equal(normalizeConfig(profile({ ...CI })).requiredChecks[0], 'test');
+});
+
+test('闸门：ci 模式加 force 也在本机重跑全量；默认的静态检查仍做源码与测试 glob 误配检查', () => {
+  const root = featureRepo({ ...CI });
+  changeDedup(root);
+  const forced = runGate({ root, force: true });
+  assert.equal(forced.ok, true, forced.messages.join('\n'));
+  assert.equal(forced.record.mode, 'full');
+
+  // glob 写错（JS 项目沿用默认的 ts glob）：有代码文件却没有任何文件匹配，不能当成“交给 CI”放过
+  const bad = featureRepo({ ...CI, sourceGlobs: ['nothing/**/*.ts'], testGlobs: ['nothing/**/*.test.ts'] });
+  write(bad, 'lib/a.js', `${SRC_HEADER}export const a = 1;\n`);
+  commitAll(bad, 'js');
+  const res = runGate({ root: bad });
+  assert.equal(res.ok, false, res.messages.join('\n'));
+  assert.match(res.messages.join('\n'), /sourceGlobs|没有任何文件匹配/);
 });

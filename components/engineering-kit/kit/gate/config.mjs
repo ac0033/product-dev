@@ -145,6 +145,10 @@ function checkExecution(eff) {
     if (eff.ciRunner !== 'github-hosted' && eff.ciRunner !== 'self-hosted') {
       throw new Error(`${where}.fullTests 为 ci 须声明 ciRunner 为 github-hosted 或 self-hosted（当前 ${JSON.stringify(eff.ciRunner)}）`);
     }
+    // 必需检查为空表示“PR 上每一项检查都算必需”：一个只跑 lint 的 CI 成功也会放行合并，而本机又不要求测试记录——所以须写明哪些检查跑全量
+    if (!Array.isArray(eff.requiredChecks) || eff.requiredChecks.length === 0) {
+      throw new Error(`${where}.fullTests 为 ci 须在 requiredChecks 里写明跑全量测试的检查名（不写会让任何一项成功的检查放行合并）`);
+    }
   }
 }
 

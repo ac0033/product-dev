@@ -5,7 +5,7 @@
 //   一是本机的实际情况（系统、CPU、内存、有没有 GitHub 远程和 gh）；二是更快、更便宜、更高效、更准确
 //   （能并行就并行；并行受资源限制时先想能不能放到云端，不行才串行；CI 只用 Linux 除非产品要在别的系统上运行）。
 // 用法：node tools/environment.mjs detect [--target <项目>] [--choice <键=值>]…   输出本机事实与推荐（JSON），供 agent 问用户前核对
-//   --choice 的键：fullTests、reviewFlow、ciRunner、ciFallback、ciOs（逗号分隔）、session、parallel，以及不写进配置的 hasServer（true/false）、targets（逗号分隔的系统）、requiredChecks（项目已有 CI 时写明哪些检查跑全量）。
+//   --choice 的键：fullTests、reviewFlow、ciRunner、ciFallback、ciOs（逗号分隔）、session、parallel，以及不写进配置的 hasServer（true/false）、targets（逗号分隔的系统）、requiredChecks（项目已有 CI 时写明哪些检查跑全量）、publicRepo（true/false，仓库是否公开；公开仓库不能用自托管 runner，有 GitHub 远程时会尽力自动读取）。
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -32,13 +32,22 @@ export function detectFacts(root, override = {}) {
     const r = git(root, ['remote', 'get-url', 'origin']);
     githubRemote = r.ok && /github\.com/i.test(r.out);
   }
-  const gh = spawnSync('gh', ['auth', 'status'], { encoding: 'utf8' }); // 已登录才算可用：只装了 gh 不能建仓库、开 PR
+  // 能用 gh 访问 GitHub 才算可用：只装了 gh、没登录不能建仓库、开 PR。用 gh api user 而不是 gh auth status：
+  // 后者会因为另一个过期的账号返回非零，而当前账号其实可用
+  const gh = spawnSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8' });
+  // 仓库公开与否（有 GitHub 远程时尽力读，读不到是 null）：公开仓库不能用自托管 runner
+  let repoPublic = null;
+  if (root && githubRemote && gh.status === 0) {
+    const v = spawnSync('gh', ['repo', 'view', '--json', 'isPrivate', '--jq', '.isPrivate'], { cwd: root, encoding: 'utf8' });
+    if (v.status === 0) repoPublic = v.stdout.trim() === 'false' ? true : v.stdout.trim() === 'true' ? false : null;
+  }
   return {
     os: platform,
     cpus: os.cpus().length,
     memGB: Math.round(os.totalmem() / 2 ** 30),
     githubRemote,
     ghAvailable: gh.status === 0,
+    repoPublic,
     ...override,
   };
 }
@@ -81,8 +90,10 @@ export function recommend(facts, choices = {}) {
     ? 'GitHub 托管 runner 免维护、公开仓库免费，额度够用时最省事；有服务器的另设后备'
     : '全量不交给 CI，CI 放哪暂不声明');
   const runner = values.ciRunner;
-  const fallbackRec = choices.hasServer && (runner === 'github-hosted' || runner === 'self-hosted') ? (runner === 'github-hosted' ? 'self-hosted' : 'github-hosted') : null;
-  pick('ciFallback', choices.ciFallback, fallbackRec, fallbackRec ? '有自己的服务器：主 CI 额度用完或不可用时改用另一处，不耽误合并' : '没有服务器，不设后备');
+  const publicRepo = choices.publicRepo ?? facts.repoPublic ?? null;
+  // 公开仓库不推荐自托管 runner：外部 PR 能改工作流，在用户服务器上执行任意代码
+  const fallbackRec = choices.hasServer === true && publicRepo !== true && (runner === 'github-hosted' || runner === 'self-hosted') ? (runner === 'github-hosted' ? 'self-hosted' : 'github-hosted') : null;
+  pick('ciFallback', choices.ciFallback, fallbackRec, fallbackRec ? '有自己的服务器：主 CI 额度用完或不可用时改用另一处，不耽误合并' : publicRepo === true && choices.hasServer === true ? '公开仓库不设自托管后备：外部 PR 能改工作流，会在你的服务器上执行任意代码' : '没有服务器，不设后备');
   const extra = [...new Set((choices.targets || []).filter((t) => OS_NAMES.includes(t) && t !== 'linux'))];
   pick('ciOs', choices.ciOs, ['linux', ...extra], extra.length > 0
     ? `产品要在 ${extra.join('、')} 上运行：除 Linux 外也在这些系统上验证（更准确），但 Windows 按 2 倍、macOS 按 10 倍计费`
@@ -97,14 +108,28 @@ export function recommend(facts, choices = {}) {
 
   if (values.fullTests === 'ci' && values.reviewFlow !== 'pr') conflicts.push('fullTests 为 ci 须搭配 pr 流程（只有 pr 流程的合并入口核对 CI）');
   if (values.fullTests === 'ci' && (values.ciRunner === null || values.ciRunner === 'none')) conflicts.push('fullTests 为 ci 须声明 ciRunner 为 github-hosted 或 self-hosted（ciRunner 不能是 none 或不写）');
-  conflicts.push(...serverConflicts(values, choices));
+  conflicts.push(...serverConflicts(values, choices, facts));
+  // 与安装时的配置校验同一口径：detect 阶段就把安装会报的错列出来（只在没有别的冲突时补，避免重复）
+  if (conflicts.length === 0) {
+    try {
+      normalizeConfig(applyEnvironment({ profile: 2 }, values, { requiredChecks: values.fullTests === 'ci' ? [CI_GATE_JOB] : undefined }));
+    } catch (e) {
+      conflicts.push(e.message);
+    }
+  }
   return { values, reasons, sources, conflicts };
 }
 
-/** 没有服务器却把自托管 runner 设成主用或后备：生成的作业切到自托管后没有 runner 可用。 */
-function serverConflicts(values, choices) {
-  if (choices.hasServer !== false) return [];
-  return ['ciRunner', 'ciFallback'].filter((k) => values[k] === 'self-hosted').map((k) => `${k} 选了自托管 runner，但没有自己的服务器：改选 github-hosted，或先准备服务器`);
+/**
+ * 自托管 runner 的冲突：没有自己的服务器（hasServer 不是 true，没声明也算——须明确确认）；
+ * 公开仓库（外部 PR 能改工作流，在用户服务器上执行任意代码，工作流里的 fork 分流不是安全边界）。主用或后备都查。
+ */
+function serverConflicts(values, choices, facts = {}) {
+  const selfKeys = ['ciRunner', 'ciFallback'].filter((k) => values[k] === 'self-hosted');
+  const out = [];
+  if (choices.hasServer !== true) out.push(...selfKeys.map((k) => `${k} 选了自托管 runner，但没有确认有自己的服务器（用 hasServer=true 明确确认）：改选 github-hosted，或先准备服务器`));
+  if ((choices.publicRepo ?? facts.repoPublic) === true) out.push(...selfKeys.map((k) => `${k} 选了自托管 runner，但仓库是公开的：外部 PR 能改工作流并在你的服务器上执行任意代码，公开仓库请用 github-hosted`));
+  return out;
 }
 
 /** 一句话说明命令写法：按本机系统。 */
@@ -161,32 +186,37 @@ export function resolveEnvironment(root, { recommended = false, choices = {} } =
   if (recommended && recommendation.conflicts.length > 0) throw new Error(`环境选择有冲突：${recommendation.conflicts.join('；')}`);
   const values = recommended ? { ...recommendation.values } : Object.fromEntries(VALUE_KEYS.filter((k) => choices[k] !== undefined).map((k) => [k, choices[k]]));
   // 只写用户给出的项时不拿推荐值制造冲突，只核对用户自己选的；推荐模式的冲突上面已拦
-  const own = serverConflicts(values, choices);
+  const own = serverConflicts(values, choices, facts);
   if (own.length > 0) throw new Error(`环境选择有冲突：${own.join('；')}`);
   // 已有 CI 时由用户写明哪些检查跑全量（requiredChecks）：不属于推荐，原样带上
   if (choices.requiredChecks !== undefined) values.requiredChecks = choices.requiredChecks;
-  normalizeConfig(applyEnvironment({ profile: 2 }, values)); // 取值与组合不成立时在这里抛错
+  // 取值与组合不成立时在这里抛错；套件生成工作流时必需检查是 ci-gate，先按它校验（已有 ci.yml 的项目由 sync 另查 requiredChecks）
+  normalizeConfig(applyEnvironment({ profile: 2 }, values, { requiredChecks: values.requiredChecks ?? (values.fullTests === 'ci' ? [CI_GATE_JOB] : undefined) }));
   return { values, facts, recommendation };
 }
 
 /**
  * 工作流里 Linux 的 runner：只有一处时直接写；有后备时用仓库变量 CI_RUNNER 切换（不用改工作流、不用提交）。
  * 自托管 runner 带 [self-hosted, linux] 两个标签，不会被同一仓库注册的 Windows、macOS 自托管机接走；
- * 来自 fork 的 PR 一律走 GitHub 托管 runner，外部提交的代码不会在用户自己的服务器上执行。
+ * 来源仓库不是本仓库的 PR（fork）走 GitHub 托管 runner，外部提交的代码不在用户自己的服务器上执行。
+ * 这只是第二道防线，不是安全边界：PR 能改工作流本身，真正的隔离靠不在接受外部 PR 的公开仓库用自托管 runner（resolveEnvironment 对公开仓库直接拒绝）。
  */
 function linuxRunner({ ciRunner, ciFallback }) {
   const self = `fromJSON('["self-hosted","linux"]')`;
-  const fork = 'github.event.pull_request.head.repo.fork';
+  const external = "(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)";
   if (ciRunner === 'self-hosted') {
     return ciFallback === 'github-hosted'
-      ? `\${{ (vars.CI_RUNNER == 'github-hosted' || ${fork} == true) && 'ubuntu-latest' || ${self} }}`
-      : `\${{ ${fork} == true && 'ubuntu-latest' || ${self} }}`;
+      ? `\${{ (vars.CI_RUNNER == 'github-hosted' || ${external}) && 'ubuntu-latest' || ${self} }}`
+      : `\${{ ${external} && 'ubuntu-latest' || ${self} }}`;
   }
-  return ciFallback === 'self-hosted' ? `\${{ vars.CI_RUNNER == 'self-hosted' && ${fork} != true && ${self} || 'ubuntu-latest' }}` : 'ubuntu-latest';
+  return ciFallback === 'self-hosted' ? `\${{ vars.CI_RUNNER == 'self-hosted' && !${external} && ${self} || 'ubuntu-latest' }}` : 'ubuntu-latest';
 }
 
-/** 免审文档的 glob 转成 shell case 模式：case 里 * 能匹配斜杠，所以 **\/ 去掉、** 换成 *。 */
-const globToCase = (g) => g.replace(/\*\*\//g, '').replace(/\*\*/g, '*');
+/** 总是算“有代码改动”的路径（与闸门同口径：项目配置、豁免表、套件脚本永远在范围内，不当文档）。 */
+const ALWAYS_CODE = ['engineering.config.json', 'scripts/engineering/**'];
+
+/** YAML 单引号字符串里的单引号写成两个。 */
+const yamlSingle = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
 /** 按测试命令判断运行环境：npm、node 用 Node，python、pytest 用 Python，其余不装。 */
 function stackSetup(testCommand) {
@@ -205,30 +235,26 @@ function stackSetup(testCommand) {
  * 所以 pr 流程的合并入口不会因为必需检查被跳过而拦住；同一 PR 的新提交取消上一次未完成的运行；推送到 main 总是全量。
  * 参数：ciRunner、ciFallback、ciOs、testCommand、reviewIgnore。生成后由项目维护，同步不覆盖。
  */
-export function renderCiWorkflow({ ciRunner, ciFallback = null, ciOs = ['linux'], testCommand, reviewIgnore = [] }) {
+export function renderCiWorkflow({ ciRunner, ciFallback = null, ciOs = ['linux'], testCommand, testEnv = {}, reviewIgnore = [] }) {
   const linux = linuxRunner({ ciRunner, ciFallback });
   const matrix = ciOs
     .map((o) => `          - os: ${o}\n            runner: ${o === 'linux' ? linux : o === 'windows' ? 'windows-latest' : 'macos-latest'}`)
     .join('\n');
-  const patterns = reviewIgnore.map(globToCase);
-  const detect = patterns.length === 0
+  // 是否只改文档：用 Node 的 path.matchesGlob 判断，与闸门同一套 glob 语义（docs/*.md 不匹配 docs/a/b.md）；
+  // 路径用 -z 输出（中文路径不被转义），改名按旧路径删除加新路径新增算（--no-renames）；差异为空按含代码处理。
+  const detect = reviewIgnore.length === 0
     ? '          echo "code=true" >> "$GITHUB_OUTPUT"\n'
     : [
         '          if [ "$EVENT" != "pull_request" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; exit 0; fi',
-        '          code=false',
-        '          git diff --no-renames --name-only "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed.txt"',
-        '          while IFS= read -r f; do',
-        '            case "$f" in',
-        `              ${patterns.join('|')}) ;;`,
-        '              *) code=true ;;',
-        '            esac',
-        '          done < "$RUNNER_TEMP/changed.txt"',
-        '          echo "code=$code" >> "$GITHUB_OUTPUT"',
+        '          git -c core.quotepath=false diff --no-renames --name-only -z "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed.txt"',
+        `          node -e "const { matchesGlob } = require('node:path'); const files = require('node:fs').readFileSync(process.env.RUNNER_TEMP + '/changed.txt', 'utf8').split('\\\\0').filter(Boolean); const ignore = JSON.parse(process.env.IGNORE); const always = JSON.parse(process.env.ALWAYS); const doc = (f) => !always.some((g) => matchesGlob(f, g)) && ignore.some((g) => matchesGlob(f, g)); console.log('code=' + (files.length === 0 || files.some((f) => !doc(f))));" >> "$GITHUB_OUTPUT"`,
         '',
       ].join('\n');
+  const envBlock = reviewIgnore.length === 0 ? '' : `          IGNORE: ${yamlSingle(JSON.stringify(reviewIgnore))}\n          ALWAYS: ${yamlSingle(JSON.stringify(ALWAYS_CODE))}\n`;
+  const testEnvBlock = Object.keys(testEnv).length === 0 ? '' : `        env:\n${Object.entries(testEnv).map(([k, v]) => `          ${k}: ${JSON.stringify(String(v))}`).join('\n')}\n`;
   return `# 由 engineering-kit 按项目选定的执行位置生成（modules.gate.fullTests、ciRunner、modules.environment.ciOs）；生成后由项目维护，同步不覆盖。
 # 降低 CI 频率：草稿 PR 不跑；只改免审文档（reviewIgnore）的 PR 跳过测试，汇总检查 ${CI_GATE_JOB} 仍成功；同一 PR 的新提交取消上一次未完成的运行。
-${ciFallback ? `# 后备切换：在仓库设置里把变量 CI_RUNNER 设成 ${ciFallback}（改回删除变量或设成 ${ciRunner}），不用改本文件。自托管 runner 只用于 Linux，带 self-hosted、linux 标签。\n` : ''}${ciRunner === 'self-hosted' || ciFallback === 'self-hosted' ? '# 安全：不要把自托管 runner 用在接受外部 PR 的公开仓库；这里已让 fork 来的 PR 走 GitHub 托管 runner，仍应在仓库设置里要求外部贡献者的工作流经人批准后再运行。\n' : ''}name: CI
+${ciFallback ? `# 后备切换：在仓库设置里把变量 CI_RUNNER 设成 ${ciFallback}（改回删除变量或设成 ${ciRunner}），不用改本文件。自托管 runner 只用于 Linux，带 self-hosted、linux 标签。\n` : ''}${ciRunner === 'self-hosted' || ciFallback === 'self-hosted' ? '# 安全：不要把自托管 runner 用在接受外部 PR 的公开仓库；这里让 fork 来的 PR 走 GitHub 托管 runner 只是第二道防线（PR 能改工作流本身），不是安全边界；公开仓库请不要用自托管 runner。testCommand 与 testEnv 是安装时写入的，之后改了它们要同步改本文件。\n' : ''}name: CI
 
 on:
   pull_request:
@@ -240,7 +266,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-\${{ github.event.pull_request.number || github.sha }}
+  group: ci-\${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: \${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -255,11 +281,14 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
       - id: diff
         env:
           EVENT: \${{ github.event_name }}
           BASE_SHA: \${{ github.event.pull_request.base.sha }}
-        run: |
+${envBlock}        run: |
 ${detect}
   test:
     name: test (\${{ matrix.os }})
@@ -276,7 +305,7 @@ ${matrix}
         with:
           persist-credentials: false
 ${stackSetup(testCommand)}      - run: ${testCommand}
-
+${testEnvBlock}
   ${CI_GATE_JOB}:
     name: ${CI_GATE_JOB}
     needs: [changes, test]
@@ -323,6 +352,7 @@ export function parseChoice(text) {
     case 'ciOs': return [key, list(OS_NAMES)];
     case 'targets': return [key, list(OS_NAMES)];
     case 'hasServer': return [key, oneOf(['true', 'false']) === 'true'];
+    case 'publicRepo': return [key, oneOf(['true', 'false']) === 'true'];
     case 'requiredChecks': return [key, val.split(',').map((x) => x.trim()).filter(Boolean)];
     default: throw new Error(`未知的 --choice 键 ${key}`);
   }

@@ -15,7 +15,7 @@
 //   刚有过未通过的运行（全量或分组）时不沿用任何记录，全量未通过时同一棵树的全量通过记录作废。静态检查两种模式、复用与否都照常做。
 // 执行位置（modules.gate.fullTests）：local（默认）如上；ci 时全量测试交给 CI，默认只做静态检查——不跑测试命令、不写测试记录，
 //   输出写明交给 CI（merge.mjs 合并前核对 CI 在最终提交上全部通过）；--affected 仍按上面的规则跑受影响的分组（本机快速自查），
-//   --full 在本机强制跑全量并写记录（CI 暂不可用等应急）。fullTests 是判定策略字段，取基准提交上的值，分支自己改不生效。
+//   --full 或 --force 在本机跑全量并写记录（CI 暂不可用等应急）。fullTests 是判定策略字段，取基准提交上的值，分支自己改不生效。
 // 闸门范围的口径见 lib.mjs 的 gateScope；基准分支设置取默认主干上的配置，判定策略（reviewIgnore 等）取基准提交上的配置，
 // 工作区写的值与生效值不同时输出提示行。
 // 用法：node scripts/engineering/gate/gate.mjs [--affected] [--force] [--full]
@@ -191,14 +191,6 @@ function runChecks({ root, config, affected = false, force = false, full = false
     }
     if (asserted.hints.length > 0) staticChecks.testCases = asserted.hints;
     const passLines = [...staticMessages(staticChecks, asserted.stats), ...hintLines];
-    // 全量测试交给 CI：只做静态检查（上面已通过），不跑测试命令、不写测试记录；要在本机跑，显式加 --affected 或 --full
-    if (config.fullTests === 'ci' && !full && !affected) {
-      return {
-        ok: true,
-        messages: [...passLines, `全量测试交给 CI（modules.gate.fullTests=ci，CI：${config.ciRunner}），本机未跑测试；CI 在最终提交上跑全量，merge.mjs 合并前核对。要在本机跑：--affected（受影响的分组）或 --full（全量）`],
-        record: null,
-      };
-    }
     if (full) affected = false;
     const digest = configDigest(config);
     const files = fileHashes(root, before.scope);
@@ -237,6 +229,16 @@ function runChecks({ root, config, affected = false, force = false, full = false
       };
       writeRecord(root, 'tests.json', noTestRecord);
       return { ok: true, messages: [...passLines, '尚无源码与测试文件，未运行测试命令（写第一份源码时，测试先行检查会要求先写测试）'], record: noTestRecord };
+    }
+
+    // 全量测试交给 CI：只做静态检查（上面已通过，含源码/测试 glob 误配检查），不跑测试命令、不写测试记录；
+    // 要在本机跑，显式加 --affected（受影响的分组）、--full（全量）或 --force（重跑全量）
+    if (config.fullTests === 'ci' && !full && !affected && !force) {
+      return {
+        ok: true,
+        messages: [...passLines, `全量测试交给 CI（modules.gate.fullTests=ci，CI：${config.ciRunner}），本机未跑测试；CI 在最终提交上跑全量，merge.mjs 合并前核对。要在本机跑：--affected（受影响的分组）、--full 或 --force（全量）`],
+        record: null,
+      };
     }
 
     if (!force) {
