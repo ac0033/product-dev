@@ -137,8 +137,8 @@ if (isMain(import.meta.url)) {
       code = bad.length === 0 ? 0 : 1;
     } else {
       let env = null;
-      if (a.env !== undefined && a.env !== 'recommended') throw new Error('--env 只能是 recommended（把没选的项按推荐补全）；只给用户的选择时用 --choice');
-      if (a.env !== undefined || a.choices.length > 0) env = resolveEnvironment(path.resolve(a.target), { recommended: a.env === 'recommended', choices: parseChoices(a.choices) });
+      if (process.argv.includes('--env') && a.env !== 'recommended') throw new Error('--env 只能是 recommended（把没选的项按推荐补全）；只给用户的选择时用 --choice');
+      if (process.argv.includes('--env') || a.choices.length > 0) env = resolveEnvironment(path.resolve(a.target), { recommended: a.env === 'recommended', choices: parseChoices(a.choices) });
       const r = syncKit({ target: a.target, dryRun: a.dryRun, force: a.force, hooks: a.hooks, bundleRoot, init: a.init, preset: a.profile ? PRESETS[a.profile] : null, env });
       console.log(`${r.dryRun ? '[试运行] ' : ''}整包版本 ${r.version}${a.fromTag ? `（来自标签 ${a.fromTag}）` : ''}`);
       for (const x of r.actions) console.log(`  [${x.type}] ${x.file}`);

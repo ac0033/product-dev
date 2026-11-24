@@ -63,7 +63,8 @@
 1. 运行 `node <kit>/tools/environment.mjs detect --target <项目> [--choice 键=值]…`，得到本机事实（系统、CPU、内存、有没有 GitHub 远程与 `gh`）和推荐（每项带理由、冲突）。
 2. 把要问的事一次问完，推荐项放第一：全量测试在 CI 还是本机跑；CI 放哪（GitHub 托管 / 自托管服务器，有没有自己的服务器、要不要后备）；CI 跑哪些系统（产品要在哪些系统上运行）；开发更适合本地会话还是云端会话；能并行的是否并行。用户已经说了想法的按用户的，不再问。
 3. 用户没选或不知道怎么选：agent 直接用推荐，并告诉用户每项选了什么、为什么，用户可随时改。推荐按两条原则：一是本机的实际情况（系统决定命令写法，CPU 和内存决定本机扛不扛得住全量测试与并行任务，有没有 GitHub 和服务器决定 CI 放哪）；二是更快、更便宜、更高效、更准确——能并行就并行，并行受资源限制时先想能不能放到云端会话或 CI，不行才串行；CI 只用 Linux，除非产品要在别的系统上运行；有 GitHub 就把全量交给 CI。
-4. 装：`node <kit>/sync.mjs --target <项目> --init --profile ts|python --env recommended [--choice 键=值]…`（`--env recommended` 把没选的项按推荐补全；只给 `--choice` 时只写给出的项）。首次创建配置时写入选择、按选择生成 `.github/workflows/ci.yml`（草稿 PR 不跑、只改免审文档跳过测试、汇总检查 `ci-gate` 仍成功；选了 pr 流程时它就是必需检查），并输出“本项目的执行方式”几行说明。已有配置的项目环境选择不生效，只提示，要改手动改配置；已有 `ci.yml` 不覆盖。
+4. 装：`node <kit>/sync.mjs --target <项目> --init --profile ts|python --env recommended [--choice 键=值]…`（`--env recommended` 把没选的项按推荐补全；只给 `--choice` 时只写给出的项）。首次创建配置时写入选择、按选择生成 `.github/workflows/ci.yml`（草稿 PR 不跑、只改免审文档跳过测试、汇总检查 `ci-gate` 仍成功；选了 pr 流程时它就是必需检查），并输出“本项目的执行方式”几行说明。已有配置的项目环境选择不生效，只提示，要改手动改配置。已有 `ci.yml` 不覆盖：套件看不出它跑不跑全量测试，所以 `fullTests=ci` 时必须加 `--choice requiredChecks=<跑全量测试的检查名，逗号分隔>` 写明，否则拒绝安装（不然一个只跑 lint 的 CI 也能让合并入口放行）。推荐用 `gh auth status` 判断 GitHub 是否可用：只装了 `gh` 没登录不算。
+   - 自托管 runner 的安全：生成的工作流让来自 fork 的 PR 一律走 GitHub 托管 runner，自托管 runner 带 `self-hosted`、`linux` 两个标签，只用于 Linux；不要把自托管 runner 用在接受外部 PR 的公开仓库，并在仓库设置里要求外部贡献者的工作流经人批准后再运行。
 5. 之后换环境（换机器、有了服务器、额度用完）时，按下面的表重新核对，改配置（判定策略字段须合入主干后才生效）。
 
 #### 每类工作在哪做

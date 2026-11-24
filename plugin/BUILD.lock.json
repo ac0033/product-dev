@@ -9,7 +9,7 @@
       "license": "MIT",
       "changes": "头部去掉 disable-model-invocation，加 user-invocable: false",
       "fileCount": 56,
-      "sha256": "301d77e3837c56b5c449ec3fc4de6ac28df80c8122f9aa64f9d92a4acc98792b"
+      "sha256": "69bdec273b0b6db5cd0e94a26b02fb347b637c79ee44bfb078e9d26a2134ed4b"
     },
     {
       "id": "product-design-orchestrator",

@@ -286,8 +286,13 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
     if (v.ciRunner && v.ciRunner !== 'none') {
       const wfAbs = path.join(root, CI_WORKFLOW_REL);
       if (fs.existsSync(wfAbs)) {
+        // 套件看不出已有工作流跑不跑全量测试：全量交给 CI 时，必须由用户写明哪些检查跑全量，否则一个只跑 lint 的 CI 也能放行合并
+        if (v.fullTests === 'ci' && !(v.requiredChecks && v.requiredChecks.length > 0)) {
+          throw new Error(`项目已有 ${CI_WORKFLOW_REL}，套件无法确认它跑全量测试：fullTests 为 ci 时请用 --choice requiredChecks=<跑全量测试的检查名，逗号分隔> 写明（检查名查法见 process.md 第 4 节），或先删除/改名已有工作流让套件生成，或用 fullTests=local 安装；不写 requiredChecks 会让合并入口把任何一项成功的检查当作全量通过`);
+        }
         actions.push({ type: 'keep', file: CI_WORKFLOW_REL });
-        messages.push(`项目已有 ${CI_WORKFLOW_REL}，没有生成 CI 工作流；pr 流程的必需检查请按你的 CI 配置 modules.gate.requiredChecks（不写时 PR 上每一项检查都算必需）`);
+        messages.push(`项目已有 ${CI_WORKFLOW_REL}，没有生成 CI 工作流${v.fullTests === 'ci' ? `；必需检查按你写明的 ${v.requiredChecks.join('、')} 配置` : ''}`);
+        if (v.fullTests === 'ci') requiredChecks = v.requiredChecks;
       } else {
         const gate = (newCfgRaw.modules || {}).gate || {};
         const content = renderCiWorkflow({ ciRunner: v.ciRunner, ciFallback: v.ciFallback ?? null, ciOs: v.ciOs || ['linux'], testCommand: gate.testCommand || 'npm test', reviewIgnore: (newCfgRaw.rules || {}).reviewIgnore || [] });

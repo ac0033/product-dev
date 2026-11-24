@@ -5,7 +5,7 @@
 //   一是本机的实际情况（系统、CPU、内存、有没有 GitHub 远程和 gh）；二是更快、更便宜、更高效、更准确
 //   （能并行就并行；并行受资源限制时先想能不能放到云端，不行才串行；CI 只用 Linux 除非产品要在别的系统上运行）。
 // 用法：node tools/environment.mjs detect [--target <项目>] [--choice <键=值>]…   输出本机事实与推荐（JSON），供 agent 问用户前核对
-//   --choice 的键：fullTests、reviewFlow、ciRunner、ciFallback、ciOs（逗号分隔）、session、parallel，以及不写进配置的 hasServer（true/false）、targets（逗号分隔的系统）。
+//   --choice 的键：fullTests、reviewFlow、ciRunner、ciFallback、ciOs（逗号分隔）、session、parallel，以及不写进配置的 hasServer（true/false）、targets（逗号分隔的系统）、requiredChecks（项目已有 CI 时写明哪些检查跑全量）。
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -22,7 +22,7 @@ export const CI_GATE_JOB = 'ci-gate';
 export const CI_WORKFLOW_REL = '.github/workflows/ci.yml';
 
 /**
- * 读本机事实：系统（linux/windows/macos）、CPU 数、内存 GB、项目是否有 GitHub 远程、gh 是否可用。
+ * 读本机事实：系统（linux/windows/macos）、CPU 数、内存 GB、项目是否有 GitHub 远程、gh 是否已登录（ghAvailable）。
  * override 用来注入（测试或用户已知的事实）。读不出的按“没有”处理，不抛错。
  */
 export function detectFacts(root, override = {}) {
@@ -32,7 +32,7 @@ export function detectFacts(root, override = {}) {
     const r = git(root, ['remote', 'get-url', 'origin']);
     githubRemote = r.ok && /github\.com/i.test(r.out);
   }
-  const gh = spawnSync('gh', ['--version'], { encoding: 'utf8' });
+  const gh = spawnSync('gh', ['auth', 'status'], { encoding: 'utf8' }); // 已登录才算可用：只装了 gh 不能建仓库、开 PR
   return {
     os: platform,
     cpus: os.cpus().length,
@@ -97,8 +97,14 @@ export function recommend(facts, choices = {}) {
 
   if (values.fullTests === 'ci' && values.reviewFlow !== 'pr') conflicts.push('fullTests 为 ci 须搭配 pr 流程（只有 pr 流程的合并入口核对 CI）');
   if (values.fullTests === 'ci' && (values.ciRunner === null || values.ciRunner === 'none')) conflicts.push('fullTests 为 ci 须声明 ciRunner 为 github-hosted 或 self-hosted（ciRunner 不能是 none 或不写）');
-  if (values.ciRunner === 'self-hosted' && choices.hasServer === false) conflicts.push('选了自托管 runner，但没有自己的服务器：改选 github-hosted，或先准备服务器');
+  conflicts.push(...serverConflicts(values, choices));
   return { values, reasons, sources, conflicts };
+}
+
+/** 没有服务器却把自托管 runner 设成主用或后备：生成的作业切到自托管后没有 runner 可用。 */
+function serverConflicts(values, choices) {
+  if (choices.hasServer !== false) return [];
+  return ['ciRunner', 'ciFallback'].filter((k) => values[k] === 'self-hosted').map((k) => `${k} 选了自托管 runner，但没有自己的服务器：改选 github-hosted，或先准备服务器`);
 }
 
 /** 一句话说明命令写法：按本机系统。 */
@@ -129,7 +135,7 @@ export function describeEnvironment(values, facts) {
 }
 
 /** 复制并按选定的取值改写 profile 配置（不改入参）。requiredChecks 只在给出时写入。 */
-export function applyEnvironment(profile, values, { requiredChecks } = {}) {
+export function applyEnvironment(profile, values, { requiredChecks = values.requiredChecks } = {}) {
   const out = JSON.parse(JSON.stringify(profile));
   out.modules = out.modules || {};
   const gate = { ...(out.modules.gate || {}) };
@@ -154,16 +160,29 @@ export function resolveEnvironment(root, { recommended = false, choices = {} } =
   const recommendation = recommend(facts, choices);
   if (recommended && recommendation.conflicts.length > 0) throw new Error(`环境选择有冲突：${recommendation.conflicts.join('；')}`);
   const values = recommended ? { ...recommendation.values } : Object.fromEntries(VALUE_KEYS.filter((k) => choices[k] !== undefined).map((k) => [k, choices[k]]));
+  // 只写用户给出的项时不拿推荐值制造冲突，只核对用户自己选的；推荐模式的冲突上面已拦
+  const own = serverConflicts(values, choices);
+  if (own.length > 0) throw new Error(`环境选择有冲突：${own.join('；')}`);
+  // 已有 CI 时由用户写明哪些检查跑全量（requiredChecks）：不属于推荐，原样带上
+  if (choices.requiredChecks !== undefined) values.requiredChecks = choices.requiredChecks;
   normalizeConfig(applyEnvironment({ profile: 2 }, values)); // 取值与组合不成立时在这里抛错
   return { values, facts, recommendation };
 }
 
-/** 工作流里 Linux 的 runner：只有一处时直接写；有后备时用仓库变量 CI_RUNNER 切换（不用改工作流、不用提交）。 */
+/**
+ * 工作流里 Linux 的 runner：只有一处时直接写；有后备时用仓库变量 CI_RUNNER 切换（不用改工作流、不用提交）。
+ * 自托管 runner 带 [self-hosted, linux] 两个标签，不会被同一仓库注册的 Windows、macOS 自托管机接走；
+ * 来自 fork 的 PR 一律走 GitHub 托管 runner，外部提交的代码不会在用户自己的服务器上执行。
+ */
 function linuxRunner({ ciRunner, ciFallback }) {
+  const self = `fromJSON('["self-hosted","linux"]')`;
+  const fork = 'github.event.pull_request.head.repo.fork';
   if (ciRunner === 'self-hosted') {
-    return ciFallback === 'github-hosted' ? `"\${{ vars.CI_RUNNER == 'github-hosted' && 'ubuntu-latest' || 'self-hosted' }}"` : 'self-hosted';
+    return ciFallback === 'github-hosted'
+      ? `\${{ (vars.CI_RUNNER == 'github-hosted' || ${fork} == true) && 'ubuntu-latest' || ${self} }}`
+      : `\${{ ${fork} == true && 'ubuntu-latest' || ${self} }}`;
   }
-  return ciFallback === 'self-hosted' ? `"\${{ vars.CI_RUNNER == 'self-hosted' && 'self-hosted' || 'ubuntu-latest' }}"` : 'ubuntu-latest';
+  return ciFallback === 'self-hosted' ? `\${{ vars.CI_RUNNER == 'self-hosted' && ${fork} != true && ${self} || 'ubuntu-latest' }}` : 'ubuntu-latest';
 }
 
 /** 免审文档的 glob 转成 shell case 模式：case 里 * 能匹配斜杠，所以 **\/ 去掉、** 换成 *。 */
@@ -175,7 +194,7 @@ function stackSetup(testCommand) {
     return "      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6\n        with:\n          node-version: '24'\n";
   }
   if (/^\s*(python|pytest|py)\b/.test(testCommand)) {
-    return "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.12'\n";
+    return "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.12'\n      - run: python -m pip install pytest\n";
   }
   return '';
 }
@@ -197,19 +216,19 @@ export function renderCiWorkflow({ ciRunner, ciFallback = null, ciOs = ['linux']
     : [
         '          if [ "$EVENT" != "pull_request" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; exit 0; fi',
         '          code=false',
-        '          git diff --name-only "$BASE_SHA" HEAD > changed.txt',
+        '          git diff --no-renames --name-only "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed.txt"',
         '          while IFS= read -r f; do',
         '            case "$f" in',
         `              ${patterns.join('|')}) ;;`,
         '              *) code=true ;;',
         '            esac',
-        '          done < changed.txt',
+        '          done < "$RUNNER_TEMP/changed.txt"',
         '          echo "code=$code" >> "$GITHUB_OUTPUT"',
         '',
       ].join('\n');
   return `# 由 engineering-kit 按项目选定的执行位置生成（modules.gate.fullTests、ciRunner、modules.environment.ciOs）；生成后由项目维护，同步不覆盖。
 # 降低 CI 频率：草稿 PR 不跑；只改免审文档（reviewIgnore）的 PR 跳过测试，汇总检查 ${CI_GATE_JOB} 仍成功；同一 PR 的新提交取消上一次未完成的运行。
-${ciFallback ? `# 后备切换：在仓库设置里把变量 CI_RUNNER 设成 ${ciFallback}（改回删除变量或设成 ${ciRunner}），不用改本文件。自托管 runner 只用于 Linux。\n` : ''}name: CI
+${ciFallback ? `# 后备切换：在仓库设置里把变量 CI_RUNNER 设成 ${ciFallback}（改回删除变量或设成 ${ciRunner}），不用改本文件。自托管 runner 只用于 Linux，带 self-hosted、linux 标签。\n` : ''}${ciRunner === 'self-hosted' || ciFallback === 'self-hosted' ? '# 安全：不要把自托管 runner 用在接受外部 PR 的公开仓库；这里已让 fork 来的 PR 走 GitHub 托管 runner，仍应在仓库设置里要求外部贡献者的工作流经人批准后再运行。\n' : ''}name: CI
 
 on:
   pull_request:
@@ -221,7 +240,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-\${{ github.event.pull_request.number || github.ref }}
+  group: ci-\${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: \${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -304,6 +323,7 @@ export function parseChoice(text) {
     case 'ciOs': return [key, list(OS_NAMES)];
     case 'targets': return [key, list(OS_NAMES)];
     case 'hasServer': return [key, oneOf(['true', 'false']) === 'true'];
+    case 'requiredChecks': return [key, val.split(',').map((x) => x.trim()).filter(Boolean)];
     default: throw new Error(`未知的 --choice 键 ${key}`);
   }
 }

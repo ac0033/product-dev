@@ -74,6 +74,14 @@ test('推荐：有服务器时 GitHub 托管优先、自托管作后备；没服
   assert.equal(selfFirst.values.ciFallback, 'github-hosted', '主用自托管时后备取 GitHub 托管');
 });
 
+test('推荐：没有服务器却把自托管设成后备也是冲突；resolveEnvironment 不论推荐与否都拦下', () => {
+  assert.ok(recommend(LAPTOP, { hasServer: false, ciFallback: 'self-hosted' }).conflicts.some((c) => /服务器/.test(c)));
+  const root = tmpRepo();
+  assert.throws(() => resolveEnvironment(root, { recommended: false, choices: { ciRunner: 'self-hosted', hasServer: false, fullTests: 'local' } }, LAPTOP), /服务器/);
+  assert.throws(() => resolveEnvironment(root, { recommended: true, choices: { ciFallback: 'self-hosted', hasServer: false } }, LAPTOP), /服务器/);
+  assert.doesNotThrow(() => resolveEnvironment(root, { recommended: false, choices: { reviewFlow: 'pre-push' } }, LAPTOP), '只给一项时不拿推荐值制造冲突');
+});
+
 test('推荐：冲突不静默改——fullTests=ci 配 pre-push 流程、或 ci 却没有 CI，都列为冲突', () => {
   assert.ok(recommend(LAPTOP, { fullTests: 'ci', reviewFlow: 'pre-push' }).conflicts.some((c) => /pr 流程/.test(c)));
   assert.ok(recommend(LAPTOP, { fullTests: 'ci', ciRunner: 'none' }).conflicts.some((c) => /ciRunner/.test(c)));
@@ -87,6 +95,7 @@ test('detectFacts：读本机系统、资源与 GitHub 远程；可注入覆盖�
   assert.equal(f.githubRemote, false, '没有远程');
   spawnSync('git', ['remote', 'add', 'origin', 'https://github.com/a/b.git'], { cwd: root });
   assert.equal(detectFacts(root, { ghAvailable: false }).githubRemote, true);
+  assert.equal(detectFacts(root, { ghAvailable: true }).ghAvailable, true, 'ghAvailable 指 gh 已登录（装了没登录不算）');
   const real = detectFacts(root);
   assert.ok(['linux', 'windows', 'macos'].includes(real.os));
   assert.ok(real.cpus >= 1 && real.memGB > 0);
@@ -108,6 +117,8 @@ test('工作流：草稿 PR 不跑、只改文档跳过但汇总检查仍成功�
   assert.match(y, /ready_for_review/);
   assert.match(y, /github\.event\.pull_request\.draft != true/);
   assert.match(y, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
+  assert.match(y, /group: ci-\$\{\{ github\.event\.pull_request\.number \|\| github\.sha \}\}/, '推送到 main 每次一组，排队中的运行不会被后一次推送顶掉');
+  assert.match(y, /git diff --no-renames --name-only/, '改名按旧路径删除加新路径新增算，源码改名进 docs 不会被当成只改文档');
   assert.match(y, /ci-gate:\n\s+name: ci-gate/);
   assert.match(y, /if: always\(\)/);
   assert.match(y, /runs-on: ubuntu-latest/);
@@ -124,13 +135,15 @@ test('工作流：按选择生成——多系统矩阵、自托管后备用仓�
   assert.match(multi, /os: windows\n\s+runner: windows-latest/);
   assert.match(multi, /os: macos\n\s+runner: macos-latest/);
   const fb = renderCiWorkflow({ ...WF, ciFallback: 'self-hosted' });
-  assert.match(fb, /vars\.CI_RUNNER == 'self-hosted' && 'self-hosted' \|\| 'ubuntu-latest'/);
+  assert.match(fb, /vars\.CI_RUNNER == 'self-hosted' && github\.event\.pull_request\.head\.repo\.fork != true && fromJSON\('\["self-hosted","linux"\]'\) \|\| 'ubuntu-latest'/, '自托管只给仓库自己的提交和 PR，fork 的 PR 一律走托管 runner；带 linux 标签，不会被 Windows 自托管机接走');
   const selfFirst = renderCiWorkflow({ ...WF, ciRunner: 'self-hosted', ciFallback: 'github-hosted' });
-  assert.match(selfFirst, /vars\.CI_RUNNER == 'github-hosted' && 'ubuntu-latest' \|\| 'self-hosted'/);
+  assert.match(selfFirst, /\(vars\.CI_RUNNER == 'github-hosted' \|\| github\.event\.pull_request\.head\.repo\.fork == true\) && 'ubuntu-latest' \|\| fromJSON\('\["self-hosted","linux"\]'\)/);
   const selfOnly = renderCiWorkflow({ ...WF, ciRunner: 'self-hosted' });
-  assert.match(selfOnly, /runner: self-hosted/);
+  assert.match(selfOnly, /runner: \$\{\{ github\.event\.pull_request\.head\.repo\.fork == true && 'ubuntu-latest' \|\| fromJSON\('\["self-hosted","linux"\]'\) \}\}/);
+  assert.match(selfOnly, /不要把自托管 runner 用在接受外部 PR 的公开仓库/, '说明自托管 runner 的安全风险');
   const py = renderCiWorkflow({ ...WF, testCommand: 'python -m pytest -q' });
   assert.match(py, /setup-python/);
+  assert.match(py, /run: python -m pip install pytest/, '干净环境里先装 pytest');
   assert.ok(!/setup-node/.test(py));
   const none = renderCiWorkflow({ ...WF, reviewIgnore: [] });
   assert.match(none, /code=true/);
@@ -196,11 +209,19 @@ test('同步：已有配置时环境选择不生效（只提示）；已有 ci.y
   const dir2 = path.join(tmpDir('ekit-env-'), 'proj');
   fs.mkdirSync(path.join(dir2, '.github/workflows'), { recursive: true });
   write(dir2, '.github/workflows/ci.yml', 'name: mine\n');
-  const r = syncKit({ target: dir2, init: true, preset: PRESETS.ts, env });
+  // 已有 ci.yml：套件不能确认它跑全量测试，fullTests=ci 时必须由用户写明哪些必需检查跑全量，否则拒绝安装
+  assert.throws(() => syncKit({ target: dir2, init: true, preset: PRESETS.ts, env }), /requiredChecks/);
+  assert.ok(!fs.existsSync(path.join(dir2, 'engineering.config.json')), '拒绝时不留半成品');
+  const named = { values: { ...env.values, requiredChecks: ['unit (ubuntu-latest)'] }, facts: LAPTOP };
+  const r = syncKit({ target: dir2, init: true, preset: PRESETS.ts, env: named });
   assert.equal(r.ok, true, r.messages.join('\n'));
   assert.equal(read(dir2, '.github/workflows/ci.yml'), 'name: mine\n');
-  assert.deepEqual(JSON.parse(read(dir2, 'engineering.config.json')).modules.gate.requiredChecks ?? [], []);
-  assert.ok(r.messages.some((m) => /ci\.yml/.test(m) && /必需检查/.test(m)), r.messages.join('\n'));
+  assert.deepEqual(JSON.parse(read(dir2, 'engineering.config.json')).modules.gate.requiredChecks, ['unit (ubuntu-latest)']);
+  assert.ok(r.messages.some((m) => /ci\.yml/.test(m)), r.messages.join('\n'));
+  // fullTests=local 时已有 ci.yml 不受影响
+  const dir3 = path.join(tmpDir('ekit-env-'), 'proj');
+  write(dir3, '.github/workflows/ci.yml', 'name: mine\n');
+  assert.equal(syncKit({ target: dir3, init: true, preset: PRESETS.ts, env: { values: { fullTests: 'local', ciRunner: 'github-hosted' }, facts: LAPTOP } }).ok, true);
 });
 
 test('命令行：environment.mjs detect 输出事实与推荐（JSON），--choice 覆盖；sync.mjs --env recommended 能装', () => {
@@ -218,4 +239,12 @@ test('命令行：environment.mjs detect 输出事实与推荐（JSON），--cho
   const s = spawnSync(process.execPath, [path.join(BUNDLE_ROOT, 'kit', 'sync.mjs'), '--target', dir, '--init', '--profile', 'ts', '--env', 'recommended', '--choice', 'fullTests=local'], { encoding: 'utf8' });
   assert.equal(s.status, 0, s.stdout + s.stderr);
   assert.equal(JSON.parse(read(dir, 'engineering.config.json')).modules.gate.fullTests, 'local');
+  // --env 漏填值（写在命令末尾，或后面直接跟别的选项）不能静默按默认安装
+  const dir2 = path.join(tmpDir('ekit-env-'), 'proj');
+  for (const args of [['--env'], ['--env', '--choice', 'fullTests=local']]) {
+    const miss = spawnSync(process.execPath, [path.join(BUNDLE_ROOT, 'kit', 'sync.mjs'), '--target', dir2, '--init', '--profile', 'ts', ...args], { encoding: 'utf8' });
+    assert.notEqual(miss.status, 0, args.join(' '));
+    assert.match(miss.stderr, /--env/);
+  }
+  assert.ok(!fs.existsSync(path.join(dir2, 'engineering.config.json')));
 });

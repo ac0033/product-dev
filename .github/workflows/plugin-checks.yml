@@ -1,13 +1,12 @@
 name: Plugin checks
 
-# 降低 CI 频率：草稿 PR 不跑（转为可审阅时跑）；只改 docs/ 的 PR 跳过；同一 PR 的新提交取消上一次未完成的运行。
-# 推送到 main、release/** 不设跳过条件，每次合并后全量再跑一次兜底。仓库当前没有必需检查（无分支保护、无 ruleset），
-# 所以被跳过的运行不会拦住合并；日后开分支保护时，改成“汇总 job”再设必需检查，否则 paths-ignore 会让必需检查一直 pending。
+# 降低 CI 频率：草稿 PR 不跑（转为可审阅时跑）；只改 docs/ 下 Markdown 的 PR 跳过测试；同一 PR 的新提交取消上一次未完成的运行。
+# 推送到 main、release/** 不设跳过条件，每次合并后全量再跑一次兜底；每次推送各占一个并发组，排队中的运行不会被后一次推送顶掉。
+# 是否只改文档由 changes 作业按 git diff --no-renames 判断（不用 paths-ignore：它对改名只看新路径，大 PR 还有 300 文件的比较上限）。
+# 仓库当前没有必需检查（无分支保护、无 ruleset），被跳过的测试不会拦住合并；日后开分支保护时，加一个始终运行的汇总作业再设必需检查。
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore:
-      - 'docs/**'
   push:
     branches:
       - main
@@ -17,13 +16,41 @@ permissions:
   contents: read
 
 concurrency:
-  group: plugin-checks-${{ github.event.pull_request.number || github.ref }}
+  group: plugin-checks-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Changes
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          code=false
+          git diff --no-renames --name-only "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed.txt"
+          while IFS= read -r f; do
+            case "$f" in
+              docs/*.md) ;;
+              *) code=true ;;
+            esac
+          done < "$RUNNER_TEMP/changed.txt"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   test:
     name: Plugin tests (${{ matrix.os }})
-    if: github.event.pull_request.draft != true
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
