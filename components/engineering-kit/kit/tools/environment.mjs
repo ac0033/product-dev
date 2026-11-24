@@ -100,7 +100,7 @@ export function detectFacts(root, override = {}, run = spawnSync) {
 }
 
 /** 本机资源紧张：CPU 不超过 4 核或内存不超过 8 GB（全量测试和并行任务在本机会明显卡）。 */
-const isConstrained = (facts) => facts.cpus <= 4 || facts.memGB <= 8;
+export const isConstrained = (facts) => facts.cpus <= 4 || facts.memGB <= 8;
 
 /**
  * 推荐：返回 { values, reasons, sources, conflicts }。choices 里用户给出的项一律优先（sources 记 user），没给的按原则推荐（recommended）。
