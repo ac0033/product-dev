@@ -1,0 +1,143 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "缩短路线：小新增、小改动、只改文档",
+    "output": "short-routes.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "visual_preset": "classic"
+  },
+  "lanes": [
+    {
+      "id": "add",
+      "label": "小新增"
+    },
+    {
+      "id": "chg",
+      "label": "小改动"
+    },
+    {
+      "id": "doc",
+      "label": "只改文档"
+    }
+  ],
+  "mainPath": [
+    "a1",
+    "a2",
+    "a3",
+    "a4"
+  ],
+  "nodes": [
+    {
+      "id": "a1",
+      "lane": "add",
+      "col": 0,
+      "type": "external",
+      "label": "开工检查"
+    },
+    {
+      "id": "a2",
+      "lane": "add",
+      "col": 1,
+      "type": "backend",
+      "label": "读相关代码",
+      "sublabel": "不写契约、不做方案对比"
+    },
+    {
+      "id": "a3",
+      "lane": "add",
+      "col": 2,
+      "type": "backend",
+      "label": "逐片开发",
+      "sublabel": "测试先行；超出条件即升档"
+    },
+    {
+      "id": "a4",
+      "lane": "add",
+      "col": 3,
+      "type": "security",
+      "label": "交付段后半",
+      "sublabel": "自查→闸门→PR 与 CI→复审→合并"
+    },
+    {
+      "id": "c1",
+      "lane": "chg",
+      "col": 0,
+      "type": "external",
+      "label": "开工检查"
+    },
+    {
+      "id": "c3",
+      "lane": "chg",
+      "col": 2,
+      "type": "backend",
+      "label": "逐片开发",
+      "sublabel": "测试先行；超出条件即升档"
+    },
+    {
+      "id": "c4",
+      "lane": "chg",
+      "col": 3,
+      "type": "security",
+      "label": "交付段后半",
+      "sublabel": "自查→闸门→PR 与 CI→复审→合并"
+    },
+    {
+      "id": "d1",
+      "lane": "doc",
+      "col": 0,
+      "type": "external",
+      "label": "开工检查"
+    },
+    {
+      "id": "d2",
+      "lane": "doc",
+      "col": 2,
+      "type": "backend",
+      "label": "直接改",
+      "sublabel": "全部文件在 reviewIgnore 之内"
+    },
+    {
+      "id": "d3",
+      "lane": "doc",
+      "col": 3,
+      "type": "security",
+      "label": "闸门 → PR 与 CI → 合并",
+      "sublabel": "不做独立复审"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a1",
+      "to": "a2"
+    },
+    {
+      "from": "a2",
+      "to": "a3"
+    },
+    {
+      "from": "a3",
+      "to": "a4",
+      "variant": "emphasis"
+    },
+    {
+      "from": "c1",
+      "to": "c3"
+    },
+    {
+      "from": "c3",
+      "to": "c4",
+      "variant": "emphasis"
+    },
+    {
+      "from": "d1",
+      "to": "d2"
+    },
+    {
+      "from": "d2",
+      "to": "d3",
+      "variant": "emphasis"
+    }
+  ]
+}
