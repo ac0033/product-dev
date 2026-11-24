@@ -79,7 +79,7 @@
   - 代码复审：`review.mjs pass|fail --pr <编号> --kind code --reviewer <名> --report <报告> --summary "<一句话>"`。`--reviewer` 不接受 `external:` 开头的名字：外部复审者只能由 `external-review.mjs` 登记（两种流程都一样），手动登记会被拒绝。
   - 一致性审：同上，`--kind consistency`；按分档可延期时用 `review.mjs defer --pr <编号> --kind consistency --reason "<理由>"`。
   - 合并：`merge.mjs <编号> [--method squash|merge|rebase]`。PR 打开、CI 全过、代码复审为 pass、一致性审为 pass 或延期、两份记录的提交都等于当前最终提交，才执行 `gh pr merge --match-head-commit`（默认 squash 并删除远端分支）；否则逐条列出原因，不合并。输出把成功的检查（标明必需与否）和被放行的跳过、中性检查分开列出，跳过的不算通过。PR 又有新提交时记录过期，重新审查后再登记；只有一个例外：代码复审之后的新提交只改了文档（`git diff --no-renames` 的文件全在 `reviewIgnore` 之内；项目配置、豁免表、`scripts/engineering/**` 不算文档，改名按旧路径删除加新路径新增算，代码改名进 docs/ 不算只改文档）时，代码复审记录仍认，输出写明沿用及两个提交号，本地算不出差异时按过期处理，一致性审记录仍须针对最终提交。
-  - 用户接受风险：`review.mjs accept --pr <编号> --kind code|consistency --reviewer <名> --report <报告> --user-decision "<用户的决定及出处>"`，报告结论须为不通过；合并入口把它当作可放行，输出写明按用户决定接受风险放行。
+  - 用户接受风险：`review.mjs accept --pr <编号> --kind code|consistency --reviewer <名> --report <报告> --user-decision "<用户的决定及出处>"`，报告结论须为不通过；合并入口把它当作可放行，输出写明按用户决定接受风险放行。外部复审者（`external:` 名字）的不通过不能这样手动登记：用 `external-review.mjs register --run-dir <运行目录> --accept --user-decision "<用户的决定及出处>"`；满轮次上限后用户同意继续的，同一命令不带 `--accept`、带 `--user-decision` 重登。
   - 只改文档的 PR（本地算出的基准提交到 PR 最终提交之间全部文件在 `reviewIgnore` 之内；本地没有最终提交、基准分支解析不了或算不出共同提交时按含代码处理，输出写明原因并提示先 `git fetch`；口径同闸门：`reviewIgnore` 取基准提交上的配置，含项目配置、豁免表或 `scripts/engineering/**` 的不算）按上表不做审查，合并入口只核对 PR 打开与 CI 全过；差异为空时也按含代码处理。其余 PR 合并入口不判断风险档位：代码复审必需，能否延期一致性审由登记者按上表判断。
   - 需要 GitHub 远程和已登录的 `gh`；没有 CI 的项目留在 `pre-push`。
 
