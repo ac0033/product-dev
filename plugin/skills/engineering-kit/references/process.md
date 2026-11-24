@@ -91,7 +91,7 @@
 | 本机加服务器（本地或云端会话），`self-hosted` | CI 在服务器上跑。runner 离线时如实报告，让用户选：启动 runner；切到后备 `github-hosted`（把仓库变量 `CI_RUNNER` 设成 `github-hosted`）；或在会话所在环境用 `gate.mjs --force` 重新跑通全量、写进 PR 由用户合并 |
 | 本机加服务器，`github-hosted` 额度用完 | 配了 `ciFallback: self-hosted` 的，把仓库变量 `CI_RUNNER` 设成 `self-hosted` 即可，不用改工作流（设仓库变量是对外部服务的改动，按 R2 先问用户）；没配的让用户选：装好 runner 后改 `self-hosted`、等额度、在会话所在环境用 `gate.mjs --force` 重新跑通全量并写进 PR 由用户合并 |
 
-- 已知限制：（1）已有 CI 的项目，`requiredChecks` 里写的检查名由用户负责，套件只查名字出现在 `ci.yml` 里，查不了该检查是否真的跑全量测试（只跑 lint 的检查名也会被接受）；（2）生成的 `ci.yml` 把安装时的 `reviewIgnore` 固化在文件里，之后改了配置里的免审范围要同步改 `ci.yml`，否则 CI 与闸门对“只改文档”的判断会不一致；（3）`testEnv`、`testCommand` 安装后改了同样要同步；（4）`pr` 流程还要求 `gh` 已登录，未登录时 `detect` 会列为冲突。
+- 已知限制：（1）已有 CI 的项目，`requiredChecks` 里写的检查名由用户负责，套件只查名字出现在 `ci.yml` 里，查不了该检查是否真的跑全量测试（只跑 lint 的检查名也会被接受）；（2）生成的 `ci.yml` 把安装时的 `reviewIgnore` 固化在文件里，之后改了配置里的免审范围要同步改 `ci.yml`，否则 CI 与闸门对“只改文档”的判断会不一致；（3）`testEnv`、`testCommand` 安装后改了同样要同步；（4）`pr` 流程还要求 `gh` 已登录，未登录时 `detect` 会列为冲突。（5）origin 地址只认 github.com（含 ssh.github.com）上的“属主/仓库”，企业版主机、路径里碰巧含 github.com 的地址不当作 GitHub 远程，探测和 `gh` 调用都显式指定 github.com 与该仓库。
 - 改 `fullTests` / `ciRunner` 是判定策略改动，先合入主干才生效；CI 不可用而卡住这个 PR 本身时，由用户合并。
 - 不降低标准：CI 起不来时，全量测试仍要在某个环境跑通并有证据（`gate.mjs --force` 的输出和测试记录；要重跑用 `--force`，`--full` 会沿用一致的旧记录），再由用户决定合并；不因为 CI 不可用就跳过全量。
 - `CI_RUNNER` 变量只切换 Linux 作业；Windows、macOS 的矩阵项始终用 GitHub 托管 runner，托管额度用完时它们也跑不起来——额度紧张的项目 `ciOs` 只留 `linux`。

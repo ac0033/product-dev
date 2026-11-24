@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { normalizeConfig } from '../gate/config.mjs';
-import { applyEnvironment, describeEnvironment, detectFacts, recommend, renderCiWorkflow, resolveEnvironment } from '../tools/environment.mjs';
+import { applyEnvironment, describeEnvironment, detectFacts, parseGithubRemote, recommend, renderCiWorkflow, resolveEnvironment } from '../tools/environment.mjs';
 import { BUNDLE_ROOT, syncKit } from '../sync.mjs';
 import { PRESETS } from '../tools/presets.mjs';
 import { read, tmpDir, tmpRepo, write } from './helpers.mjs';
@@ -85,6 +85,30 @@ test('推荐：没有服务器却把自托管设成后备也是冲突；resolveE
 test('推荐：冲突不静默改——fullTests=ci 配 pre-push 流程、或 ci 却没有 CI，都列为冲突', () => {
   assert.ok(recommend(LAPTOP, { fullTests: 'ci', reviewFlow: 'pre-push' }).conflicts.some((c) => /pr 流程/.test(c)));
   assert.ok(recommend(LAPTOP, { fullTests: 'ci', ciRunner: 'none' }).conflicts.some((c) => /ciRunner/.test(c)));
+});
+
+test('parseGithubRemote：严格解析 origin 地址（SCP、https、ssh 含端口、.git、尾斜杠），非 github.com 主机或多余路径一律不认', () => {
+  const ok = (url, owner, repo) => assert.deepEqual(parseGithubRemote(url), { owner, repo }, url);
+  ok('git@github.com:me/mine.git', 'me', 'mine');
+  ok('git@github.com:me/mine', 'me', 'mine');
+  ok('github.com:me/mine.git', 'me', 'mine');
+  ok('https://github.com/me/mine.git', 'me', 'mine');
+  ok('https://github.com/me/mine', 'me', 'mine');
+  ok('https://github.com/me/mine/', 'me', 'mine');
+  ok('https://github.com:443/me/mine.git', 'me', 'mine');
+  ok('https://user:token@github.com/me/mine.git', 'me', 'mine');
+  ok('ssh://git@github.com/me/mine.git', 'me', 'mine');
+  ok('ssh://git@github.com:22/me/mine.git', 'me', 'mine');
+  ok('ssh://git@ssh.github.com:443/me/mine.git', 'me', 'mine');
+  ok('git://github.com/me/my.repo.git', 'me', 'my.repo');
+  ok('HTTPS://GitHub.com/Me/Mine.git', 'Me', 'Mine');
+  ok('  https://github.com/me/mine.git\n', 'me', 'mine');
+  for (const bad of [
+    '', 'not a url', 'https://git.example.com/github.com/me/mine.git', 'https://github.com.evil.com/me/mine.git',
+    'https://evilgithub.com/me/mine.git', 'git@git.example.com:github.com/me/mine.git', 'git@github.com.evil.com:me/mine.git',
+    'https://github.com/me', 'https://github.com/me/mine/extra', 'https://github.com/', 'https://ghe.example.com/me/mine.git',
+    'ssh://git@git.example.com:22/github.com/me/mine.git', 'file:///srv/github.com/me/mine.git', '/srv/repos/github.com/me/mine.git',
+  ]) assert.equal(parseGithubRemote(bad), null, bad);
 });
 
 test('detectFacts：读本机系统、资源与 GitHub 远程；可注入覆盖值', () => {
@@ -363,8 +387,8 @@ test('一致性：detect 的冲突判定与安装（推荐模式、只给选择�
       resolveEnvironment(root, opts, facts);
       return false;
     } catch (e) {
-      // 代码错误（TypeError 等）不能当成“预期拒绝”：只有主动抛出的配置/冲突错误才算
-      if (e instanceof TypeError || e instanceof ReferenceError || e instanceof SyntaxError || e instanceof RangeError) throw e;
+      // 只有主动抛出的冲突或配置校验错误才算“预期拒绝”：其余任何异常（包括普通 Error）都是代码缺陷，让测试失败
+      if (!(e instanceof Error) || e.constructor !== Error || !/^环境选择有冲突|engineering\.config\.json|modules\./.test(e.message)) throw e;
       return true;
     }
   };

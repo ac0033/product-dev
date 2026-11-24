@@ -21,6 +21,44 @@ export const CI_GATE_JOB = 'ci-gate';
 /** 套件只支持 github.com 上的仓库（远程地址按它识别），gh 认证也按这个主机核对。 */
 const GH_HOST = 'github.com';
 
+/** 认作 github.com 的主机名（ssh.github.com 是 GitHub 在 443 端口提供 ssh 的备用主机）。 */
+const GITHUB_HOSTS = new Set(['github.com', 'ssh.github.com']);
+
+/**
+ * 严格解析 git 远程地址：返回 { owner, repo }，不是 github.com 上的“属主/仓库”就返回 null。
+ * 两类写法分开处理：URL 写法（https、http、ssh、git，可带用户名、端口、.git、尾斜杠）用 URL 解析并校验主机名；
+ * SCP 写法（[用户@]主机:属主/仓库）单独匹配，主机必须整个等于 github.com。
+ * 主机名必须完全相等（不是“包含”），路径必须正好是两段，所以路径里碰巧含 github.com 的地址、github.com.evil.com 这类都不认。
+ */
+export function parseGithubRemote(url) {
+  const text = String(url ?? '').trim();
+  if (!text) return null;
+  let host;
+  let pathText;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
+    let u;
+    try {
+      u = new URL(text);
+    } catch {
+      return null;
+    }
+    if (!['https:', 'http:', 'ssh:', 'git:'].includes(u.protocol)) return null;
+    host = u.hostname;
+    pathText = u.pathname;
+  } else {
+    const m = text.match(/^(?:[^@/\s]+@)?([^:/\s]+):([^\s]+)$/);
+    if (!m) return null;
+    [, host, pathText] = m;
+  }
+  if (!GITHUB_HOSTS.has(host.toLowerCase())) return null;
+  const parts = pathText.replace(/^\/+/, '').replace(/\/+$/, '').split('/');
+  if (parts.length !== 2) return null;
+  const owner = parts[0];
+  const repo = parts[1].replace(/\.git$/i, '');
+  const valid = /^[A-Za-z0-9_.-]+$/;
+  return owner && repo && valid.test(owner) && valid.test(repo) ? { owner, repo } : null;
+}
+
 /** 工作流相对路径。 */
 export const CI_WORKFLOW_REL = '.github/workflows/ci.yml';
 
@@ -34,9 +72,10 @@ export function detectFacts(root, override = {}, run = spawnSync) {
   let repoSpec = null; // github.com/属主/仓库：gh 的调用都显式指定它，不依赖当前目录的默认选择
   if (root) {
     const r = git(root, ['remote', 'get-url', 'origin']);
-    githubRemote = r.ok && /github\.com/i.test(r.out);
-    const m = githubRemote ? r.out.trim().match(/github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i) : null;
-    if (m) repoSpec = `${GH_HOST}/${m[1]}/${m[2]}`;
+    // 只认能严格解析成 github.com 上“属主/仓库”的地址：路径里碰巧含 github.com 的地址、企业主机都不算
+    const parsed = r.ok ? parseGithubRemote(r.out) : null;
+    githubRemote = parsed !== null;
+    if (parsed) repoSpec = `${GH_HOST}/${parsed.owner}/${parsed.repo}`;
   }
   // 能用 gh 访问 GitHub 才算可用：只装了 gh、没登录不能建仓库、开 PR。用 gh api user 而不是 gh auth status：
   // 后者会因为另一个过期的账号返回非零，而当前账号其实可用。必须带 --hostname github.com：不带时 gh 查的是默认主机，
