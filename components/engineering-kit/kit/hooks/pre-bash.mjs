@@ -493,7 +493,7 @@ function cdTarget(words, at) {
 /**
  * 命令里每个 git push / gh pr create 实际所在的目录（绝对路径，去重，按出现顺序）：从会话目录 cwd 起，
  * 依次应用先行的 cd / pushd / Set-Location，再应用 git 的 -C（多个依次叠加，相对路径相对前一个目录）。
- * 说不准的一律退回会话目录（与按会话目录核对时一样严，不会漏）：目录写法含变量、~、命令替换、通配；cd 没有目录或是 cd -；
+ * 说不准的一律退回会话目录（与按会话目录核对时一样严，不会漏）：目录写法含变量、%变量%、~、命令替换、通配；cd 没有目录或是 cd -；
  * cd 出现在 ( ) { } 子 shell、管道、|| 或后台 & 的命令里（它不一定影响后面的推送）；cd 前面已有别的命令（`a && cd x; git push`
  * 里 cd 可能没执行）或在 if / then / do 等条件、循环段里；命令里有 popd、Pop-Location、Push-Location；
  * 用了 --git-dir、--work-tree、GIT_DIR、GIT_WORK_TREE、core.worktree、env -C。

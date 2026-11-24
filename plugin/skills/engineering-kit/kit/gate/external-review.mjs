@@ -382,7 +382,7 @@ export function configFingerprint(root, file) {
 const STATE_PARTS = { head: 'HEAD', status: '工作区状态', hooks: 'git 钩子目录', config: 'git 配置' };
 
 /**
- * 仓库状态的指纹：HEAD、git status（含未跟踪文件），以及 git 钩子目录和 git 配置的内容（配置见 configFingerprint，不含 branch.*）。
+ * 仓库状态的指纹：HEAD、git status（含未跟踪文件），以及 git 钩子目录和 git 配置的内容（配置见 configFingerprint，上游跟踪项除外）。
  * 复审前后不同说明有东西写进了仓库。被 .gitignore 忽略的文件不在内（逐个哈希代价太大），这一点核对不到。
  * 返回 { head, clean, hash, parts }：parts 是各项各自的哈希，changedParts 据此指出变的是哪几项。
  */
