@@ -18,14 +18,17 @@ export const VALUE_KEYS = ['fullTests', 'reviewFlow', 'ciRunner', 'ciFallback', 
 /** 汇总检查的名字：工作流里始终运行、全部通过才成功的 job；pr 流程把它列为必需检查，被跳过的测试 job 不会拦住合并。 */
 export const CI_GATE_JOB = 'ci-gate';
 
+/** 套件只支持 github.com 上的仓库（远程地址按它识别），gh 认证也按这个主机核对。 */
+const GH_HOST = 'github.com';
+
 /** 工作流相对路径。 */
 export const CI_WORKFLOW_REL = '.github/workflows/ci.yml';
 
 /**
  * 读本机事实：系统（linux/windows/macos）、CPU 数、内存 GB、项目是否有 GitHub 远程、gh 是否已登录（ghAvailable）。
- * override 用来注入（测试或用户已知的事实）。读不出的按“没有”处理，不抛错。
+ * override 用来注入（测试或用户已知的事实）；run 是运行外部命令的函数（默认 spawnSync，测试可替换）。读不出的按“没有”处理，不抛错。
  */
-export function detectFacts(root, override = {}) {
+export function detectFacts(root, override = {}, run = spawnSync) {
   const platform = { win32: 'windows', darwin: 'macos' }[process.platform] || 'linux';
   let githubRemote = false;
   if (root) {
@@ -33,12 +36,13 @@ export function detectFacts(root, override = {}) {
     githubRemote = r.ok && /github\.com/i.test(r.out);
   }
   // 能用 gh 访问 GitHub 才算可用：只装了 gh、没登录不能建仓库、开 PR。用 gh api user 而不是 gh auth status：
-  // 后者会因为另一个过期的账号返回非零，而当前账号其实可用
-  const gh = spawnSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8' });
+  // 后者会因为另一个过期的账号返回非零，而当前账号其实可用。必须带 --hostname github.com：不带时 gh 查的是默认主机，
+  // 只登录了 GitHub Enterprise 的机器会误判成可用，而目标仓库在 github.com，后面查 PR、合并仍会失败
+  const gh = run('gh', ['api', 'user', '--hostname', GH_HOST, '--jq', '.login'], { encoding: 'utf8' });
   // 仓库公开与否（有 GitHub 远程时尽力读，读不到是 null）：公开仓库不能用自托管 runner
   let repoPublic = null;
   if (root && githubRemote && gh.status === 0) {
-    const v = spawnSync('gh', ['repo', 'view', '--json', 'isPrivate', '--jq', '.isPrivate'], { cwd: root, encoding: 'utf8' });
+    const v = run('gh', ['repo', 'view', '--json', 'isPrivate', '--jq', '.isPrivate'], { cwd: root, encoding: 'utf8' });
     if (v.status === 0) repoPublic = v.stdout.trim() === 'false' ? true : v.stdout.trim() === 'true' ? false : null;
   }
   return {
@@ -106,10 +110,7 @@ export function recommend(facts, choices = {}) {
     ? '本机资源紧张又要在本机跑全量，并行会互相抢资源：串行；能放云端会话或交给 CI 时就可以并行'
     : '能并行的并行（更快）；资源受限的部分放到云端会话或 CI 上跑');
 
-  if (values.fullTests === 'ci' && values.reviewFlow !== 'pr') conflicts.push('fullTests 为 ci 须搭配 pr 流程（只有 pr 流程的合并入口核对 CI）');
-  if (values.fullTests === 'ci' && (values.ciRunner === null || values.ciRunner === 'none')) conflicts.push('fullTests 为 ci 须声明 ciRunner 为 github-hosted 或 self-hosted（ciRunner 不能是 none 或不写）');
-  conflicts.push(...serverConflicts(values, choices, facts));
-  conflicts.push(...ghConflicts(values, facts));
+  conflicts.push(...selectionConflicts(values, choices, facts));
   // 与安装时的配置校验同一口径：detect 阶段就把安装会报的错列出来（只在没有别的冲突时补，避免重复）
   if (conflicts.length === 0) {
     try {
@@ -142,6 +143,18 @@ function serverConflicts(values, choices, facts = {}) {
 function repoPublicOf(facts = {}, choices = {}) {
   if (facts.repoPublic === true || choices.publicRepo === true) return true;
   return facts.repoPublic ?? choices.publicRepo ?? null;
+}
+
+/**
+ * 对最终选定的取值的全部冲突判定：detect（recommend）和安装（resolveEnvironment，推荐与只给选择两种模式）都只调这一处，
+ * 新增一条规则只改这里，不会出现 detect 报、安装不拦（或相反）。一致性测试用事实与选择的组合矩阵锁住这一点。
+ */
+function selectionConflicts(values, choices, facts) {
+  const out = [];
+  if (values.fullTests === 'ci' && values.reviewFlow !== 'pr') out.push('fullTests 为 ci 须搭配 pr 流程（只有 pr 流程的合并入口核对 CI）');
+  if (values.fullTests === 'ci' && (values.ciRunner === null || values.ciRunner === 'none')) out.push('fullTests 为 ci 须声明 ciRunner 为 github-hosted 或 self-hosted（ciRunner 不能是 none 或不写）');
+  out.push(...serverConflicts(values, choices, facts), ...ghConflicts(values, facts));
+  return out;
 }
 
 /** ci 与 pr 流程的复审登记、合并、查 CI 都走 gh：gh 没登录时安装能成功、后面会卡住，所以对最终选定的取值统一检查（推荐与只给选择两种模式共用）。 */
@@ -206,7 +219,7 @@ export function resolveEnvironment(root, { recommended = false, choices = {} } =
   if (recommended && recommendation.conflicts.length > 0) throw new Error(`环境选择有冲突：${recommendation.conflicts.join('；')}`);
   const values = recommended ? { ...recommendation.values } : Object.fromEntries(VALUE_KEYS.filter((k) => choices[k] !== undefined).map((k) => [k, choices[k]]));
   // 只写用户给出的项时不拿推荐值制造冲突，只核对用户自己选的；推荐模式的冲突上面已拦
-  const own = [...serverConflicts(values, choices, facts), ...ghConflicts(values, facts)];
+  const own = selectionConflicts(values, choices, facts);
   if (own.length > 0) throw new Error(`环境选择有冲突：${own.join('；')}`);
   // 已有 CI 时由用户写明哪些检查跑全量（requiredChecks）：不属于推荐，原样带上
   if (choices.requiredChecks !== undefined) values.requiredChecks = choices.requiredChecks;

@@ -96,6 +96,18 @@ test('detectFacts：读本机系统、资源与 GitHub 远程；可注入覆盖�
   spawnSync('git', ['remote', 'add', 'origin', 'https://github.com/a/b.git'], { cwd: root });
   assert.equal(detectFacts(root, { ghAvailable: false }).githubRemote, true);
   assert.equal(detectFacts(root, { ghAvailable: true }).ghAvailable, true, 'ghAvailable 指 gh 已登录（装了没登录不算）');
+  // 按目标主机核对 gh 认证：只登录了 GitHub Enterprise 的机器，gh api user（默认主机）会成功，必须带 --hostname github.com；
+  // 用假的 run 记录实际命令：探测与读可见性都走 run，认证探测必须带主机，主机上没登录时 ghAvailable 为 false
+  const calls = [];
+  const fake = (loggedInHost) => (cmd, args) => {
+    calls.push([cmd, ...args]);
+    const i = args.indexOf('--hostname');
+    const host = i >= 0 ? args[i + 1] : 'ghe.example.com'; // 不带主机时 gh 用默认主机（这里是企业主机）
+    return host === loggedInHost ? { status: 0, stdout: 'me\n' } : { status: 1, stdout: '' };
+  };
+  assert.equal(detectFacts(root, {}, fake('ghe.example.com')).ghAvailable, false, '只登录了企业主机：github.com 上不可用');
+  assert.ok(calls.some((c) => c[1] === 'api' && c[2] === 'user' && c.includes('--hostname') && c[c.indexOf('--hostname') + 1] === 'github.com'), '认证探测带 --hostname github.com');
+  assert.equal(detectFacts(root, {}, fake('github.com')).ghAvailable, true);
   const real = detectFacts(root);
   assert.ok(['linux', 'windows', 'macos'].includes(real.os));
   assert.ok(real.cpus >= 1 && real.memGB > 0);
@@ -303,6 +315,52 @@ test('推荐：仓库可见性未知时按公开处理，不推荐也不接受�
     assert.throws(() => resolveEnvironment(tmpRepo(), { recommended: false, choices }, noGh), /gh/, JSON.stringify(choices));
   }
   assert.doesNotThrow(() => resolveEnvironment(tmpRepo(), { recommended: false, choices: { reviewFlow: 'pre-push' } }, noGh), '不用 pr 流程时不需要 gh');
+});
+
+test('一致性：detect 的冲突判定与安装（推荐模式、只给选择模式）的拒绝判定在各种事实与选择组合下完全一致', () => {
+  // 这类问题在复审里反复出现（同一条规则在 detect 与安装两处各写一份，改一处漏一处）：这里用组合矩阵锁住“同一口径”
+  const factsList = [
+    LAPTOP,
+    { ...LAPTOP, repoPublic: true },
+    { ...LAPTOP, repoPublic: null },
+    { ...LAPTOP, ghAvailable: false },
+    { ...WORKSTATION },
+    { os: 'linux', cpus: 2, memGB: 4, githubRemote: true, ghAvailable: true, repoPublic: false },
+  ];
+  const choicesList = [
+    {},
+    { hasServer: true },
+    { hasServer: true, ciRunner: 'self-hosted' },
+    { hasServer: true, ciFallback: 'self-hosted' },
+    { hasServer: true, publicRepo: false },
+    { hasServer: true, publicRepo: true, ciFallback: 'self-hosted' },
+    { hasServer: true, publicRepo: false, ciRunner: 'self-hosted' },
+    { reviewFlow: 'pr' },
+    { fullTests: 'ci' },
+    { fullTests: 'ci', reviewFlow: 'pre-push' },
+    { fullTests: 'local', reviewFlow: 'pre-push' },
+    { requiredChecks: ['unit', 'unit'] },
+    { ciRunner: 'none', fullTests: 'ci', reviewFlow: 'pr' },
+  ];
+  const root = tmpRepo();
+  const throwsFor = (opts, facts) => {
+    try {
+      resolveEnvironment(root, opts, facts);
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  for (const facts of factsList) {
+    for (const choices of choicesList) {
+      const rec = recommend(facts, choices);
+      const label = `${JSON.stringify(facts)} ${JSON.stringify(choices)} → ${rec.conflicts.join('；')}`;
+      assert.equal(throwsFor({ recommended: true, choices }, facts), rec.conflicts.length > 0, `推荐模式：${label}`);
+      // 只给选择的模式：把推荐出的取值也当作用户的选择给出，判定必须与 detect 一致
+      const asChoices = { ...choices, ...Object.fromEntries(Object.entries(rec.values).filter(([, v]) => v !== null)) };
+      assert.equal(throwsFor({ recommended: false, choices: asChoices }, facts), rec.conflicts.length > 0, `选择模式：${label}`);
+    }
+  }
 });
 
 test('推荐：公开仓库不推荐也不允许自托管；自托管须用 hasServer=true 明确确认；detect 阶段就列出安装会报的配置错误', () => {
