@@ -31,9 +31,12 @@ export const CI_WORKFLOW_REL = '.github/workflows/ci.yml';
 export function detectFacts(root, override = {}, run = spawnSync) {
   const platform = { win32: 'windows', darwin: 'macos' }[process.platform] || 'linux';
   let githubRemote = false;
+  let repoSpec = null; // github.com/属主/仓库：gh 的调用都显式指定它，不依赖当前目录的默认选择
   if (root) {
     const r = git(root, ['remote', 'get-url', 'origin']);
     githubRemote = r.ok && /github\.com/i.test(r.out);
+    const m = githubRemote ? r.out.trim().match(/github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i) : null;
+    if (m) repoSpec = `${GH_HOST}/${m[1]}/${m[2]}`;
   }
   // 能用 gh 访问 GitHub 才算可用：只装了 gh、没登录不能建仓库、开 PR。用 gh api user 而不是 gh auth status：
   // 后者会因为另一个过期的账号返回非零，而当前账号其实可用。必须带 --hostname github.com：不带时 gh 查的是默认主机，
@@ -41,8 +44,9 @@ export function detectFacts(root, override = {}, run = spawnSync) {
   const gh = run('gh', ['api', 'user', '--hostname', GH_HOST, '--jq', '.login'], { encoding: 'utf8' });
   // 仓库公开与否（有 GitHub 远程时尽力读，读不到是 null）：公开仓库不能用自托管 runner
   let repoPublic = null;
-  if (root && githubRemote && gh.status === 0) {
-    const v = run('gh', ['repo', 'view', '--json', 'isPrivate', '--jq', '.isPrivate'], { cwd: root, encoding: 'utf8' });
+  if (repoSpec && gh.status === 0) {
+    // 显式指定 origin 对应的仓库：不带参数时 gh 会优先取 upstream，公开的 origin 搭私有的 upstream 会被当成私有
+    const v = run('gh', ['repo', 'view', repoSpec, '--json', 'isPrivate', '--jq', '.isPrivate'], { encoding: 'utf8' });
     if (v.status === 0) repoPublic = v.stdout.trim() === 'false' ? true : v.stdout.trim() === 'true' ? false : null;
   }
   return {

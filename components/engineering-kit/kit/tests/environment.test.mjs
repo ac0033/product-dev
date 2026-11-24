@@ -108,6 +108,21 @@ test('detectFacts：读本机系统、资源与 GitHub 远程；可注入覆盖�
   assert.equal(detectFacts(root, {}, fake('ghe.example.com')).ghAvailable, false, '只登录了企业主机：github.com 上不可用');
   assert.ok(calls.some((c) => c[1] === 'api' && c[2] === 'user' && c.includes('--hostname') && c[c.indexOf('--hostname') + 1] === 'github.com'), '认证探测带 --hostname github.com');
   assert.equal(detectFacts(root, {}, fake('github.com')).ghAvailable, true);
+  // 目标仓库显式指定：同时有 origin 和 upstream 时，gh repo view 不带参数会优先取 upstream，可能把公开的 origin 当成私有。
+  // 所有 gh 调用都必须带明确的主机或仓库（不依赖当前环境的默认值）
+  const dual = tmpRepo();
+  spawnSync('git', ['remote', 'add', 'origin', 'git@github.com:me/mine.git'], { cwd: dual });
+  spawnSync('git', ['remote', 'add', 'upstream', 'https://github.com/other/theirs.git'], { cwd: dual });
+  const seen = [];
+  const dualRun = (cmd, args) => {
+    seen.push([cmd, ...args]);
+    if (args[0] === 'api') return { status: 0, stdout: 'me\n' };
+    // 带明确仓库时按仓库答；不带参数时 gh 会取 upstream（私有）
+    const target = args.find((a) => /^github\.com\/[^/]+\/[^/]+$/.test(a));
+    return { status: 0, stdout: target === 'github.com/me/mine' ? 'false\n' : 'true\n' };
+  };
+  assert.equal(detectFacts(dual, {}, dualRun).repoPublic, true, 'origin 是公开的：按 origin 查，不被 upstream 带偏');
+  assert.ok(seen.length >= 2 && seen.every((c) => c.includes('--hostname') || c.some((a) => /^github\.com\/[^/]+\/[^/]+$/.test(a))), `每个 gh 调用都带明确的主机或仓库：${JSON.stringify(seen)}`);
   const real = detectFacts(root);
   assert.ok(['linux', 'windows', 'macos'].includes(real.os));
   assert.ok(real.cpus >= 1 && real.memGB > 0);
@@ -347,7 +362,9 @@ test('一致性：detect 的冲突判定与安装（推荐模式、只给选择�
     try {
       resolveEnvironment(root, opts, facts);
       return false;
-    } catch {
+    } catch (e) {
+      // 代码错误（TypeError 等）不能当成“预期拒绝”：只有主动抛出的配置/冲突错误才算
+      if (e instanceof TypeError || e instanceof ReferenceError || e instanceof SyntaxError || e instanceof RangeError) throw e;
       return true;
     }
   };
