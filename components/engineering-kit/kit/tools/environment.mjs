@@ -92,8 +92,8 @@ export function recommend(facts, choices = {}) {
   const runner = values.ciRunner;
   const publicRepo = choices.publicRepo ?? facts.repoPublic ?? null;
   // 公开仓库不推荐自托管 runner：外部 PR 能改工作流，在用户服务器上执行任意代码
-  const fallbackRec = choices.hasServer === true && publicRepo !== true && (runner === 'github-hosted' || runner === 'self-hosted') ? (runner === 'github-hosted' ? 'self-hosted' : 'github-hosted') : null;
-  pick('ciFallback', choices.ciFallback, fallbackRec, fallbackRec ? '有自己的服务器：主 CI 额度用完或不可用时改用另一处，不耽误合并' : publicRepo === true && choices.hasServer === true ? '公开仓库不设自托管后备：外部 PR 能改工作流，会在你的服务器上执行任意代码' : '没有服务器，不设后备');
+  const fallbackRec = choices.hasServer === true && publicRepo === false && (runner === 'github-hosted' || runner === 'self-hosted') ? (runner === 'github-hosted' ? 'self-hosted' : 'github-hosted') : null;
+  pick('ciFallback', choices.ciFallback, fallbackRec, fallbackRec ? '有自己的服务器：主 CI 额度用完或不可用时改用另一处，不耽误合并' : publicRepo !== false && choices.hasServer === true ? '仓库是公开的或可见性未知（无法确认是私有）：不设自托管后备，外部 PR 能改工作流，会在你的服务器上执行任意代码；确认是私有仓库后用 publicRepo=false 再试' : '没有服务器，不设后备');
   const extra = [...new Set((choices.targets || []).filter((t) => OS_NAMES.includes(t) && t !== 'linux'))];
   pick('ciOs', choices.ciOs, ['linux', ...extra], extra.length > 0
     ? `产品要在 ${extra.join('、')} 上运行：除 Linux 外也在这些系统上验证（更准确），但 Windows 按 2 倍、macOS 按 10 倍计费`
@@ -109,10 +109,12 @@ export function recommend(facts, choices = {}) {
   if (values.fullTests === 'ci' && values.reviewFlow !== 'pr') conflicts.push('fullTests 为 ci 须搭配 pr 流程（只有 pr 流程的合并入口核对 CI）');
   if (values.fullTests === 'ci' && (values.ciRunner === null || values.ciRunner === 'none')) conflicts.push('fullTests 为 ci 须声明 ciRunner 为 github-hosted 或 self-hosted（ciRunner 不能是 none 或不写）');
   conflicts.push(...serverConflicts(values, choices, facts));
+  // ci 与 pr 流程的复审登记、合并、查 CI 都走 gh：有 GitHub 远程但 gh 没登录时，安装能成功、后面会卡住，这里先列出
+  if ((values.fullTests === 'ci' || values.reviewFlow === 'pr') && facts.ghAvailable === false) conflicts.push('fullTests 为 ci 或 reviewFlow 为 pr 都要用 gh（登记复审、查 CI、合并）：gh 未登录，先运行 gh auth login，或改用 pre-push 流程且全量在本机跑');
   // 与安装时的配置校验同一口径：detect 阶段就把安装会报的错列出来（只在没有别的冲突时补，避免重复）
   if (conflicts.length === 0) {
     try {
-      normalizeConfig(applyEnvironment({ profile: 2 }, values, { requiredChecks: values.fullTests === 'ci' ? [CI_GATE_JOB] : undefined }));
+      normalizeConfig(applyEnvironment({ profile: 2 }, values, { requiredChecks: choices.requiredChecks ?? (values.fullTests === 'ci' ? [CI_GATE_JOB] : undefined) }));
     } catch (e) {
       conflicts.push(e.message);
     }
@@ -122,13 +124,16 @@ export function recommend(facts, choices = {}) {
 
 /**
  * 自托管 runner 的冲突：没有自己的服务器（hasServer 不是 true，没声明也算——须明确确认）；
- * 公开仓库（外部 PR 能改工作流，在用户服务器上执行任意代码，工作流里的 fork 分流不是安全边界）。主用或后备都查。
+ * 仓库不是确认的私有（公开，或可见性读不出来）：外部 PR 能改工作流，在用户服务器上执行任意代码，工作流里的 fork 分流不是安全边界。主用或后备都查；
+ * 读不出可见性时（没有 GitHub 远程、gh 没登录）按公开处理，用户确认私有后用 publicRepo=false。
  */
 function serverConflicts(values, choices, facts = {}) {
   const selfKeys = ['ciRunner', 'ciFallback'].filter((k) => values[k] === 'self-hosted');
   const out = [];
   if (choices.hasServer !== true) out.push(...selfKeys.map((k) => `${k} 选了自托管 runner，但没有确认有自己的服务器（用 hasServer=true 明确确认）：改选 github-hosted，或先准备服务器`));
-  if ((choices.publicRepo ?? facts.repoPublic) === true) out.push(...selfKeys.map((k) => `${k} 选了自托管 runner，但仓库是公开的：外部 PR 能改工作流并在你的服务器上执行任意代码，公开仓库请用 github-hosted`));
+  const isPublic = choices.publicRepo ?? facts.repoPublic ?? null;
+  if (isPublic === true) out.push(...selfKeys.map((k) => `${k} 选了自托管 runner，但仓库是公开的：外部 PR 能改工作流并在你的服务器上执行任意代码，公开仓库请用 github-hosted`));
+  else if (isPublic !== false) out.push(...selfKeys.map((k) => `${k} 选了自托管 runner，但无法确认仓库是私有的（可见性未知）：外部 PR 能改工作流并在你的服务器上执行任意代码；确认是私有仓库后用 publicRepo=false，否则用 github-hosted`));
   return out;
 }
 

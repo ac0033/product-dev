@@ -208,6 +208,10 @@ function runChecks({ root, config, affected = false, force = false, full = false
           record: null,
         };
       }
+      // 全量交给 CI 且没有要求在本机跑：不写测试记录（文档承诺默认不写），合并看 CI
+      if (config.fullTests === 'ci' && !full && !affected && !force) {
+        return { ok: true, messages: [...passLines, '尚无源码与测试文件，未运行测试命令；全量测试交给 CI（modules.gate.fullTests=ci），本机不写测试记录'], record: null };
+      }
       fs.mkdirSync(recordDir(root), { recursive: true });
       const noTestRecord = {
         passed: true,

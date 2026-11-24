@@ -13,7 +13,7 @@ import { PRESETS } from '../tools/presets.mjs';
 import { read, tmpDir, tmpRepo, write } from './helpers.mjs';
 
 /** 资源紧张的 Windows 笔记本，有 GitHub 远程。 */
-const LAPTOP = { os: 'windows', cpus: 4, memGB: 8, githubRemote: true, ghAvailable: true };
+const LAPTOP = { os: 'windows', cpus: 4, memGB: 8, githubRemote: true, ghAvailable: true, repoPublic: false };
 /** 资源充裕的 Linux 工作站，没有 GitHub，也没有 gh。 */
 const WORKSTATION = { os: 'linux', cpus: 16, memGB: 64, githubRemote: false, ghAvailable: false };
 
@@ -149,14 +149,16 @@ test('工作流：按选择生成——多系统矩阵、自托管后备用仓�
   const multi = renderCiWorkflow({ ...WF, ciOs: ['linux', 'windows', 'macos'] });
   assert.match(multi, /os: windows\n\s+runner: windows-latest/);
   assert.match(multi, /os: macos\n\s+runner: macos-latest/);
-  const EXT = "\(github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.repo\.full_name != github\.repository\)";
-  const SELF = "fromJSON\('\[\"self-hosted\",\"linux\"\]'\)";
+  // 用原样字符串比较（includes），不拼正则：正则里的转义写在字符串里会被吃掉，断言就形同虚设
+  const EXT = "(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)";
+  const SELF = `fromJSON('["self-hosted","linux"]')`;
   const fb = renderCiWorkflow({ ...WF, ciFallback: 'self-hosted' });
-  assert.match(fb, new RegExp(`vars\.CI_RUNNER == 'self-hosted' && !${EXT} && ${SELF} \|\| 'ubuntu-latest'`), '自托管只给仓库自己的提交和 PR（按来源仓库比较，fork 仓库自己的分支 PR 不误判）；带 linux 标签，不会被 Windows 自托管机接走');
+  assert.ok(fb.includes(`vars.CI_RUNNER == 'self-hosted' && !${EXT} && ${SELF} || 'ubuntu-latest'`),'自托管只给仓库自己的提交和 PR（按来源仓库比较，fork 仓库自己的分支 PR 不误判）；带 linux 标签，不会被 Windows 自托管机接走');
   const selfFirst = renderCiWorkflow({ ...WF, ciRunner: 'self-hosted', ciFallback: 'github-hosted' });
-  assert.match(selfFirst, new RegExp(`\(vars\.CI_RUNNER == 'github-hosted' \|\| ${EXT}\) && 'ubuntu-latest' \|\| ${SELF}`));
+  assert.ok(selfFirst.includes(`(vars.CI_RUNNER == 'github-hosted' || ${EXT}) && 'ubuntu-latest' || ${SELF}`));
   const selfOnly = renderCiWorkflow({ ...WF, ciRunner: 'self-hosted' });
-  assert.match(selfOnly, new RegExp(`runner: \$\{\{ ${EXT} && 'ubuntu-latest' \|\| ${SELF} \}\}`));
+  assert.ok(selfOnly.includes('runner: ${{ ' + EXT + " && 'ubuntu-latest' || " + SELF + ' }}'));
+  assert.ok(!/runner: ubuntu-latest\n/.test(selfOnly.split('  test:')[1]), '分流被删成固定的托管 runner 时必须失败');
   assert.match(selfOnly, /不要把自托管 runner 用在接受外部 PR 的公开仓库/, '说明自托管 runner 的安全风险');
   const py = renderCiWorkflow({ ...WF, testCommand: 'python -m pytest -q' });
   assert.match(py, /setup-python/);
@@ -271,6 +273,17 @@ test('命令行：environment.mjs detect 输出事实与推荐（JSON），--cho
     assert.match(miss.stderr, /--env/);
   }
   assert.ok(!fs.existsSync(path.join(dir2, 'engineering.config.json')));
+});
+
+test('推荐：仓库可见性未知时按公开处理，不推荐也不接受自托管；gh 未登录时 ci/pr 流程列为冲突；重复的检查名 detect 阶段就报', () => {
+  const unknown = { ...LAPTOP, repoPublic: null };
+  assert.equal(recommend(unknown, { hasServer: true }).values.ciFallback, null, '可见性未知不设自托管后备');
+  assert.ok(recommend(unknown, { hasServer: true, ciRunner: 'self-hosted' }).conflicts.some((c) => /私有|可见性/.test(c)));
+  assert.ok(recommend(unknown, { hasServer: true, publicRepo: false, ciRunner: 'self-hosted' }).conflicts.length === 0, '用户确认私有后可以');
+  const noGh = { ...LAPTOP, ghAvailable: false };
+  assert.ok(recommend(noGh, {}).conflicts.some((c) => /gh/.test(c)), 'ci 与 pr 流程都要用 gh：未登录要先登录');
+  assert.equal(recommend(noGh, { fullTests: 'local', reviewFlow: 'pre-push' }).conflicts.length, 0, '不用 pr 流程时不需要 gh');
+  assert.ok(recommend(LAPTOP, { requiredChecks: ['unit', 'unit'] }).conflicts.length > 0);
 });
 
 test('推荐：公开仓库不推荐也不允许自托管；自托管须用 hasServer=true 明确确认；detect 阶段就列出安装会报的配置错误', () => {

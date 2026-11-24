@@ -64,7 +64,7 @@
 2. 把要问的事一次问完，推荐项放第一：全量测试在 CI 还是本机跑；CI 放哪（GitHub 托管 / 自托管服务器，有没有自己的服务器、要不要后备）；CI 跑哪些系统（产品要在哪些系统上运行）；开发更适合本地会话还是云端会话；能并行的是否并行。用户已经说了想法的按用户的，不再问。
 3. 用户没选或不知道怎么选：agent 直接用推荐，并告诉用户每项选了什么、为什么，用户可随时改。推荐按两条原则：一是本机的实际情况（系统决定命令写法，CPU 和内存决定本机扛不扛得住全量测试与并行任务，有没有 GitHub 和服务器决定 CI 放哪）；二是更快、更便宜、更高效、更准确——能并行就并行，并行受资源限制时先想能不能放到云端会话或 CI，不行才串行；CI 只用 Linux，除非产品要在别的系统上运行；有 GitHub 就把全量交给 CI。
 4. 装：`node <kit>/sync.mjs --target <项目> --init --profile ts|python --env recommended [--choice 键=值]…`（`--env recommended` 把没选的项按推荐补全；只给 `--choice` 时只写给出的项）。首次创建配置时写入选择、按选择生成 `.github/workflows/ci.yml`（草稿 PR 不跑、只改免审文档跳过测试、汇总检查 `ci-gate` 仍成功；选了 pr 流程时它就是必需检查），并输出“本项目的执行方式”几行说明。已有配置的项目环境选择不生效，只提示，要改手动改配置。已有 `ci.yml` 不覆盖：套件看不出它跑不跑全量测试，所以 `fullTests=ci` 时必须加 `--choice requiredChecks=<跑全量测试的检查名，逗号分隔>` 写明，否则拒绝安装（不然一个只跑 lint 的 CI 也能让合并入口放行）。推荐用 `gh auth status` 判断 GitHub 是否可用：只装了 `gh` 没登录不算。
-   - 自托管 runner 的安全：生成的工作流让来自 fork 的 PR 一律走 GitHub 托管 runner，自托管 runner 带 `self-hosted`、`linux` 两个标签，只用于 Linux；不要把自托管 runner 用在接受外部 PR 的公开仓库，并在仓库设置里要求外部贡献者的工作流经人批准后再运行。
+   - 自托管 runner 的安全：生成的工作流让来自 fork 的 PR 一律走 GitHub 托管 runner，自托管 runner 带 `self-hosted`、`linux` 两个标签，只用于 Linux；不要把自托管 runner 用在接受外部 PR 的公开仓库，并在仓库设置里要求外部贡献者的工作流经人批准后再运行；套件在装时只在“确认是私有仓库”（自动读到，或 `--choice publicRepo=false` 声明）时才接受自托管，读不出可见性按公开处理。
 5. 之后换环境（换机器、有了服务器、额度用完）时，按下面的表重新核对，改配置（判定策略字段须合入主干后才生效）。
 
 #### 每类工作在哪做
@@ -86,13 +86,14 @@
 
 | 组合 | 做法 |
 |---|---|
-| 只有本机（本地或云端会话），`github-hosted` | 推送后 CI 在 GitHub 托管 runner 上跑。作业因额度用完启动不了时，agent 不自行改配置，列出可行做法让用户选：等额度或充值；在本机或云端会话用 `gate.mjs --full` 把全量跑通，结果写进 PR，由用户合并（`pr` 流程的合并入口要求 CI 全过，CI 起不来时它会拦下，不要为此改配置绕过） |
+| 只有本机（本地或云端会话），`github-hosted` | 推送后 CI 在 GitHub 托管 runner 上跑。作业因额度用完启动不了时，agent 不自行改配置，列出可行做法让用户选：等额度或充值；在本机或云端会话用 `gate.mjs --force` 把全量重新跑通（`--full` 会沿用旧的通过记录，不算新证据），结果写进 PR，由用户合并（`pr` 流程的合并入口要求 CI 全过，CI 起不来时它会拦下，不要为此改配置绕过） |
 | 只有本机，选了 `self-hosted` | 没有服务器，行不通：说明原因，改选 `github-hosted`，或把 `fullTests` 改成 `local`（同时 `reviewFlow` 可留 `pr`，全量由闸门在会话所在环境跑） |
-| 本机加服务器（本地或云端会话），`self-hosted` | CI 在服务器上跑。runner 离线时如实报告，让用户选：启动 runner；切到后备 `github-hosted`（把仓库变量 `CI_RUNNER` 设成 `github-hosted`）；或在会话所在环境用 `gate.mjs --full` 跑通全量、写进 PR 由用户合并 |
-| 本机加服务器，`github-hosted` 额度用完 | 配了 `ciFallback: self-hosted` 的，把仓库变量 `CI_RUNNER` 设成 `self-hosted` 即可，不用改工作流（设仓库变量是对外部服务的改动，按 R2 先问用户）；没配的让用户选：装好 runner 后改 `self-hosted`、等额度、在会话所在环境用 `gate.mjs --full` 跑通全量并写进 PR 由用户合并 |
+| 本机加服务器（本地或云端会话），`self-hosted` | CI 在服务器上跑。runner 离线时如实报告，让用户选：启动 runner；切到后备 `github-hosted`（把仓库变量 `CI_RUNNER` 设成 `github-hosted`）；或在会话所在环境用 `gate.mjs --force` 重新跑通全量、写进 PR 由用户合并 |
+| 本机加服务器，`github-hosted` 额度用完 | 配了 `ciFallback: self-hosted` 的，把仓库变量 `CI_RUNNER` 设成 `self-hosted` 即可，不用改工作流（设仓库变量是对外部服务的改动，按 R2 先问用户）；没配的让用户选：装好 runner 后改 `self-hosted`、等额度、在会话所在环境用 `gate.mjs --force` 重新跑通全量并写进 PR 由用户合并 |
 
+- 已知限制：（1）已有 CI 的项目，`requiredChecks` 里写的检查名由用户负责，套件只查名字出现在 `ci.yml` 里，查不了该检查是否真的跑全量测试（只跑 lint 的检查名也会被接受）；（2）生成的 `ci.yml` 把安装时的 `reviewIgnore` 固化在文件里，之后改了配置里的免审范围要同步改 `ci.yml`，否则 CI 与闸门对“只改文档”的判断会不一致；（3）`testEnv`、`testCommand` 安装后改了同样要同步；（4）`pr` 流程还要求 `gh` 已登录，未登录时 `detect` 会列为冲突。
 - 改 `fullTests` / `ciRunner` 是判定策略改动，先合入主干才生效；CI 不可用而卡住这个 PR 本身时，由用户合并。
-- 不降低标准：CI 起不来时，全量测试仍要在某个环境跑通并有证据（`gate.mjs --full` 的输出和测试记录），再由用户决定合并；不因为 CI 不可用就跳过全量。
+- 不降低标准：CI 起不来时，全量测试仍要在某个环境跑通并有证据（`gate.mjs --force` 的输出和测试记录；要重跑用 `--force`，`--full` 会沿用一致的旧记录），再由用户决定合并；不因为 CI 不可用就跳过全量。
 - `CI_RUNNER` 变量只切换 Linux 作业；Windows、macOS 的矩阵项始终用 GitHub 托管 runner，托管额度用完时它们也跑不起来——额度紧张的项目 `ciOs` 只留 `linux`。
 - 生成的 `ci.yml` 是项目自己的文件：安装时写入的 `testCommand`、`testEnv` 之后改了，要同步改 `ci.yml`，套件不会自动同步。
 - 本机和云端会话都能做的，按实际情况选；多种可行时问用户，用户不选时按上面的推荐原则（更快、更便宜、更高效、更准确）；只能本机做的，在汇报里写明为什么。

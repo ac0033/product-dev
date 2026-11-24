@@ -9,7 +9,7 @@ import { DEFAULTS, normalizeConfig, toFlat, toProfile } from '../gate/config.mjs
 import { runGate } from '../gate/gate.mjs';
 import { POLICY_KEYS, loadConfig, readRecord } from '../gate/lib.mjs';
 import { verify } from '../gate/verify.mjs';
-import { commitAll, featureRepo, git, SRC_HEADER, TEST_CONFIG, write } from './helpers.mjs';
+import { commitAll, featureRepo, git, SRC_HEADER, TEST_CONFIG, tmpRepo, write } from './helpers.mjs';
 
 /** ci 模式的合法配置片段。 */
 const CI = { reviewFlow: 'pr', fullTests: 'ci', ciRunner: 'github-hosted', requiredChecks: ['test'] };
@@ -164,6 +164,23 @@ test('配置：fullTests 为 ci 须在 requiredChecks 里写明跑全量的检�
   assert.throws(() => normalizeConfig(profile({ reviewFlow: 'pr', fullTests: 'ci', ciRunner: 'github-hosted' })), /requiredChecks/);
   assert.throws(() => normalizeConfig(profile({ reviewFlow: 'pr', fullTests: 'ci', ciRunner: 'github-hosted', requiredChecks: [] })), /requiredChecks/);
   assert.equal(normalizeConfig(profile({ ...CI })).requiredChecks[0], 'test');
+});
+
+test('闸门：ci 模式下只有脚手架（没有源码与测试）时也不写测试记录；显式 full 才写“无需测试”记录', () => {
+  const root = tmpRepo();
+  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, ...CI }, null, 2));
+  write(root, 'README.md', '# scaffold\n');
+  commitAll(root, 'base');
+  git(root, ['checkout', '-q', '-b', 'feat']);
+  write(root, 'NOTES.md', '# notes\n');
+  commitAll(root, 'scaffold only');
+  const res = runGate({ root });
+  assert.equal(res.ok, true, res.messages.join('\n'));
+  assert.equal(res.record, null);
+  assert.equal(readRecord(root, 'tests.json'), null, 'ci 模式默认不写测试记录');
+  const full = runGate({ root, full: true });
+  assert.equal(full.ok, true, full.messages.join('\n'));
+  assert.equal(full.record?.skipped, 'no-code');
 });
 
 test('闸门：ci 模式加 force 也在本机重跑全量；默认的静态检查仍做源码与测试 glob 误配检查', () => {
