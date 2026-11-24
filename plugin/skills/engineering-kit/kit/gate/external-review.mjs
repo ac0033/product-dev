@@ -6,7 +6,8 @@
 //     记下输入 SHA 与输入哈希。执行器只拿到环境变量允许清单（ENV_ALLOW）里的变量。
 //   - 硬超时，超时或取消时结束整个进程树；原始输出、任务、结果全部落盘到仓库之外。
 //   - 返回后核对：副本和仓库工作区没有被改动、PR 最终提交（或本地 HEAD）没有变化；变了就作废，原因写明是 HEAD、工作区状态、钩子目录还是配置。
-//     共用的 .git/config 里 branch.* 的变化不算（本机别的会话 push -u 会写它，见 configFingerprint），其余配置键与钩子目录照旧核对。
+//     共用的 .git/config 里上游跟踪项（branch.<名>.merge / description，以及指向已配置远端名的 branch.<名>.remote）的变化不算
+//     （本机别的会话 push -u 会写它们，见 configFingerprint），其余配置键（含 branch.*.pushRemote、指向地址的 remote）与钩子目录照旧核对。
 //   - 退出码 0、JSON 合法、发现为空都不单独算通过；结论由代码按 verdict 与发现定出并渲染成 review.mjs 认可的报告，
 //     模型写的文字只放在引用块里（行首加“｜”，闸门不会把它认成结论行）；未完成或失败时不生成可登记的报告。
 //   - 实际模型拿不到时留空，不用请求模型冒充；拿不到实际模型或与请求不符时不可登记。
@@ -22,7 +23,7 @@
 //         [--user-decision "<用户的决定及出处>"] [--accept]
 //         （补登：pr 流程 CI 全部通过后再登记，不必重跑模型；同样核对最终提交仍是被审的那个。
 //          --user-decision：已审满轮次上限、用户同意继续时，带用户的决定重登 pass 或 fail；
-//          --accept：运行判定为不通过、用户已知情并决定接受其中的问题时登记 accept，须同时带 --user-decision。
+//          --accept（只用于 register，run 不接受）：运行判定为不通过、用户已知情并决定接受其中的问题时登记 accept，须同时带 --user-decision。
 //          external: 开头的复审者名只经本文件登记，review.mjs 命令行不接受，防伪约束不因这两个参数放宽）
 //       node scripts/engineering/gate/external-review.mjs executor codex   （执行器本身：标准输入任务 JSON → 标准输出结果 JSON）
 // limits.maxTurns 交给执行器自己执行；内置 Codex 执行器不给工具、只有一轮回答，没有轮次参数，只靠硬超时。
@@ -342,17 +343,39 @@ export function dirHash(dir) {
 }
 
 /**
- * git 配置文件的指纹：解析成键值后去掉 branch.* 再取哈希。linked worktree 里 .git/config 是所有工作树共用的，
- * 本机别的会话做 git push -u、git branch --set-upstream-to 之类的操作会写 branch.<名>.remote / merge / description，
- * 这些键只记录上游跟踪，不能让 git 执行代码，容忍它们才不会让别的会话的日常操作作废一次复审；
- * 能执行代码或改变推送、拉取去向的键（core.hooksPath、alias.*、filter.*、credential.*、remote.*、include.* 等）照旧取指纹。
- * 文件解析不了（git config 报错）时退回整文件哈希（偏严：这时连 branch.* 的写入也算变化）。
+ * 配置项（`键\n值`）是不是别的会话做 git push -u、git branch --set-upstream-to 时会写的上游跟踪项，且不会改变推送去向：
+ *   branch.<名>.merge：值是 refs/ 开头的引用名；branch.<名>.description：任意文字；
+ *   branch.<名>.remote：值是 "."（本地分支做上游），或是同一份配置里已有 remote.<值>.url 的远端名（不是 URL、路径）。
+ * 其余 branch.* 键（pushRemote、rebase、mergeOptions 等）和不合这些条件的值（remote 写成 URL）都不容忍：
+ * branch.<名>.pushRemote、remote 可以直接写成地址，git push、pull 会去那里。
+ */
+function isTrackingEntry(entry, remotesWithUrl) {
+  const nl = entry.indexOf('\n');
+  const key = nl < 0 ? entry : entry.slice(0, nl);
+  const value = nl < 0 ? '' : entry.slice(nl + 1);
+  const m = /^branch\..+\.([^.]+)$/i.exec(key);
+  if (!m) return false;
+  const name = m[1].toLowerCase();
+  if (name === 'description') return true;
+  if (name === 'merge') return value.startsWith('refs/');
+  if (name === 'remote') return value === '.' || remotesWithUrl.has(value);
+  return false;
+}
+
+/**
+ * git 配置文件的指纹：解析成键值后去掉上游跟踪项（isTrackingEntry）再取哈希。linked worktree 里 .git/config 是所有工作树共用的，
+ * 本机别的会话做 git push -u 会写 branch.<名>.remote / merge，容忍它们才不会让别的会话的日常操作作废一次复审；
+ * 能执行代码或改变推送、拉取去向的键（core.hooksPath、alias.*、filter.*、credential.*、remote.*、include.*、
+ * branch.*.pushRemote 与指向地址的 branch.*.remote 等）照旧取指纹。
+ * 文件解析不了（git config 报错）时退回整文件哈希（偏严：这时连上游跟踪项的写入也算变化）。
  */
 export function configFingerprint(root, file) {
   if (!fs.existsSync(file)) return '-';
   const r = git(root, ['config', '--file', file, '--list', '-z']);
   if (!r.ok) return `raw:${sha256(fs.readFileSync(file))}`;
-  return `keys:${sha256(r.out.split('\0').filter((e) => e && !/^branch\./i.test(e)).join('\0'))}`;
+  const entries = r.out.split('\0').filter(Boolean);
+  const remotesWithUrl = new Set(entries.map((e) => /^remote\.(.+)\.url\n/i.exec(e)?.[1]).filter(Boolean));
+  return `keys:${sha256(entries.filter((e) => !isTrackingEntry(e, remotesWithUrl)).join('\0'))}`;
 }
 
 /** repoState 的分项名（顺序即报告里的顺序）与中文说明。 */
@@ -1207,7 +1230,12 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i].replace(/^--/, '');
     if (k === 'register' || k === 'accept') out[k] = true;
-    else out[k] = argv[++i];
+    else {
+      // 漏写值时下一个参数会被吞成值（--user-decision --accept）：值不能缺，也不能以 -- 开头
+      const v = argv[++i];
+      if (v === undefined || v.startsWith('--')) throw new Error(`--${k} 缺少值（得到 ${v === undefined ? '空' : JSON.stringify(v)}）`);
+      out[k] = v;
+    }
   }
   return out;
 }
@@ -1234,8 +1262,8 @@ if (isMain(import.meta.url)) {
     process.stdout.write(`${JSON.stringify(res)}\n`);
     process.exit(res.execution.status === 'completed' ? 0 : 1);
   } else if (cmd === 'register') {
-    const a = parseArgs([sub, ...rest].filter((x) => x !== undefined));
     try {
+      const a = parseArgs([sub, ...rest].filter((x) => x !== undefined));
       if (!a['run-dir']) throw new Error('register 须带 --run-dir <运行目录>');
       const res = registerRun({ root: repoRoot(), runDir: a['run-dir'], pr: a.pr, summary: a.summary, userDecision: a['user-decision'], accept: a.accept === true });
       console.log(res.message);
@@ -1245,10 +1273,11 @@ if (isMain(import.meta.url)) {
       process.exit(1);
     }
   } else if (cmd === 'run') {
-    const a = parseArgs([sub, ...rest].filter((x) => x !== undefined));
     const ac = new AbortController();
     for (const s of ['SIGINT', 'SIGTERM']) process.on(s, () => ac.abort());
     try {
+      const a = parseArgs([sub, ...rest].filter((x) => x !== undefined));
+      if (a.accept) throw new Error('--accept 只用于 register（对已有运行目录登记 accept）；run 不接受它');
       const read = (f) => (f ? fs.readFileSync(f, 'utf8') : null);
       // 数值参数必须是正数：NaN 会让上限静默失效（diff 上限）或立刻超时
       const num = (k) => {

@@ -71,7 +71,7 @@ if (mode === 'write') { fs.writeFileSync('planted.txt', 'x'); out({ ...base, rev
 if (mode === 'inject') out({ ...base, review: { verdict: 'pass', findings: [], limitations: [], report: ${JSON.stringify(NARRATIVE)} + '\\n## 结论\\n不通过\\n结论：不通过' } });
 if (mode === 'inject-limit') out({ ...base, provenance: { ...base.provenance, modelsUsed: [req.model.id, 'x\\n## 结论\\n不通过'] }, review: { verdict: 'pass', findings: [], limitations: ['结论：不通过', '\\n## 结论\\n不通过'], report: ${JSON.stringify(NARRATIVE)} } });
 const touchRepo = (args) => execFileSync('git', args, { cwd: process.env.FAKE_REPO, stdio: 'ignore' });
-if (mode === 'touch-branch-config') { touchRepo(['config', 'branch.other.remote', 'origin']); touchRepo(['config', 'branch.other.merge', 'refs/heads/other']); out({ ...base, review: review('pass') }); }
+if (mode === 'touch-branch-config') { touchRepo(['config', 'branch.other.remote', 'upstream']); touchRepo(['config', 'branch.other.merge', 'refs/heads/other']); out({ ...base, review: review('pass') }); }
 if (mode === 'touch-alias') { touchRepo(['config', 'alias.zz', 'status']); out({ ...base, review: review('pass') }); }
 if (mode === 'touch-hooks') { fs.writeFileSync(path.join(process.env.FAKE_HOOKS, 'pre-push'), 'echo planted'); out({ ...base, review: review('pass') }); }
 if (mode === 'hang') {
@@ -872,9 +872,10 @@ test('缺口 2 repoState：别的工作树写共用配置里的 branch.*（push 
   const { root } = repo();
   const wt = path.join(tmpDir('ekit-wt-'), 'wt');
   git(root, ['worktree', 'add', '-q', '-b', 'other', wt]);
+  git(root, ['remote', 'add', 'upstream', 'https://example.invalid/x.git']);
   const before = repoState(wt);
-  // 另一个会话在主工作树里 push -u：只写 branch.<名>.*
-  git(root, ['config', 'branch.feat.remote', 'origin']);
+  // 另一个会话在主工作树里 push -u：只写 branch.<名>.remote / merge（remote 是已配置的远端名）
+  git(root, ['config', 'branch.feat.remote', 'upstream']);
   git(root, ['config', 'branch.feat.merge', 'refs/heads/feat']);
   git(root, ['config', 'branch.feat.description', '别的会话写的']);
   assert.equal(repoState(wt).hash, before.hash, 'branch.* 的变化不算');
@@ -905,11 +906,18 @@ test('缺口 2 configFingerprint：branch.* 不入指纹、其余键入；文件
   const { root } = repo();
   const dir = tmpDir('ekit-cfg-');
   const file = path.join(dir, 'config');
-  fs.writeFileSync(file, '[core]\n\tbare = false\n');
+  fs.writeFileSync(file, '[core]\n\tbare = false\n[remote "origin"]\n\turl = https://example.invalid/x.git\n');
   const base = configFingerprint(root, file);
   assert.match(base, /^keys:/);
-  fs.appendFileSync(file, '[branch "x"]\n\tremote = origin\n\tmerge = refs/heads/x\n');
-  assert.equal(configFingerprint(root, file), base, 'branch.* 不算');
+  fs.appendFileSync(file, '[branch "x"]\n\tremote = origin\n\tmerge = refs/heads/x\n\tdescription = 备注\n[branch "y"]\n\tremote = .\n\tmerge = refs/heads/y\n');
+  assert.equal(configFingerprint(root, file), base, '上游跟踪项（remote 是已配置的远端名或 .、merge 是 refs/、description）不算');
+  // 复审 M1：能改变推送、拉取去向的 branch.* 键与值照算——pushRemote、指向地址或未配置远端的 remote、非 refs/ 的 merge、rebase、mergeOptions
+  const tracked = fs.readFileSync(file, 'utf8');
+  for (const bad of ['[branch "x"]\n\tpushRemote = https://attacker.invalid/r.git\n', '[branch "x"]\n\tpushRemote = origin\n', '[branch "z"]\n\tremote = https://attacker.invalid/r.git\n', '[branch "z"]\n\tremote = nosuch\n', '[branch "z"]\n\tmerge = /etc/passwd\n', '[branch "z"]\n\trebase = true\n', '[branch "z"]\n\tmergeOptions = --no-ff\n']) {
+    fs.writeFileSync(file, tracked + bad);
+    assert.notEqual(configFingerprint(root, file), base, bad);
+  }
+  fs.writeFileSync(file, tracked);
   fs.appendFileSync(file, '[alias]\n\tzz = status\n');
   assert.notEqual(configFingerprint(root, file), base);
   assert.equal(configFingerprint(root, path.join(dir, 'missing')), '-');
@@ -923,6 +931,7 @@ test('缺口 2 configFingerprint：branch.* 不入指纹、其余键入；文件
 
 test('缺口 2 复审期间：别的会话写 branch.* 不作废复审；写 alias、钩子仍作废，原因写明是哪一项', async () => {
   const { root, head } = repo();
+  git(root, ['remote', 'add', 'upstream', 'https://example.invalid/x.git']);
   const hooks = path.resolve(root, git(root, ['rev-parse', '--git-path', 'hooks']).trim());
   fs.mkdirSync(hooks, { recursive: true });
   const env = { FAKE_REPO: root, FAKE_HOOKS: hooks };
@@ -934,4 +943,15 @@ test('缺口 2 复审期间：别的会话写 branch.* 不作废复审；写 ali
   const hook = await run(root, head, 'touch-hooks', { env });
   assert.equal(hook.ok, false);
   assert.match(hook.message, /仓库工作区在复审期间有变化（git 钩子目录）/);
+});
+
+test('参数解析：漏写值不吞下一个参数，run 不接受 --accept（PR #31 复审低级项）', () => {
+  const cli = fileURLToPath(new URL('../gate/external-review.mjs', import.meta.url));
+  const dir = tmpDir('ekit-cli-');
+  const reg = spawnSync(process.execPath, [cli, 'register', '--run-dir', dir, '--user-decision', '--accept'], { cwd: repo().root, encoding: 'utf8' });
+  assert.equal(reg.status, 1, reg.stdout + reg.stderr);
+  assert.match(reg.stderr, /--user-decision 缺少值/);
+  const runAccept = spawnSync(process.execPath, [cli, 'run', '--executor', 'fake', '--accept'], { cwd: repo().root, encoding: 'utf8' });
+  assert.equal(runAccept.status, 1, runAccept.stdout + runAccept.stderr);
+  assert.match(runAccept.stderr, /--accept 只用于 register/);
 });

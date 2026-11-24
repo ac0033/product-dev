@@ -467,6 +467,9 @@ export function classify(command) {
 /** 改变当前目录的命令（cd 及其别名）。 */
 const CD_COMMANDS = new Set(['cd', 'chdir', 'pushd', 'set-location', 'sl']);
 
+/** 撤销或回到之前目录的命令：出现后当前目录说不准。 */
+const RESTORE_COMMANDS = new Set(['popd', 'pop-location', 'push-location']);
+
 /** 认不准的目录写法：变量、命令替换、通配、%变量%、以 ~ 开头（主目录）、cd - （上一个目录）。 */
 const UNRESOLVABLE_DIR = /^~|^-$|[$`*?%]/;
 
@@ -491,27 +494,41 @@ function cdTarget(words, at) {
  * 命令里每个 git push / gh pr create 实际所在的目录（绝对路径，去重，按出现顺序）：从会话目录 cwd 起，
  * 依次应用先行的 cd / pushd / Set-Location，再应用 git 的 -C（多个依次叠加，相对路径相对前一个目录）。
  * 说不准的一律退回会话目录（与按会话目录核对时一样严，不会漏）：目录写法含变量、~、命令替换、通配；cd 没有目录或是 cd -；
- * cd 出现在 ( ) { } 子 shell、管道、|| 或后台 & 的命令里（它不一定影响后面的推送）；用了 --git-dir、--work-tree。
+ * cd 出现在 ( ) { } 子 shell、管道、|| 或后台 & 的命令里（它不一定影响后面的推送）；cd 前面已有别的命令（`a && cd x; git push`
+ * 里 cd 可能没执行）或在 if / then / do 等条件、循环段里；命令里有 popd、Pop-Location、Push-Location；
+ * 用了 --git-dir、--work-tree、GIT_DIR、GIT_WORK_TREE、core.worktree、env -C。
  * 没找到任何推送（例如推送写在 bash -c 的引号载荷里）时也是会话目录。dialects 是切词用的引号方言：钩子知道工具是 PowerShell 还是
  * Bash 时只传对应的一种（Windows 路径里的反斜杠在两种方言下切法不同），不知道时两种都试，目录取并集。
  */
 export function pushDirs(command, cwd, dialects = DIALECTS) {
+  // git 实际用的目录由环境变量、配置或 env -C 另行指定：不解析
+  if (/GIT_(?:DIR|WORK_TREE)\b|core\.worktree|\benv\b[^;&|\n]*\s(?:-C|--chdir)\b/i.test(command)) return [cwd];
   const found = new Set();
   for (const d of dialects) {
     // 重定向里的 & 不是后台符（2>&1、&>）；剩下的单个 & 或任何 | 都让 cd 的作用说不准
     const flaky = /\||(?<!&)&(?!&)/.test(stripQuoted(command, d).replace(/\d*[<>]&\d*-?|&>>?/g, ''));
     let cur = cwd;
     let known = true;
+    let seenOther = false; // 前面已有不是 cd 的命令：之后的 cd 可能因 &&、if 等条件没执行，也可能被 popd 等撤销
     for (const seg of shellSegments(command, d)) {
       const { words, commands } = analyzeSegment(seg, d);
       // analyzeSegment 会去掉词首的 $( 与反引号，命令替换要在原始词上认（cd $(pwd)/../wt 的目录是算出来的）
       const subst = seg.some((w) => /\$\(|`/.test(w));
+      // 条件、循环、函数的关键字开头的段（then cd x、do cd x）里的 cd 不一定执行
+      const conditional = KEYWORDS.has(cmdName(seg[0] ?? '')) || ['for', 'case', 'function', 'select'].includes(cmdName(seg[0] ?? ''));
+      let cdOnly = true;
       for (const c of commands) {
-        if (!CD_COMMANDS.has(cmdName(words[c.at] ?? ''))) continue;
+        const name = cmdName(words[c.at] ?? '');
+        if (RESTORE_COMMANDS.has(name)) known = false; // popd、Pop-Location、Push-Location：当前目录不再能按顺序推算
+        if (!CD_COMMANDS.has(name)) {
+          if (words[c.at] !== undefined) cdOnly = false;
+          continue;
+        }
         const to = cdTarget(words, c.at);
-        if (flaky || subst || c.sub || to === null) known = false;
+        if (flaky || subst || c.sub || seenOther || conditional || to === null) known = false;
         else if (known) cur = path.resolve(cur, to);
       }
+      if (conditional || !cdOnly) seenOther = true;
       for (const { push } of scanPushes(seg, d)) {
         let dir = cur;
         let ok = known && !subst && !push.redirected;
