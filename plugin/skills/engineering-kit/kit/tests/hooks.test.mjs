@@ -281,9 +281,14 @@ test('pushDirs：git -C、先行的 cd / Set-Location 给出推送所在目录�
   assert.deepEqual(pushDirs('cd ../wt && git push origin x', cwd), [at('../wt')]);
   assert.deepEqual(pushDirs('cd ../wt; git -C sub push', cwd), [at('../wt/sub')]);
   // PowerShell 工具只按 PowerShell 方言切词（Windows 路径里的反斜杠在 sh 方言下是转义）
-  assert.deepEqual(pushDirs('Set-Location ..\\wt; git push origin x', cwd, ['ps']), [at('../wt')]);
-  assert.deepEqual(pushDirs('Set-Location -LiteralPath ..\\wt; git push origin x', cwd, ['ps']), [at('../wt')]);
-  assert.deepEqual(pushDirs('git -C ..\\wt push origin x', cwd, ['ps']), [at('../wt')]);
+  assert.deepEqual(pushDirs('Set-Location ../wt; git push origin x', cwd, ['ps']), [at('../wt')]);
+  assert.deepEqual(pushDirs('Set-Location -LiteralPath ../wt; git push origin x', cwd, ['ps']), [at('../wt')]);
+  assert.deepEqual(pushDirs('git -C ../wt push origin x', cwd, ['ps']), [at('../wt')]);
+  if (process.platform === 'win32') {
+    // 反斜杠只在 Windows 上是路径分隔符
+    assert.deepEqual(pushDirs('Set-Location ..\\wt; git push origin x', cwd, ['ps']), [at('../wt')]);
+    assert.deepEqual(pushDirs('git -C ..\\wt push origin x', cwd, ['ps']), [at('../wt')]);
+  }
   assert.deepEqual(pushDirs('pushd "../wt" && git push', cwd), [at('../wt')]);
   assert.deepEqual(pushDirs('cd ../wt && gh pr create --fill', cwd), [at('../wt')]);
   // 两处推送各在各的目录：逐个核对，去重
