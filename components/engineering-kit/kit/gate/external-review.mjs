@@ -5,7 +5,9 @@
 //   - 被审内容只取被审提交（git 对象），按文件名排除密钥类文件（由 git 匹配，diff 与副本同一口径），放到仓库之外的临时只读副本里；
 //     记下输入 SHA 与输入哈希。执行器只拿到环境变量允许清单（ENV_ALLOW）里的变量。
 //   - 硬超时，超时或取消时结束整个进程树；原始输出、任务、结果全部落盘到仓库之外。
-//   - 返回后核对：副本和仓库工作区没有被改动、PR 最终提交（或本地 HEAD）没有变化；变了就作废。
+//   - 返回后核对：副本和仓库工作区没有被改动、PR 最终提交（或本地 HEAD）没有变化；变了就作废，原因写明是 HEAD、工作区状态、钩子目录还是配置。
+//     共用的 .git/config 里上游跟踪项（branch.<名>.merge / description，以及指向已配置远端名的 branch.<名>.remote）的变化不算
+//     （本机别的会话 push -u 会写它们，见 configFingerprint），其余配置键（含 branch.*.pushRemote、指向地址的 remote）与钩子目录照旧核对。
 //   - 退出码 0、JSON 合法、发现为空都不单独算通过；结论由代码按 verdict 与发现定出并渲染成 review.mjs 认可的报告，
 //     模型写的文字只放在引用块里（行首加“｜”，闸门不会把它认成结论行）；未完成或失败时不生成可登记的报告。
 //   - 实际模型拿不到时留空，不用请求模型冒充；拿不到实际模型或与请求不符时不可登记。
@@ -16,9 +18,13 @@
 // 用法：node scripts/engineering/gate/external-review.mjs run --executor <名> [--kind code|consistency] [--round first|followup]
 //         [--pr <编号>] [--base <修订>] [--head <提交>] [--model <模型> --model-chosen-by user|agent|config --model-reason "<依据>"]
 //         [--effort low|medium|high|...] [--timeout-sec 900] [--max-turns 40] [--context <文件>] [--prior-report <文件>] [--out-dir <仓库外目录>]
-//         [--register --summary "<一句话>"]
+//         [--register --summary "<一句话>" [--user-decision "<用户的决定及出处>"]]
 //       node scripts/engineering/gate/external-review.mjs register --run-dir <运行目录> [--pr <编号>] --summary "<一句话>"
-//         （补登：pr 流程 CI 全部通过后再登记，不必重跑模型；同样核对最终提交仍是被审的那个）
+//         [--user-decision "<用户的决定及出处>"] [--accept]
+//         （补登：pr 流程 CI 全部通过后再登记，不必重跑模型；同样核对最终提交仍是被审的那个。
+//          --user-decision：已审满轮次上限、用户同意继续时，带用户的决定重登 pass 或 fail；
+//          --accept（只用于 register，run 不接受）：运行判定为不通过、用户已知情并决定接受其中的问题时登记 accept，须同时带 --user-decision。
+//          external: 开头的复审者名只经本文件登记，review.mjs 命令行不接受，防伪约束不因这两个参数放宽）
 //       node scripts/engineering/gate/external-review.mjs executor codex   （执行器本身：标准输入任务 JSON → 标准输出结果 JSON）
 // limits.maxTurns 交给执行器自己执行；内置 Codex 执行器不给工具、只有一轮回答，没有轮次参数，只靠硬超时。
 import { spawn, spawnSync } from 'node:child_process';
@@ -337,17 +343,61 @@ export function dirHash(dir) {
 }
 
 /**
- * 仓库状态的指纹：HEAD、git status（含未跟踪文件），以及 git 钩子目录和 git 配置的内容。复审前后不同说明有东西写进了仓库。
- * 被 .gitignore 忽略的文件不在内（逐个哈希代价太大），这一点核对不到。
+ * 配置项（`键\n值`）是不是别的会话做 git push -u、git branch --set-upstream-to 时会写的上游跟踪项，且不会改变推送去向：
+ *   branch.<名>.merge：值是 refs/ 开头的引用名；branch.<名>.description：任意文字；
+ *   branch.<名>.remote：值是 "."（本地分支做上游），或是同一份配置里已有 remote.<值>.url 的远端名（不是 URL、路径）。
+ * 其余 branch.* 键（pushRemote、rebase、mergeOptions 等）和不合这些条件的值（remote 写成 URL）都不容忍：
+ * branch.<名>.pushRemote、remote 可以直接写成地址，git push、pull 会去那里。
+ */
+function isTrackingEntry(entry, remotesWithUrl) {
+  const nl = entry.indexOf('\n');
+  const key = nl < 0 ? entry : entry.slice(0, nl);
+  const value = nl < 0 ? '' : entry.slice(nl + 1);
+  const m = /^branch\..+\.([^.]+)$/i.exec(key);
+  if (!m) return false;
+  const name = m[1].toLowerCase();
+  if (name === 'description') return true;
+  if (name === 'merge') return value.startsWith('refs/');
+  if (name === 'remote') return value === '.' || remotesWithUrl.has(value);
+  return false;
+}
+
+/**
+ * git 配置文件的指纹：解析成键值后去掉上游跟踪项（isTrackingEntry）再取哈希。linked worktree 里 .git/config 是所有工作树共用的，
+ * 本机别的会话做 git push -u 会写 branch.<名>.remote / merge，容忍它们才不会让别的会话的日常操作作废一次复审；
+ * 能执行代码或改变推送、拉取去向的键（core.hooksPath、alias.*、filter.*、credential.*、remote.*、include.*、
+ * branch.*.pushRemote 与指向地址的 branch.*.remote 等）照旧取指纹。
+ * 文件解析不了（git config 报错）时退回整文件哈希（偏严：这时连上游跟踪项的写入也算变化）。
+ */
+export function configFingerprint(root, file) {
+  if (!fs.existsSync(file)) return '-';
+  const r = git(root, ['config', '--file', file, '--list', '-z']);
+  if (!r.ok) return `raw:${sha256(fs.readFileSync(file))}`;
+  const entries = r.out.split('\0').filter(Boolean);
+  const remotesWithUrl = new Set(entries.map((e) => /^remote\.(.+)\.url\n/i.exec(e)?.[1]).filter(Boolean));
+  return `keys:${sha256(entries.filter((e) => !isTrackingEntry(e, remotesWithUrl)).join('\0'))}`;
+}
+
+/** repoState 的分项名（顺序即报告里的顺序）与中文说明。 */
+const STATE_PARTS = { head: 'HEAD', status: '工作区状态', hooks: 'git 钩子目录', config: 'git 配置' };
+
+/**
+ * 仓库状态的指纹：HEAD、git status（含未跟踪文件），以及 git 钩子目录和 git 配置的内容（配置见 configFingerprint，上游跟踪项除外）。
+ * 复审前后不同说明有东西写进了仓库。被 .gitignore 忽略的文件不在内（逐个哈希代价太大），这一点核对不到。
+ * 返回 { head, clean, hash, parts }：parts 是各项各自的哈希，changedParts 据此指出变的是哪几项。
  */
 export function repoState(root) {
   const head = git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']).out.trim();
   const status = gitOk(root, ['status', '--porcelain=v1', '-z', '-uall'], '读取工作区状态');
   const gitPath = (p) => path.resolve(root, git(root, ['rev-parse', '--git-path', p]).out.trim());
   const hooks = gitPath('hooks');
-  const config = gitPath('config');
-  const extra = `${fs.existsSync(hooks) ? dirHash(hooks) : '-'}\0${fs.existsSync(config) ? sha256(fs.readFileSync(config)) : '-'}`;
-  return { head, clean: status === '', hash: sha256(`${head}\0${status}\0${extra}`) };
+  const parts = { head, status: sha256(status), hooks: fs.existsSync(hooks) ? dirHash(hooks) : '-', config: configFingerprint(root, gitPath('config')) };
+  return { head, clean: status === '', hash: sha256(Object.values(parts).join('\0')), parts };
+}
+
+/** 两次 repoState 之间变了的几项（中文名，STATE_PARTS 的顺序）；没变返回空数组。 */
+export function changedParts(before, after) {
+  return Object.entries(STATE_PARTS).filter(([k]) => before.parts[k] !== after.parts[k]).map(([, name]) => name);
 }
 
 /** 删除只读副本：先恢复可写再删（Windows 上只读文件删不掉）。 */
@@ -532,7 +582,7 @@ export function assess({ result, problems = [], request, integrity }) {
   const reasons = [...problems];
   const notes = [];
   if (!integrity.copyUnchanged) reasons.push('只读副本在复审期间被改动（复审者写了文件）');
-  if (!integrity.repoUnchanged) reasons.push('仓库工作区在复审期间有变化');
+  if (!integrity.repoUnchanged) reasons.push(`仓库工作区在复审期间有变化${integrity.repoChanged?.length ? `（${integrity.repoChanged.join('、')}）` : ''}`);
   if (!integrity.headUnchanged) reasons.push(`最终提交在复审期间变化（复审的是 ${request.target.headSha.slice(0, 12)}，现在是 ${String(integrity.headNow).slice(0, 12)}），这份结论作废，请对新的最终提交重新复审`);
   if (integrity.exitCode !== 0) reasons.push(`执行器退出码 ${integrity.exitCode}`);
   if (problems.length > 0 || !result) return { registrable: false, verdict: null, reasons, notes };
@@ -732,7 +782,9 @@ export async function runExternalReview(opts) {
 
   // 复审结束后的完整性核对
   const copyUnchanged = dirHash(copy) === copyHash;
-  const repoUnchanged = repoState(root).hash === repoBefore.hash;
+  const repoAfter = repoState(root);
+  const repoUnchanged = repoAfter.hash === repoBefore.hash;
+  const repoChanged = changedParts(repoBefore, repoAfter);
   let headNow = null;
   try {
     headNow = currentHead(root, pr, gh);
@@ -752,7 +804,7 @@ export async function runExternalReview(opts) {
     problems = [`执行${STATUS_NAMES[status]}（${status}${proc.timedOut ? `，${Math.round(limits.timeoutMs / 1000)} 秒` : ''}），已结束整个进程树`, ...problems.filter((p) => !p.startsWith('执行器输出不是合法 JSON'))];
     if (result) result = { ...result, execution: { ...result.execution, status } };
   }
-  const integrity = { copyUnchanged, repoUnchanged, headUnchanged: headNow === headSha, headNow, exitCode: proc.exitCode };
+  const integrity = { copyUnchanged, repoUnchanged, repoChanged, headUnchanged: headNow === headSha, headNow, exitCode: proc.exitCode };
   const assessment = assess({ result, problems, request, integrity });
   if (copied.unsafe.length > 0) assessment.notes.push(`只读副本里没写入 ${copied.unsafe.length} 个路径不安全的文件（${copied.unsafe.join('、')}），复审者只能从 diff 看到它们`);
   if (round === 'first' && baseSha !== forkPoint) {
@@ -782,9 +834,9 @@ export async function runExternalReview(opts) {
     lines.push(`登记（${pr !== undefined ? 'pr 流程等 CI 全部通过后再登记；' : ''}登记时再核对一次最终提交）：${later}`);
     return { ...base, reportPath, ok: true, message: lines.join('\n') };
   }
-  const registration = registerReport({ root, headSha, kind, verdict: assessment.verdict, reviewer, reportPath, summary: opts.summary || `外部复审（${result.provenance.actualModel}）`, pr, gh });
+  const registration = registerReport({ root, headSha, kind, verdict: assessment.verdict, reviewer, reportPath, summary: opts.summary || `外部复审（${result.provenance.actualModel}）`, pr, gh, userDecision: opts.userDecision });
   lines.push(registration.message);
-  if (!registration.ok) lines.push(`没有登记成功；报告已留在运行目录，条件满足后用这条命令补登，不必重跑模型：${later}`);
+  if (!registration.ok) lines.push(`没有登记成功；报告已留在运行目录，条件满足后用这条命令补登，不必重跑模型：${later}${USER_DECISION_HINT}`);
   return { ...base, reportPath, registration, ok: registration.ok, message: lines.join('\n') };
 }
 
@@ -793,12 +845,22 @@ function registerCommand(runDir, pr) {
   return `node scripts/engineering/gate/external-review.mjs register --run-dir "${runDir}"${pr !== undefined ? ` --pr ${pr}` : ''} --summary "<一句话>"`;
 }
 
+/** 登记没成功时附在补登命令后的说明：用户决定放行的两种写法。 */
+const USER_DECISION_HINT = '；已审满轮次上限、用户同意继续的，命令后加 --user-decision "<用户的决定及出处>"；报告判定不通过、用户已知情并决定接受其中问题的，另加 --accept（同样须带 --user-decision）';
+
 /**
  * 登记一份外部复审报告，绑定复审者实际看过的最终提交 headSha：
  * pr 流程用 guardedGh，PR 最终提交不是 headSha 就拒绝；pre-push 流程要求本地 HEAD 是 headSha 且工作区干净（登记绑定工作区内容）。
+ * userDecision：用户的决定及出处（超过轮次上限后的 pass、fail 登记必带，见 review.mjs 的 roundBlock）。
+ * accept 为真时登记 accept（用户接受报告里的不通过结论）：只对判定为 fail 的运行有效，须带 userDecision；
+ * 与 pass、fail 一样，复审者名以 external: 开头只有这条经 external-review.mjs 的路径（viaExternalReview）能登记。
  * recordReview 抛错（gh 失败、最终提交已变）时不往外抛，返回 { ok: false, message }。
  */
-export function registerReport({ root, headSha, kind, verdict, reviewer, reportPath, summary, pr, gh = defaultGh }) {
+export function registerReport({ root, headSha, kind, verdict, reviewer, reportPath, summary, pr, gh = defaultGh, userDecision, accept = false }) {
+  if (accept) {
+    if (verdict !== 'fail') return { ok: false, message: `不登记：accept 只对判定为不通过的外部复审有效（用户接受的是报告里未修复的问题），这次判定是${verdict === 'pass' ? '通过，应登记 pass' : '不可登记'}` };
+    if (!userDecision || !userDecision.trim()) return { ok: false, message: '不登记：accept 须用 --user-decision 写明用户的决定及出处（例如“用户在对话中接受 M2，不再修改（2026-11-24）”）' };
+  }
   if (pr === undefined) {
     const st = repoState(root);
     if (st.head !== headSha || !st.clean) {
@@ -806,7 +868,7 @@ export function registerReport({ root, headSha, kind, verdict, reviewer, reportP
     }
   }
   try {
-    return recordReview({ root, verdict, reviewer, reportPath, summary, pr: pr === undefined ? undefined : String(pr), kind, gh: guardedGh(gh, headSha), viaExternalReview: true });
+    return recordReview({ root, verdict: accept ? 'accept' : verdict, reviewer, reportPath, summary, pr: pr === undefined ? undefined : String(pr), kind, userDecision, gh: guardedGh(gh, headSha), viaExternalReview: true });
   } catch (e) {
     return { ok: false, message: `登记出错：${e.message}` };
   }
@@ -815,8 +877,9 @@ export function registerReport({ root, headSha, kind, verdict, reviewer, reportP
 /**
  * 补登：从一次外部复审的运行目录读回任务（被审提交、审查种类）、判定和报告后登记，不重跑模型。
  * 运行目录必须在仓库之外，判定必须是可登记的；--pr 不写时用运行时记下的 PR 编号。返回 { ok, message, registration? }。
+ * userDecision、accept 的含义见 registerReport：超过轮次上限后带用户决定重登 pass、fail；判不通过的运行按用户决定 accept。
  */
-export function registerRun({ root, runDir, pr, summary, gh = defaultGh }) {
+export function registerRun({ root, runDir, pr, summary, gh = defaultGh, userDecision, accept = false }) {
   const dir = path.resolve(runDir);
   if (inside(root, dir)) return { ok: false, message: `运行目录 ${dir} 在仓库里，不是外部复审的运行目录` };
   const read = (f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
@@ -844,7 +907,7 @@ export function registerRun({ root, runDir, pr, summary, gh = defaultGh }) {
   const usePr = pr ?? saved.meta?.pr ?? undefined;
   const registration = registerReport({
     root, headSha: request.target.headSha, kind: request.review.kind, verdict: saved.assessment.verdict, reviewer: saved.meta.reviewer,
-    reportPath, summary: summary || `外部复审（${saved.provenance?.actualModel ?? '未知模型'}）`, pr: usePr === null ? undefined : usePr, gh,
+    reportPath, summary: summary || `外部复审（${saved.provenance?.actualModel ?? '未知模型'}）`, pr: usePr === null ? undefined : usePr, gh, userDecision, accept,
   });
   return { ...registration, message: registration.message };
 }
@@ -1166,8 +1229,13 @@ function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i].replace(/^--/, '');
-    if (k === 'register') out.register = true;
-    else out[k] = argv[++i];
+    if (k === 'register' || k === 'accept') out[k] = true;
+    else {
+      // 漏写值时下一个参数会被吞成值（--user-decision --accept）：值不能缺，也不能以 -- 开头
+      const v = argv[++i];
+      if (v === undefined || v.startsWith('--')) throw new Error(`--${k} 缺少值（得到 ${v === undefined ? '空' : JSON.stringify(v)}）`);
+      out[k] = v;
+    }
   }
   return out;
 }
@@ -1194,10 +1262,10 @@ if (isMain(import.meta.url)) {
     process.stdout.write(`${JSON.stringify(res)}\n`);
     process.exit(res.execution.status === 'completed' ? 0 : 1);
   } else if (cmd === 'register') {
-    const a = parseArgs([sub, ...rest].filter((x) => x !== undefined));
     try {
+      const a = parseArgs([sub, ...rest].filter((x) => x !== undefined));
       if (!a['run-dir']) throw new Error('register 须带 --run-dir <运行目录>');
-      const res = registerRun({ root: repoRoot(), runDir: a['run-dir'], pr: a.pr, summary: a.summary });
+      const res = registerRun({ root: repoRoot(), runDir: a['run-dir'], pr: a.pr, summary: a.summary, userDecision: a['user-decision'], accept: a.accept === true });
       console.log(res.message);
       process.exit(res.ok ? 0 : 1);
     } catch (e) {
@@ -1205,10 +1273,11 @@ if (isMain(import.meta.url)) {
       process.exit(1);
     }
   } else if (cmd === 'run') {
-    const a = parseArgs([sub, ...rest].filter((x) => x !== undefined));
     const ac = new AbortController();
     for (const s of ['SIGINT', 'SIGTERM']) process.on(s, () => ac.abort());
     try {
+      const a = parseArgs([sub, ...rest].filter((x) => x !== undefined));
+      if (a.accept) throw new Error('--accept 只用于 register（对已有运行目录登记 accept）；run 不接受它');
       const read = (f) => (f ? fs.readFileSync(f, 'utf8') : null);
       // 数值参数必须是正数：NaN 会让上限静默失效（diff 上限）或立刻超时
       const num = (k) => {
@@ -1223,7 +1292,7 @@ if (isMain(import.meta.url)) {
       const res = await runExternalReview({
         root: repoRoot(), executor: a.executor, kind: a.kind, round: a.round, pr: a.pr, base: a.base, head: a.head,
         model: a.model, modelChosenBy: a['model-chosen-by'], modelReason: a['model-reason'], effort: a.effort, limits,
-        contextText: read(a.context), priorReport: read(a['prior-report']), outDir: a['out-dir'], register: a.register, summary: a.summary, signal: ac.signal,
+        contextText: read(a.context), priorReport: read(a['prior-report']), outDir: a['out-dir'], register: a.register, summary: a.summary, userDecision: a['user-decision'], signal: ac.signal,
       });
       console.log(res.message);
       process.exit(res.ok ? 0 : 1);

@@ -3,7 +3,8 @@
 // 或 gh api 调用 pulls/<n>/merge）一律拒绝，合并只经合并入口 merge.mjs（pr 流程）或项目约定的入口。
 // 跳过 git 钩子的推送（git push --no-verify 及其缩写、git -c core.hooksPath=… push）一律拒绝：本钩子只核对工作区，
 // 实际推送的引用（推别的分支、显式 refspec）由 git 的 pre-push 钩子交给 verify.mjs --pre-push 核对，跳过它就没人核对引用了。
-// 输入：stdin 的 JSON（tool_input.command、cwd）。退出码 2 表示拒绝，原因写到 stderr 反馈给 agent。
+// 核对的是命令实际推送所在的工作树：解析 git -C、先行的 cd 得出目录（pushDirs），说不准时退回会话目录；同一会话里从另一个工作树推送不被会话目录的状态错拦。
+// 输入：stdin 的 JSON（tool_name、tool_input.command、cwd）。退出码 2 表示拒绝，原因写到 stderr 反馈给 agent。
 // 局限：按命令文本切词判断，防误操作，挡不住刻意绕过；终端里直接 git push 不经过本钩子，靠 git pre-push 钩子兜底。
 // 认不出的写法完整列在套件 SKILL.md 第 6 节“推送钩子拦不住什么”（以那里为准，本文件不另列全）。
 // 钩子自身出错时放行并打印提示，避免钩子故障把整个工作流卡死。
@@ -278,18 +279,23 @@ function analyzeSegment(segWords, dialect = 'sh') {
 function gitPushAt(words, at) {
   if (!GIT_EXE.test(words[at])) return null;
   const globals = [];
+  const dirs = []; // -C 的值，按出现顺序
+  let redirected = false; // 用了 --git-dir / --work-tree：git 实际用的目录不由 -C 决定
   let j = at + 1;
   while (j < words.length && words[j].startsWith('-')) {
     const w = words[j];
     if (GIT_VALUE_OPTS.has(w)) {
       if ((w === '-c' || w === '--config-env') && j + 1 < words.length) globals.push(words[j + 1]);
+      if (w === '-C' && j + 1 < words.length) dirs.push(words[j + 1]);
+      if (w === '--git-dir' || w === '--work-tree') redirected = true;
       j += 2;
     } else {
       if (w.startsWith('--config-env=')) globals.push(w.slice('--config-env='.length));
+      if (/^--(?:git-dir|work-tree)=/.test(w)) redirected = true;
       j += 1;
     }
   }
-  return words[j] === 'push' ? { globals, args: words.slice(j + 1) } : null;
+  return words[j] === 'push' ? { globals, args: words.slice(j + 1), dirs, redirected } : null;
 }
 
 /** 把文本当命令再执行的命令词：eval、source、.（sh 的点命令、PowerShell 的点源）、iex、Invoke-Expression。 */
@@ -456,6 +462,110 @@ export function classify(command) {
   if (RANK[fresh] >= RANK[old]) return fresh;
   if (fresh === 'other' && relaxable(command)) return fresh;
   return old;
+}
+
+/** 改变当前目录的命令（cd 及其别名）。 */
+const CD_COMMANDS = new Set(['cd', 'chdir', 'pushd', 'set-location', 'sl']);
+
+/** 撤销或回到之前目录的命令：出现后当前目录说不准。 */
+const RESTORE_COMMANDS = new Set(['popd', 'pop-location', 'push-location']);
+
+/** 认不准的目录写法：变量、命令替换、通配、%变量%、以 ~ 开头（主目录）、cd - （上一个目录）。 */
+const UNRESOLVABLE_DIR = /^~|^-$|[$`*?%]/;
+
+/**
+ * cd 命令的目标目录：第一个不是选项的参数（PowerShell 的 -Path、-LiteralPath 取其后的值，cmd 的 /d 跳过）。
+ * 没有目录（回到主目录）、有多个目录或目录写法认不准（UNRESOLVABLE_DIR）时返回 null。
+ */
+function cdTarget(words, at) {
+  const dirs = [];
+  for (let i = at + 1; i < words.length; i++) {
+    const w = words[i];
+    if (/^(?:\d*|&)[<>]/.test(w)) {
+      if (/^(?:\d*|&)[<>]+$/.test(w)) i++; // > 与 2> 后面一个词是重定向目标；2>&1 自身完整
+    } else if (/^-(?:literal)?path$/i.test(w)) {
+      if (i + 1 < words.length) dirs.push(words[++i]);
+    } else if (w === '-' || !/^(?:-|\/d$)/i.test(w)) dirs.push(w);
+  }
+  return dirs.length === 1 && !UNRESOLVABLE_DIR.test(dirs[0]) ? dirs[0] : null;
+}
+
+/**
+ * 命令里每个 git push / gh pr create 实际所在的目录（绝对路径，去重，按出现顺序）：从会话目录 cwd 起，
+ * 依次应用先行的 cd / pushd / Set-Location，再应用 git 的 -C（多个依次叠加，相对路径相对前一个目录）。
+ * 说不准的一律退回会话目录（与按会话目录核对时一样严，不会漏）：目录写法含变量、%变量%、~、命令替换、通配；cd 没有目录或是 cd -；
+ * cd 出现在 ( ) { } 子 shell、管道、|| 或后台 & 的命令里（它不一定影响后面的推送）；cd 前面已有别的命令（`a && cd x; git push`
+ * 里 cd 可能没执行）或在 if / then / do 等条件、循环段里；命令里有 popd、Pop-Location、Push-Location；
+ * 用了 --git-dir、--work-tree、GIT_DIR、GIT_WORK_TREE、core.worktree、env -C。
+ * 没找到任何推送（例如推送写在 bash -c 的引号载荷里）时也是会话目录。dialects 是切词用的引号方言：钩子知道工具是 PowerShell 还是
+ * Bash 时只传对应的一种（Windows 路径里的反斜杠在两种方言下切法不同），不知道时两种都试，目录取并集。
+ */
+export function pushDirs(command, cwd, dialects = DIALECTS) {
+  // git 实际用的目录由环境变量、配置或 env -C 另行指定：不解析
+  if (/GIT_(?:DIR|WORK_TREE)\b|core\.worktree|\benv\b[^;&|\n]*\s(?:-C|--chdir)\b/i.test(command)) return [cwd];
+  const found = new Set();
+  for (const d of dialects) {
+    // 重定向里的 & 不是后台符（2>&1、&>）；剩下的单个 & 或任何 | 都让 cd 的作用说不准
+    const flaky = /\||(?<!&)&(?!&)/.test(stripQuoted(command, d).replace(/\d*[<>]&\d*-?|&>>?/g, ''));
+    let cur = cwd;
+    let known = true;
+    let seenOther = false; // 前面已有不是 cd 的命令：之后的 cd 可能因 &&、if 等条件没执行，也可能被 popd 等撤销
+    for (const seg of shellSegments(command, d)) {
+      const { words, commands } = analyzeSegment(seg, d);
+      // analyzeSegment 会去掉词首的 $( 与反引号，命令替换要在原始词上认（cd $(pwd)/../wt 的目录是算出来的）
+      const subst = seg.some((w) => /\$\(|`/.test(w));
+      // 条件、循环、函数的关键字开头的段（then cd x、do cd x）里的 cd 不一定执行
+      const conditional = KEYWORDS.has(cmdName(seg[0] ?? '')) || ['for', 'case', 'function', 'select'].includes(cmdName(seg[0] ?? ''));
+      let cdOnly = true;
+      for (const c of commands) {
+        const name = cmdName(words[c.at] ?? '');
+        if (RESTORE_COMMANDS.has(name)) known = false; // popd、Pop-Location、Push-Location：当前目录不再能按顺序推算
+        if (!CD_COMMANDS.has(name)) {
+          if (words[c.at] !== undefined) cdOnly = false;
+          continue;
+        }
+        const to = cdTarget(words, c.at);
+        if (flaky || subst || c.sub || seenOther || conditional || to === null) known = false;
+        else if (known) cur = path.resolve(cur, to);
+      }
+      if (conditional || !cdOnly) seenOther = true;
+      for (const { push } of scanPushes(seg, d)) {
+        let dir = cur;
+        let ok = known && !subst && !push.redirected;
+        for (const c of ok ? push.dirs : []) {
+          if (UNRESOLVABLE_DIR.test(c)) ok = false;
+          else dir = path.resolve(dir, c);
+        }
+        found.add(ok ? dir : cwd);
+      }
+      for (let i = 0; i < words.length; i++) {
+        if (!/(?:^|[\\/])gh(?:\.exe)?$/i.test(words[i])) continue;
+        const p = words.indexOf('pr', i + 1);
+        if (p > i && words[p + 1] === 'create') found.add(known ? cur : cwd);
+      }
+    }
+  }
+  return found.size > 0 ? [...found] : [cwd];
+}
+
+/** 目录所在仓库的 git 公共目录（真实路径）；目录不存在或不在仓库里返回 null。同一仓库的各个工作树公共目录相同。 */
+function commonDir(dir) {
+  const r = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: dir, encoding: 'utf8' });
+  if (r.status !== 0) return null;
+  try {
+    return fs.realpathSync.native(r.stdout.trim());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * dir 是不是与会话目录同一个仓库（同一个仓库的另一个工作树也算）。核对只针对会话仓库的各个工作树：
+ * 别的仓库（会话里顺手推送的另一个项目）按它自己的规则，套件的推送闸门对它没有意义，这时仍按会话目录核对，与改动前一样。
+ */
+function sameRepo(dir, session) {
+  const a = commonDir(dir);
+  return a !== null && a === commonDir(session);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -630,11 +740,18 @@ function main() {
     process.exit(2);
   }
   if (kind === 'push') {
-    const r = spawnSync(process.execPath, [VERIFY], { cwd: input.cwd || process.cwd(), encoding: 'utf8' });
-    if (r.error || r.status !== 0) {
-      const detail = r.error ? `无法运行闸门：${r.error.message}` : (r.stdout || '') + (r.stderr || '');
-      console.error(`拒绝推送：推送闸门未通过。\n${detail}`);
-      process.exit(2);
+    // 核对命令实际推送所在的工作树（git -C、先行的 cd），不是会话目录：同一会话里从另一个工作树推送时，会话目录的状态与这次推送无关。
+    // 目录说不准、不存在、不在仓库里或是别的仓库时退回会话目录（见 pushDirs、sameRepo）。
+    const session = input.cwd || process.cwd();
+    const dialects = input.tool_name === 'PowerShell' ? ['ps'] : input.tool_name === 'Bash' ? ['sh'] : DIALECTS;
+    const dirs = [...new Set(pushDirs(command, session, dialects).map((d) => (sameRepo(d, session) ? d : session)))];
+    for (const dir of dirs) {
+      const r = spawnSync(process.execPath, [VERIFY], { cwd: dir, encoding: 'utf8' });
+      if (r.error || r.status !== 0) {
+        const detail = r.error ? `无法运行闸门：${r.error.message}` : (r.stdout || '') + (r.stderr || '');
+        console.error(`拒绝推送：推送闸门未通过${dir === session ? '' : `（核对的是命令推送所在的工作树 ${dir}）`}。\n${detail}`);
+        process.exit(2);
+      }
     }
   }
   process.exit(0);
