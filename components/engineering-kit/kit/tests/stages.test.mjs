@@ -88,6 +88,18 @@ test('关键理由文字被锁住：pre-push 合并要等 CI 全部通过、记�
   assert.match(item('B', PR, 'review-register').reason, /不跨副本/);
 });
 
+test('pre-push 合并的 CI 条件只在有 CI 时适用：ciRunner 为 none（没有 CI）时不再说要等 CI 全部通过', () => {
+  const withCi = item('C', { reviewFlow: 'pre-push', ciRunner: 'github-hosted' }, 'merge');
+  assert.match(withCi.reason, /CI 全部通过/);
+  const undeclared = item('C', { reviewFlow: 'pre-push' }, 'merge');
+  assert.match(undeclared.reason, /CI 全部通过/, '没声明 CI 时按可能有 CI 处理');
+  const none = item('C', { reviewFlow: 'pre-push', ciRunner: 'none' }, 'merge');
+  assert.ok(!/CI 全部通过/.test(none.reason), none.reason);
+  assert.match(none.reason, /没有 CI/);
+  assert.match(none.reason, /用户授权/);
+  assert.match(none.reason, /推送前/, '记录只证明推送前的状态这一条对无 CI 的项目同样成立');
+});
+
 test('决定顺序一：用户的选择最优先；指定了做不到的转问用户，理由写对', () => {
   const base = { fullTests: 'local', reviewFlow: 'pre-push', tight: true };
   const byConfig = item('A', { ...base, session: 'local' }, 'full-tests-local');
@@ -237,8 +249,16 @@ test('配置来源：基准上还没有配置时如实说是工作区值；基�
   git(first, ['checkout', '-q', '-b', 'feat']);
   write(first, 'engineering.config.json', cfg({}));
   const planned = planFromArgs(['--stage', 'A', '--target', first, '--choice', 'tight=false']);
-  assert.match(planned.configSource, /^effective/);
-  assert.match(planned.configSource, /基准上还没有配置时就是工作区值/);
+  assert.match(planned.configSource, /^working-tree/, '基准上没有配置：策略取自工作区，不能标成“生效的基准策略”');
+  assert.match(planned.configSource, /基准提交上还没有配置/);
+  // 基准上有配置：标明取自基准提交（带提交号前缀），与上面可区分
+  const based = tmpRepo();
+  write(based, 'engineering.config.json', cfg({}));
+  commitAll(based, 'base');
+  git(based, ['checkout', '-q', '-b', 'feat']);
+  const fromBase = planFromArgs(['--stage', 'A', '--target', based, '--choice', 'tight=false']);
+  assert.match(fromBase.configSource, /^effective（策略字段取基准提交 [0-9a-f]{12} 上的/);
+  assert.notEqual(fromBase.configSource, planned.configSource);
   // 基准上的配置不是合法 JSON：真实错误原样报出
   const broken = tmpRepo();
   write(broken, 'engineering.config.json', '{ not json');
@@ -249,7 +269,21 @@ test('配置来源：基准上还没有配置时如实说是工作区值；基�
   // 不是 git 仓库的目录：取工作区文件并标注
   const plain = tmpDir('stages-plain-');
   write(plain, 'engineering.config.json', cfg({}));
-  assert.match(planFromArgs(['--stage', 'A', '--target', plain, '--choice', 'tight=false']).configSource, /^working-tree/);
+  assert.match(planFromArgs(['--stage', 'A', '--target', plain, '--choice', 'tight=false']).configSource, /^working-tree（不是 git 仓库/);
+  // Git 自己出错（不是“不是仓库”）：保留诊断，不当成普通目录
+  const saved = { c: process.env.GIT_CONFIG_COUNT, k: process.env.GIT_CONFIG_KEY_0, v: process.env.GIT_CONFIG_VALUE_0 };
+  process.env.GIT_CONFIG_COUNT = '1';
+  process.env.GIT_CONFIG_KEY_0 = 'nodotkey';
+  process.env.GIT_CONFIG_VALUE_0 = 'x';
+  try {
+    // 仓库里 Git 因配置解析出错（退出码 128）：不能说成“不是仓库”，要保留诊断
+    assert.throws(() => planFromArgs(['--stage', 'A', '--target', based, '--choice', 'tight=false']), /git 出错/);
+  } finally {
+    for (const [k, v] of [['GIT_CONFIG_COUNT', saved.c], ['GIT_CONFIG_KEY_0', saved.k], ['GIT_CONFIG_VALUE_0', saved.v]]) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
 });
 
 test('命令行真实运行：没给 tight 时按本机探测，结果与同一台机器的判定一致', () => {
@@ -266,12 +300,25 @@ test('文档与代码对齐：process.md 的环节表里，每个环节的每项
   const doc = fs.readFileSync(path.join(BUNDLE_ROOT, 'references', 'process.md'), 'utf8');
   const rows = docRows();
   assert.ok(rows.length >= 11, '环节表的行数');
+  // 共用一行的工作必须显式列出：新增工作沿用已有行的文字，也要在这里改（有意识地改，而不是悄悄通过）
+  const SHARED = { 'A|静态检查、受影响测试': ['static', 'affected'], 'C|删除分支、清理工作树、汇报': ['cleanup', 'wrap-up'] };
+  for (const r of rows) assert.deepEqual(r.ids, SHARED[`${r.stage}|${r.doc}`] ?? [r.ids[0]], `${r.stage}「${r.doc}」覆盖的工作编号：${r.ids}`);
   for (const r of rows) {
     const line = doc.split('\n').find((l) => l.startsWith(`| ${r.stage} ${r.stageName} | ${r.doc} |`));
     assert.ok(line, `process.md 环节表缺这一行：${r.stage} ${r.stageName} | ${r.doc}`);
     const cells = line.split('|').map((c) => c.trim());
     assert.ok(cells[3].includes(r.docWhere), `「${r.doc}」的去处栏应含「${r.docWhere}」：${cells[3]}`);
+    for (const phrase of r.must) assert.ok(cells[3].includes(phrase), `「${r.doc}」的去处栏应含关键短语「${phrase}」：${cells[3]}`);
     assert.equal(cells[4], r.who, `「${r.doc}」的谁定栏应是「${r.who}」`);
+  }
+  // 同一批关键短语也必须出现在代码给出的理由里（用带外部执行器和 CI 的环境，覆盖所有条件分支的工作）
+  for (const env of [{ fullTests: 'local', reviewFlow: 'pre-push', externalExecutor: true }, { ...PR, externalExecutor: true }]) {
+    for (const stage of STAGE_IDS) {
+      for (const d of decideStage(stage, env).items) {
+        const r = rows.find((x) => x.stage === stage && x.ids.includes(d.id));
+        for (const phrase of r.must) assert.ok(d.reason.includes(phrase), `${stage}/${d.id} 的理由应含关键短语「${phrase}」：${d.reason}`);
+      }
+    }
   }
   // 反过来：文档表里的环节行不能比代码多（多了说明代码里删了工作而文档没改）
   const docRowsInDoc = doc.split('\n').filter((l) => /^\| [ABCW] (推送前|PR 阶段|合并与收尾|每周巡检) \|/.test(l));

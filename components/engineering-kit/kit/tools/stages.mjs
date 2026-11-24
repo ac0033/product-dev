@@ -12,7 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeConfig } from '../gate/config.mjs';
-import { git, isMain, loadConfig } from '../gate/lib.mjs';
+import { EMPTY_TREE, baseRevision, git, isMain, loadConfig } from '../gate/lib.mjs';
 import { applyEnvironment, detectFacts, isConstrained } from './environment.mjs';
 
 export const STAGE_IDS = ['A', 'B', 'C', 'W'];
@@ -47,10 +47,13 @@ export function byPrinciples(feasible, tight) {
   return [...front].sort((a, b) => t[b].easy - t[a].easy)[0];
 }
 
-/** doc、docWhere：process.md 环节表里这项工作那一行的“工作”栏原文和“去处”栏必须含的关键词；一致性测试逐行核对，文档与代码不再各改各的。 */
-const fixed = (id, label, where, reason, doc, docWhere) => ({ id, label, kind: 'fixed', where, reason, doc, docWhere });
+/**
+ * doc、docWhere：process.md 环节表里这项工作那一行的“工作”栏原文和“去处”栏必须含的关键词；
+ * must：关键短语，必须同时出现在代码给出的理由和文档那一行的“去处”栏里。一致性测试逐行核对，文档与代码不再各改各的。
+ */
+const fixed = (id, label, where, reason, doc, docWhere, must = []) => ({ id, label, kind: 'fixed', where, reason, doc, docWhere, must });
 /** serverCapable：这项工作原则上能放在自己的服务器上（还要 hasServer 确认才算可行）；全量测试、本机的工作不能。 */
-const choice = (id, label, feasible, reason, serverCapable, doc, docWhere) => ({ id, label, kind: 'choice', feasible, reason, serverCapable, doc, docWhere });
+const choice = (id, label, feasible, reason, serverCapable, doc, docWhere, must = []) => ({ id, label, kind: 'choice', feasible, reason, serverCapable, doc, docWhere, must });
 const reviewWhere = (env) => (env.externalExecutor ? 'executor-machine' : 'current-session');
 const REVIEW_REASON = (env) => (env.externalExecutor
   ? '外部执行器（如 Codex）的命令和模型写在仓库之外的本机配置，只能在配了它的机器上跑；理论上可以迁到服务器，但 Linux 上只读沙箱、无工具等行为未验证，须先测试再迁，目前不实现'
@@ -66,8 +69,8 @@ const STAGES = {
       ...(env.fullTests === 'local' ? [choice('full-tests-local', '全量测试（fullTests=local）', [LOCAL, CLOUD], '全量测试耗时长、占资源，在会话所在环境由闸门跑并写测试记录', false, '全量测试（`fullTests=local`）', '本机或云端会话')] : []),
       ...(env.reviewFlow === 'pre-push'
         ? [
-          fixed('independent-reviews', '独立代码复审与一致性审（pre-push 流程，推送前做）', reviewWhere(env), REVIEW_REASON(env), '独立复审（仅 `pre-push` 流程，推送前做）', '外部执行器'),
-          fixed('review-record', '复审登记（pre-push 流程）', 'same-worktree', '复审记录写在该工作树自己的 git 目录里，同一仓库的不同工作树、不同副本都不共享，所以复审、登记、推送要在同一个工作树里做完', '复审登记（仅 `pre-push` 流程）', '工作树'),
+          fixed('independent-reviews', '独立代码复审与一致性审（pre-push 流程，推送前做）', reviewWhere(env), REVIEW_REASON(env), '独立复审（仅 `pre-push` 流程，推送前做）', '外部执行器', ['外部执行器']),
+          fixed('review-record', '复审登记（pre-push 流程）', 'same-worktree', '复审记录写在该工作树自己的 git 目录里，同一仓库的不同工作树、不同副本都不共享，所以复审、登记、推送要在同一个工作树里做完', '复审登记（仅 `pre-push` 流程）', '工作树', ['工作树']),
         ]
         : []),
     ],
@@ -78,8 +81,8 @@ const STAGES = {
       ...(env.fullTests === 'ci' ? [ciItem(env)] : []),
       ...(env.reviewFlow === 'pr'
         ? [
-          fixed('independent-reviews', '独立代码复审与一致性审（pr 流程，可与 CI 并行开始）', reviewWhere(env), REVIEW_REASON(env), '独立复审（仅 `pr` 流程，可与 CI 并行开始）', '外部执行器'),
-          fixed('review-register', '登记审查记录（CI 全部通过后）', 'same-copy', 'PR 审查记录放在 git 公共目录，同一仓库副本的各工作树共享，不跨副本，所以要在合并入口所在的那个副本里登记', '登记审查记录（仅 `pr` 流程，CI 全部通过后）', '合并入口所在的仓库副本'),
+          fixed('independent-reviews', '独立代码复审与一致性审（pr 流程，可与 CI 并行开始）', reviewWhere(env), REVIEW_REASON(env), '独立复审（仅 `pr` 流程，可与 CI 并行开始）', '外部执行器', ['外部执行器']),
+          fixed('review-register', '登记审查记录（CI 全部通过后）', 'same-copy', 'PR 审查记录放在 git 公共目录，同一仓库副本的各工作树共享，不跨副本，所以要在合并入口所在的那个副本里登记', '登记审查记录（仅 `pr` 流程，CI 全部通过后）', '合并入口所在的仓库副本', ['不跨副本']),
         ]
         : []),
       fixed('fix-findings', '处理复审意见、修复失败', 'current-session', '创造性工作，需要判断，排在用户在场的时段', '处理复审意见、修复失败', '当前会话'),
@@ -89,8 +92,8 @@ const STAGES = {
     name: '合并与收尾',
     items: (env) => [
       env.reviewFlow === 'pr'
-        ? fixed('merge-entry', '合并入口（核对 CI 与审查记录）', 'same-copy', '审查记录不跨副本共享，要在登记它的同一个仓库副本里合并；合并要用户授权（R2）', '合并入口（`pr` 流程）', '同一个仓库副本')
-        : fixed('merge', '合并（pre-push 流程没有合并入口脚本）', 'current-session', '按项目约定合并，合并要用户授权（R2）；等 PR 的 CI 全部通过（不只是必需检查），不绕过失败的检查；复审与测试记录只证明推送前的状态，不能证明对 PR 最终提交的双审', '合并（`pre-push` 流程没有合并入口脚本）', 'CI 全部通过'),
+        ? fixed('merge-entry', '合并入口（核对 CI 与审查记录）', 'same-copy', '审查记录不跨副本共享，要在登记它的同一个仓库副本里合并；合并要用户授权（R2）', '合并入口（`pr` 流程）', '同一个仓库副本', ['用户授权'])
+        : mergePrePush(env),
       fixed('cleanup', '删除分支、清理工作树', 'current-session', '合并后立即做，汇报“完成”前确认已清理', '删除分支、清理工作树、汇报', '当前会话'),
       fixed('wrap-up', '汇报与经验提炼', 'current-session', '需要判断和用户沟通，不外包', '删除分支、清理工作树、汇报', '当前会话'),
     ],
@@ -103,15 +106,28 @@ const STAGES = {
 
 const CI_DOC = '全量测试（`fullTests=ci`）';
 
+/**
+ * pre-push 流程的合并：有 CI（包括没声明、按可能有处理）要等 PR 的 CI 全部通过；ciRunner 为 none（没有 CI）时没有可等的，只剩按项目约定合并和用户授权。
+ * 复审与测试记录只证明推送前的状态这一条，两种情况都成立。
+ */
+function mergePrePush(env) {
+  const label = '合并（pre-push 流程没有合并入口脚本）';
+  const doc = '合并（`pre-push` 流程没有合并入口脚本）';
+  if (env.ciRunner === 'none') {
+    return fixed('merge', label, 'current-session', '项目没有 CI（ciRunner=none），没有 CI 可等：按项目约定合并，合并要用户授权（R2），不绕过失败的检查；复审与测试记录只证明推送前的状态，不能证明对 PR 最终提交的双审', doc, 'CI 全部通过', ['用户授权', '不绕过失败的检查']);
+  }
+  return fixed('merge', label, 'current-session', '按项目约定合并，合并要用户授权（R2）；等 PR 的 CI 全部通过（不只是必需检查），不绕过失败的检查；复审与测试记录只证明推送前的状态，不能证明对 PR 最终提交的双审', doc, 'CI 全部通过', ['CI 全部通过', '用户授权', '不绕过失败的检查']);
+}
+
 /** B 环节的 CI 全量测试：按项目选项落到托管或服务器；配了自托管却明确没有服务器时转问用户。 */
 function ciItem(env) {
   const label = '全量测试（CI）';
   const note = '本命令读不到仓库变量 CI_RUNNER：若已用它切换了 Linux 的 runner，以实际为准；Windows、macOS 矩阵项始终在 GitHub 托管 runner 上跑';
   if (env.ciRunner === 'self-hosted' && env.hasServer === false) {
-    return { id: 'ci-full-tests', label, kind: 'ask', doc: CI_DOC, docWhere: 'CI', options: ['server', 'github-hosted'], reason: `项目选项 ciRunner=self-hosted，但你说没有可用的服务器：请选改用 github-hosted，或先准备好服务器和 runner。${note}` };
+    return { id: 'ci-full-tests', label, kind: 'ask', doc: CI_DOC, docWhere: 'CI', must: ['CI_RUNNER'], options: ['server', 'github-hosted'], reason: `项目选项 ciRunner=self-hosted，但你说没有可用的服务器：请选改用 github-hosted，或先准备好服务器和 runner。${note}` };
   }
   return {
-    id: 'ci-full-tests', label, kind: 'config', doc: CI_DOC, docWhere: 'CI', where: env.ciRunner === 'self-hosted' ? SERVER : 'github-hosted',
+    id: 'ci-full-tests', label, kind: 'config', doc: CI_DOC, docWhere: 'CI', must: ['CI_RUNNER'], where: env.ciRunner === 'self-hosted' ? SERVER : 'github-hosted',
     reason: `按项目选项 fullTests=ci、ciRunner=${env.ciRunner}${env.ciFallback ? `，后备 ${env.ciFallback}（切换用仓库变量 CI_RUNNER）` : ''}；CI 在最终提交上跑，合并入口核对。${note}`,
   };
 }
@@ -129,7 +145,10 @@ export function docRows() {
       for (const spec of STAGES[stage].items(e)) {
         const key = `${stage}|${spec.doc}`;
         const who = spec.kind === 'choice' ? '按上面三步' : spec.kind === 'config' ? '项目选项' : '不用选';
-        if (!rows.has(key)) rows.set(key, { stage, stageName: STAGES[stage].name, doc: spec.doc, docWhere: spec.docWhere, who });
+        if (!rows.has(key)) rows.set(key, { stage, stageName: STAGES[stage].name, doc: spec.doc, docWhere: spec.docWhere, who, ids: [], must: [] });
+        const row = rows.get(key);
+        if (!row.ids.includes(spec.id)) row.ids.push(spec.id);
+        for (const m of spec.must ?? []) if (!row.must.includes(m)) row.must.push(m);
       }
     }
   }
@@ -237,16 +256,23 @@ export function parseStageArgs(argv) {
 export function readProjectConfig(target) {
   const file = path.join(target, 'engineering.config.json');
   if (!fs.existsSync(file)) return { config: {}, configSource: 'none（没有 engineering.config.json，按默认值）' };
-  // 不是 git 仓库的目录没有基准可言：直接用工作区文件并标注
-  if (!git(target, ['rev-parse', '--git-dir']).ok) {
+  // 不是 git 仓库的目录没有基准可言：直接用工作区文件并标注；Git 自己出错（不是“不是仓库”）要保留诊断，不能当普通目录
+  const probe = git(target, ['rev-parse', '--git-dir']);
+  if (!probe.ok) {
+    if (!/not a git repository/i.test(probe.err)) throw new Error(`git 出错，无法判断 ${target} 是不是仓库：${probe.err.trim() || '没有诊断输出'}`);
     return { config: normalizeConfig(JSON.parse(fs.readFileSync(file, 'utf8'))), configSource: 'working-tree（不是 git 仓库，没有基准提交，用工作区文件）' };
   }
   // 是 git 仓库：读不出就报真实错误（例如基准提交上的配置是坏 JSON），不压成“读不到基准”
   const loaded = loadConfig(target);
-  if (!loaded.policyError) {
-    return { config: loaded, configSource: 'effective（按闸门的 loadConfig 读取：策略字段取基准提交上的；基准上还没有配置时就是工作区值）' };
+  if (loaded.policyError) {
+    return { config: loaded, configSource: `working-tree（无法取得基准提交上的判定策略：${loaded.policyError}；用工作区值，改配置的 PR 里可能比实际生效的更新）` };
   }
-  return { config: loaded, configSource: `working-tree（无法取得基准提交上的判定策略：${loaded.policyError}；用工作区值，改配置的 PR 里可能比实际生效的更新）` };
+  // 策略字段取自哪里：基准提交上有配置就取它（标明提交号），没有（首次安装）就是工作区值，两种要分得清
+  const rev = baseRevision(target, loaded.base).rev;
+  const baseHasConfig = rev !== EMPTY_TREE && git(target, ['cat-file', '-e', `${rev}:engineering.config.json`]).ok;
+  return baseHasConfig
+    ? { config: loaded, configSource: `effective（策略字段取基准提交 ${rev.slice(0, 12)} 上的，与闸门一致）` }
+    : { config: loaded, configSource: 'working-tree（基准提交上还没有配置（首次安装），策略字段取工作区值，与闸门此时的判定一致）' };
 }
 
 /** 把项目配置、命令行参数和本机事实合成 decideStage 的 env：命令行给的 tight 盖过本机探测，给的 hasServer、externalExecutor 原样带上。 */

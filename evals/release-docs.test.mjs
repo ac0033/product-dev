@@ -25,6 +25,23 @@ test('发布维护的执行位置表：步骤 2–6 都有对应行，与标签�
   const rules = read('AGENTS.md');
   assert.match(rules, /Linux、Windows CI 成功后做独立代码复审/);
   assert.match(doc, /Linux、Windows CI 都成功后才做/);
-  // 两处步骤 2 的工作分在本机与 CI，不能把“双审”写进 CI 一栏
-  assert.ok(!/\| D 发布（第 2 步，合并前） \| 跨平台全量测试、双审 \|/.test(doc));
+  // 逐格比对：表里每一行按竖线切成格，步骤 2 的几项各在各的位置，不能把双审放进 CI 一栏
+  const cells = (label, work) => {
+    const line = doc.split('\n').find((l) => l.startsWith(`| ${label} | ${work} |`));
+    assert.ok(line, `缺少行：${label} | ${work}`);
+    const c = line.split('|').map((x) => x.trim());
+    return { where: c[3], who: c[4] };
+  };
+  const D2 = 'D 发布（第 2 步，合并前）';
+  assert.deepEqual(cells(D2, '跨平台全量测试'), { where: 'PR 的 CI（Linux、Windows）', who: '项目规则（AGENTS.md）' });
+  const review = cells(D2, '独立代码复审与增量一致性审');
+  assert.ok(review.where.includes('Linux、Windows CI 都成功后才做'));
+  assert.ok(!review.where.includes('PR 的 CI（Linux、Windows）'), '双审不放在“PR 的 CI”里，时点是 CI 成功之后');
+  assert.ok(review.where.includes('宿主子代理') && review.where.includes('外部执行器'));
+  assert.ok(cells(D2, '运行 `build-plugin.mjs` 和 `evals`（生成与相关测试）').where.startsWith('当前会话本机跑'));
+  const D4 = cells('D 发布（第 4 步）', '在标签对应的提交上打包并核对 SHA256SUMS');
+  assert.ok(D4.where.includes('release-artifacts') && D4.where.includes('上传') && D4.where.includes('本机再按第 4 步'));
+  // 第 2 步恰好这三项工作（多了或少了、被合并成一行都会失败）
+  const works = doc.split('\n').filter((l) => l.startsWith(`| ${D2} |`)).map((l) => l.split('|')[2].trim());
+  assert.deepEqual(works, ['运行 `build-plugin.mjs` 和 `evals`（生成与相关测试）', '跨平台全量测试', '独立代码复审与增量一致性审']);
 });
