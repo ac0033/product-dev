@@ -11,9 +11,9 @@
 //   项目配置优先取基准提交上生效的策略字段（与闸门一致），读不到时取工作区文件，输出里的 configSource 标明来源。
 import fs from 'node:fs';
 import path from 'node:path';
-import { CI_RUNNERS, FULL_TESTS, REVIEW_FLOWS, SESSIONS, normalizeConfig } from '../gate/config.mjs';
+import { normalizeConfig } from '../gate/config.mjs';
 import { isMain, loadConfig } from '../gate/lib.mjs';
-import { detectFacts, isConstrained } from './environment.mjs';
+import { applyEnvironment, detectFacts, isConstrained } from './environment.mjs';
 
 export const STAGE_IDS = ['A', 'B', 'C', 'W'];
 const LOCAL = 'local-session';
@@ -48,7 +48,8 @@ export function byPrinciples(feasible, tight) {
 }
 
 const fixed = (id, label, where, reason) => ({ id, label, kind: 'fixed', where, reason });
-const choice = (id, label, feasible, reason) => ({ id, label, kind: 'choice', feasible, reason });
+/** serverCapable：这项工作原则上能放在自己的服务器上（还要 hasServer 确认才算可行）；全量测试、本机的工作不能。 */
+const choice = (id, label, feasible, reason, serverCapable = false) => ({ id, label, kind: 'choice', feasible, reason, serverCapable });
 const reviewWhere = (env) => (env.externalExecutor ? 'executor-machine' : 'current-session');
 const REVIEW_REASON = (env) => (env.externalExecutor
   ? '外部执行器（如 Codex）的命令和模型写在仓库之外的本机配置，只能在配了它的机器上跑；理论上可以迁到服务器，但 Linux 上只读沙箱、无工具等行为未验证，须先测试再迁，目前不实现'
@@ -88,14 +89,14 @@ const STAGES = {
     items: (env) => [
       env.reviewFlow === 'pr'
         ? fixed('merge-entry', '合并入口（核对 CI 与审查记录）', 'same-copy', '审查记录不跨副本共享，要在登记它的同一个仓库副本里合并；合并要用户授权（R2）')
-        : fixed('merge', '合并（pre-push 流程没有合并入口脚本）', 'current-session', '按项目约定合并，合并要用户授权（R2）；复审与测试记录已在推送前核对'),
+        : fixed('merge', '合并（pre-push 流程没有合并入口脚本）', 'current-session', '按项目约定合并，合并要用户授权（R2）；等 PR 的必需检查全部通过，不绕过失败的检查；复审与测试记录只证明推送前的状态，不能证明对 PR 最终提交的双审'),
       fixed('cleanup', '删除分支、清理工作树', 'current-session', '合并后立即做，汇报“完成”前确认已清理'),
       fixed('wrap-up', '汇报与经验提炼', 'current-session', '需要判断和用户沟通，不外包'),
     ],
   },
   W: {
     name: '每周巡检',
-    items: (env) => [choice('weekly-inspection', '每周巡检（重复性工作）', env.hasServer === true ? [LOCAL, CLOUD, SERVER] : [LOCAL, CLOUD], '不需要人参与的重复性工作，攒成整块在用户离开后跑，尽量不占本机')],
+    items: (env) => [choice('weekly-inspection', '每周巡检（重复性工作）', env.hasServer === true ? [LOCAL, CLOUD, SERVER] : [LOCAL, CLOUD], '不需要人参与的重复性工作，攒成整块在用户离开后跑，尽量不占本机', true)],
   },
 };
 
@@ -114,21 +115,22 @@ function ciItem(env) {
 
 const DEFAULTS = { fullTests: 'local', ciRunner: null, ciFallback: null, reviewFlow: 'pre-push', session: null, hasServer: undefined, tight: false, externalExecutor: false };
 
-/** 补全默认值并严格校验：undefined 当作没给，其余取值不对就报错，不静默当成别的意思。 */
+/**
+ * 补全默认值并严格校验：undefined 当作没给，其余取值不对就报错，不静默当成别的意思。
+ * 配置字段（fullTests、reviewFlow、ciRunner、ciFallback、session）及其组合直接复用项目配置的校验（normalizeConfig，闸门用的同一份规则），
+ * 不在这里再写一份：ci 须搭 pr 流程和已声明的 CI、后备不能与主用相同等，配置拒绝的这里也拒绝。requiredChecks 与环节无关，给占位。
+ */
 function normalizeEnv(env) {
   const e = { ...DEFAULTS };
   for (const [k, v] of Object.entries(env)) if (v !== undefined && k !== 'userChoices') e[k] = v;
-  const oneOf = (key, list, allowNull = false) => {
-    if (!(allowNull && e[key] === null) && !list.includes(e[key])) throw new Error(`${key} 的取值不对：${JSON.stringify(e[key])}（只能是 ${list.join('、')}${allowNull ? '，或不写' : ''}）`);
-  };
-  oneOf('fullTests', FULL_TESTS);
-  oneOf('reviewFlow', REVIEW_FLOWS);
-  oneOf('ciRunner', CI_RUNNERS, true);
-  oneOf('ciFallback', CI_RUNNERS, true);
-  oneOf('session', SESSIONS, true);
   for (const k of ['tight', 'externalExecutor']) if (typeof e[k] !== 'boolean') throw new Error(`${k} 必须是 true 或 false（当前 ${JSON.stringify(e[k])}）`);
   if (e.hasServer !== undefined && typeof e.hasServer !== 'boolean') throw new Error(`hasServer 必须是 true 或 false（当前 ${JSON.stringify(e.hasServer)}）`);
-  if (e.fullTests === 'ci' && !['github-hosted', 'self-hosted'].includes(e.ciRunner)) throw new Error(`fullTests 为 ci 须声明 ciRunner 为 github-hosted 或 self-hosted（当前 ${JSON.stringify(e.ciRunner)}）`);
+  try {
+    const { fullTests, reviewFlow, ciRunner, ciFallback, session } = e;
+    normalizeConfig(applyEnvironment({ profile: 2 }, { fullTests, reviewFlow, ciRunner, ciFallback, session }, { requiredChecks: fullTests === 'ci' ? ['占位'] : undefined }));
+  } catch (err) {
+    throw new Error(`环境取值不成立（与项目配置同一口径）：${err.message}`);
+  }
   e.userChoices = { ...(env.userChoices || {}) };
   return e;
 }
@@ -138,7 +140,7 @@ function decideChoice(spec, env) {
   const base = { id: spec.id, label: spec.label };
   const asked = env.userChoices[spec.id];
   if (asked !== undefined && !spec.feasible.includes(asked)) {
-    const why = asked === SERVER && env.hasServer !== true ? '没有确认有可用的服务器（hasServer=true 才算）' : '这项工作不能放在那里';
+    const why = asked === SERVER && spec.serverCapable && env.hasServer !== true ? '没有确认有可用的服务器（hasServer=true 才算）' : '这项工作不能放在那里';
     return { ...base, where: null, source: 'ask', options: spec.feasible, reason: `你指定的 ${asked} 现在做不到：${why}。请在这些里选：${spec.feasible.map((p) => COST[p]).join('；')}` };
   }
   if (asked !== undefined) return { ...base, where: asked, source: 'user', reason: `用户指定：${COST[asked]}` };
@@ -177,7 +179,7 @@ export function parseStageArgs(argv) {
   const out = { stage: undefined, target: undefined, env: {}, userChoices: {} };
   const take = (i, flag) => {
     const v = argv[i + 1];
-    if (v === undefined || v.startsWith('--')) throw new Error(`${flag} 缺少值`);
+    if (v === undefined || v === '' || v.startsWith('--')) throw new Error(`${flag} 缺少值（不能是空字符串）`);
     return v;
   };
   for (let i = 0; i < argv.length; i += 2) {
@@ -204,15 +206,22 @@ export function parseStageArgs(argv) {
   return out;
 }
 
-/** 读项目配置：优先 loadConfig（策略字段取基准提交上的，与闸门一致），读不到时取工作区文件。 */
-function readProjectConfig(target) {
+/**
+ * 读项目配置：优先 loadConfig（策略字段取基准提交上的，与闸门一致）；
+ * 基准提交解析不了（loadConfig 带回 policyError）或读不到时，取工作区文件并如实标注来源，不假称是生效的策略。
+ */
+export function readProjectConfig(target) {
+  let loaded = null;
   try {
-    return { config: loadConfig(target), configSource: 'effective（基准提交上生效的策略字段，与闸门一致）' };
+    loaded = loadConfig(target);
   } catch {
-    const file = path.join(target, 'engineering.config.json');
-    if (!fs.existsSync(file)) return { config: {}, configSource: 'none（没有 engineering.config.json，按默认值）' };
-    return { config: normalizeConfig(JSON.parse(fs.readFileSync(file, 'utf8'))), configSource: 'working-tree（读不到基准提交，用工作区文件，改配置的 PR 里可能比实际生效的更新）' };
+    loaded = null;
   }
+  if (loaded && !loaded.policyError) return { config: loaded, configSource: 'effective（基准提交上生效的策略字段，与闸门一致）' };
+  const file = path.join(target, 'engineering.config.json');
+  if (!fs.existsSync(file)) return { config: {}, configSource: 'none（没有 engineering.config.json，按默认值）' };
+  const why = loaded?.policyError ? `无法取得基准提交上的判定策略（${loaded.policyError}）` : '读不到基准提交';
+  return { config: normalizeConfig(JSON.parse(fs.readFileSync(file, 'utf8'))), configSource: `working-tree（${why}，用工作区文件；改配置的 PR 里可能比实际生效的更新）` };
 }
 
 /** 把项目配置、命令行参数和本机事实合成 decideStage 的 env：命令行给的 tight 盖过本机探测，给的 hasServer、externalExecutor 原样带上。 */
@@ -223,14 +232,18 @@ export function buildEnv(config, args, facts) {
   };
 }
 
+/** 命令行的全部流程：解析参数、读配置、（没给 tight 时）探测本机、决定。detect 可注入，测试用。返回要输出的对象。 */
+export function planFromArgs(argv, { detect = detectFacts, cwd = process.cwd() } = {}) {
+  const args = parseStageArgs(argv);
+  const target = path.resolve(cwd, args.target ?? '.');
+  const { config, configSource } = readProjectConfig(target);
+  const facts = args.env.tight === undefined ? detect(target) : {};
+  return { ...decideStage(args.stage, buildEnv(config, args, facts)), configSource };
+}
+
 if (isMain(import.meta.url)) {
   try {
-    const args = parseStageArgs(process.argv.slice(2));
-    const target = path.resolve(args.target ?? process.cwd());
-    const { config, configSource } = readProjectConfig(target);
-    const facts = args.env.tight === undefined ? detectFacts(target) : {};
-    const decision = decideStage(args.stage, buildEnv(config, args, facts));
-    console.log(JSON.stringify({ ...decision, configSource }, null, 2));
+    console.log(JSON.stringify(planFromArgs(process.argv.slice(2)), null, 2));
   } catch (e) {
     console.error(`环节决定失败：${e.message}`);
     process.exit(1);

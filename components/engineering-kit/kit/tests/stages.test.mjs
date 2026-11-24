@@ -7,8 +7,9 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { test } from 'node:test';
 import { BUNDLE_ROOT } from '../sync.mjs';
-import { STAGE_IDS, buildEnv, byPrinciples, decideStage, parseStageArgs } from '../tools/stages.mjs';
-import { tmpRepo, write } from './helpers.mjs';
+import { detectFacts, isConstrained } from '../tools/environment.mjs';
+import { STAGE_IDS, buildEnv, byPrinciples, decideStage, parseStageArgs, planFromArgs } from '../tools/stages.mjs';
+import { commitAll, git, tmpRepo, write } from './helpers.mjs';
 
 const item = (stage, env, id) => decideStage(stage, env).items.find((i) => i.id === id);
 const ids = (stage, env) => decideStage(stage, env).items.map((i) => i.id);
@@ -86,6 +87,10 @@ test('决定顺序一：用户的选择最优先；指定了做不到的转问�
   assert.equal(notHere.source, 'ask');
   assert.match(notHere.reason, /不能放在那里/);
   assert.ok(!/没有确认有可用的服务器/.test(notHere.reason));
+  // 没传 hasServer 时，全量测试这类原本就不能放服务器的工作，理由也不能说成“没确认服务器”
+  const notHereUnknown = item('A', { ...base, userChoices: { 'full-tests-local': 'server' } }, 'full-tests-local');
+  assert.match(notHereUnknown.reason, /不能放在那里/);
+  assert.ok(!/没有确认有可用的服务器/.test(notHereUnknown.reason));
 });
 
 test('决定顺序二：用户没选时按两条原则自动判断；并列时取步骤最少的，与列出先后无关', () => {
@@ -116,9 +121,12 @@ test('决定顺序三：多种可行且两条原则指向不同时问用户，�
 
 test('输入校验：取值不对就报错，不静默当成别的意思；undefined 当作没给', () => {
   for (const bad of [{ fullTests: 'unknown' }, { reviewFlow: 'x' }, { ciRunner: 'mars' }, { session: 'moon' }, { hasServer: 'false' }, { externalExecutor: 'false' }, { tight: 1 },
-    { fullTests: 'ci', reviewFlow: 'pr', ciRunner: 'none' }, { fullTests: 'ci', reviewFlow: 'pr' }]) {
-    assert.throws(() => decideStage('A', bad), /取值不对|必须是|须声明/, JSON.stringify(bad));
+    { fullTests: 'ci', reviewFlow: 'pr', ciRunner: 'none' }, { fullTests: 'ci', reviewFlow: 'pr' },
+    // 与项目配置同一口径：配置拒绝的组合这里也拒绝（ci 搭 pre-push、后备取 none、后备与主用相同）
+    { fullTests: 'ci', reviewFlow: 'pre-push', ciRunner: 'github-hosted' }, { ...PR, ciFallback: 'none' }, { ...PR, ciFallback: 'github-hosted' }]) {
+    assert.throws(() => decideStage('A', bad), /环境取值不成立|必须是/, JSON.stringify(bad));
   }
+  assert.doesNotThrow(() => decideStage('A', { ...PR, ciRunner: 'self-hosted', ciFallback: 'github-hosted' }));
   // undefined 不覆盖默认值（命令行没有配置文件时传来的就是 undefined）
   assert.deepEqual(ids('A', { fullTests: undefined, reviewFlow: undefined, ciRunner: undefined }), ['static', 'affected', 'full-tests-local', 'independent-reviews', 'review-record']);
   // 对具体工作的指定：必须是该环节里可选的工作、取值必须是三个去处之一
@@ -139,6 +147,7 @@ test('命令行参数：严格解析，未知参数、缺值、重复、写法�
     [['--stage', 'A', '--choice', 'hasServer=true', '--choice', 'hasServer=false'], /重复/],
     [['--stage', 'A', '--choice', 'x=local-session', '--choice', 'x=server'], /重复/],
     [['--stage', 'A', '--oops', '1'], /不认识的参数/], [['A'], /不认识的参数/], [[], /缺少 --stage/],
+    [['--stage', 'A', '--target', ''], /缺少值/], [['--stage', ''], /缺少值/], [['--stage', 'A', '--choice', ''], /缺少值/],
   ]) assert.throws(() => parseStageArgs(args), re, JSON.stringify(args));
 });
 
@@ -181,6 +190,33 @@ test('命令行：项目配置的各字段正确映射（reviewFlow、fullTests�
   const tightOff = JSON.parse(run('--stage', 'A', '--target', empty, '--choice', 'tight=false').stdout);
   assert.equal(tightOff.items.find((i) => i.id === 'full-tests-local').where, 'local-session');
   assert.match(a.configSource, /none/);
+});
+
+test('planFromArgs：没给 tight 时用探测到的本机事实（可注入），给了就不探测；配置来源如实标注', () => {
+  const root = tmpRepo();
+  write(root, 'engineering.config.json', cfg({}));
+  const w = (facts) => planFromArgs(['--stage', 'W', '--target', root], { detect: () => facts }).items[0];
+  assert.equal(w({ cpus: 2, memGB: 32 }).source, 'ask', 'CPU 少：本机慢、云端花钱，没有赢家');
+  assert.equal(w({ cpus: 16, memGB: 64 }).where, 'local-session');
+  const given = planFromArgs(['--stage', 'W', '--target', root, '--choice', 'tight=false'], { detect: () => { throw new Error('给了 tight 就不该探测'); } });
+  assert.equal(given.items[0].where, 'local-session');
+  assert.match(given.configSource, /effective|working-tree/);
+  // 基准分支解析不了：取工作区文件并如实标注，不假称是生效的策略
+  const bad = tmpRepo();
+  write(bad, 'engineering.config.json', JSON.stringify({ profile: 2, modules: { gate: { base: 'no-such-branch' } } }));
+  commitAll(bad, 'base');
+  const planned = planFromArgs(['--stage', 'A', '--target', bad, '--choice', 'tight=false']);
+  assert.match(planned.configSource, /^working-tree.*无法取得基准提交上的判定策略/, planned.configSource);
+});
+
+test('planFromArgs：基准提交上的策略与工作区的非策略字段拼出不成立的组合时报错，不输出前后矛盾的计划', () => {
+  const root = tmpRepo();
+  write(root, 'engineering.config.json', cfg({ reviewFlow: 'pr', fullTests: 'ci', ciRunner: 'self-hosted', requiredChecks: ['ci-gate'] }));
+  commitAll(root, 'base');
+  git(root, ['checkout', '-q', '-b', 'feat']);
+  // 工作区：主用改成托管、后备设成自托管（单看合法）；基准上的主用仍是自托管，拼起来后备与主用相同
+  write(root, 'engineering.config.json', cfg({ reviewFlow: 'pr', fullTests: 'ci', ciRunner: 'github-hosted', ciFallback: 'self-hosted', requiredChecks: ['ci-gate'] }));
+  assert.throws(() => planFromArgs(['--stage', 'B', '--target', root, '--choice', 'tight=false', '--choice', 'hasServer=true']), /环境取值不成立.*ciFallback/s);
 });
 
 test('命令行：写错的输入退出码非零并给出原因', () => {
