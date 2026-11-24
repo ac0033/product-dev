@@ -96,7 +96,7 @@ test('闸门：ci 模式静态检查不过照样不通过', () => {
   assert.match(res.messages.join('\n'), /静态检查未通过/);
 });
 
-test('闸门：ci 模式加 full 在本机强制跑全量并写记录（失败照样不通过）', () => {
+test('闸门：ci 模式加 full 在本机跑全量并写记录（失败照样不通过）', () => {
   const root = featureRepo({ ...CI, testCommand: 'node fail.mjs' });
   changeDedup(root);
   const res = runGate({ root, full: true });

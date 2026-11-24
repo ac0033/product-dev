@@ -5,7 +5,7 @@
 //   一是本机的实际情况（系统、CPU、内存、有没有 GitHub 远程和 gh）；二是更快、更便宜、更高效、更准确
 //   （能并行就并行；并行受资源限制时先想能不能放到云端，不行才串行；CI 只用 Linux 除非产品要在别的系统上运行）。
 // 用法：node tools/environment.mjs detect [--target <项目>] [--choice <键=值>]…   输出本机事实与推荐（JSON），供 agent 问用户前核对
-//   --choice 的键：fullTests、reviewFlow、ciRunner、ciFallback、ciOs（逗号分隔）、session、parallel，以及不写进配置的 hasServer（true/false）、targets（逗号分隔的系统）、requiredChecks（项目已有 CI 时写明哪些检查跑全量）、publicRepo（true/false，仓库是否公开；公开仓库不能用自托管 runner，有 GitHub 远程时会尽力自动读取）。
+//   --choice 的键：fullTests、reviewFlow、ciRunner、ciFallback、ciOs（逗号分隔）、session、parallel，以及不写进配置的 hasServer（true/false）、targets（逗号分隔的系统）、requiredChecks（项目已有 CI 时写明哪些检查跑全量）、publicRepo（true/false，仓库是否公开；公开仓库不能用自托管 runner，有 GitHub 远程时会尽力自动读取，读到的结果优先，声明只在读不到时采信）。
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -90,7 +90,7 @@ export function recommend(facts, choices = {}) {
     ? 'GitHub 托管 runner 免维护、公开仓库免费，额度够用时最省事；有服务器的另设后备'
     : '全量不交给 CI，CI 放哪暂不声明');
   const runner = values.ciRunner;
-  const publicRepo = choices.publicRepo ?? facts.repoPublic ?? null;
+  const publicRepo = repoPublicOf(facts, choices);
   // 公开仓库不推荐自托管 runner：外部 PR 能改工作流，在用户服务器上执行任意代码
   const fallbackRec = choices.hasServer === true && publicRepo === false && (runner === 'github-hosted' || runner === 'self-hosted') ? (runner === 'github-hosted' ? 'self-hosted' : 'github-hosted') : null;
   pick('ciFallback', choices.ciFallback, fallbackRec, fallbackRec ? '有自己的服务器：主 CI 额度用完或不可用时改用另一处，不耽误合并' : publicRepo !== false && choices.hasServer === true ? '仓库是公开的或可见性未知（无法确认是私有）：不设自托管后备，外部 PR 能改工作流，会在你的服务器上执行任意代码；确认是私有仓库后用 publicRepo=false 再试' : '没有服务器，不设后备');
@@ -109,8 +109,7 @@ export function recommend(facts, choices = {}) {
   if (values.fullTests === 'ci' && values.reviewFlow !== 'pr') conflicts.push('fullTests 为 ci 须搭配 pr 流程（只有 pr 流程的合并入口核对 CI）');
   if (values.fullTests === 'ci' && (values.ciRunner === null || values.ciRunner === 'none')) conflicts.push('fullTests 为 ci 须声明 ciRunner 为 github-hosted 或 self-hosted（ciRunner 不能是 none 或不写）');
   conflicts.push(...serverConflicts(values, choices, facts));
-  // ci 与 pr 流程的复审登记、合并、查 CI 都走 gh：有 GitHub 远程但 gh 没登录时，安装能成功、后面会卡住，这里先列出
-  if ((values.fullTests === 'ci' || values.reviewFlow === 'pr') && facts.ghAvailable === false) conflicts.push('fullTests 为 ci 或 reviewFlow 为 pr 都要用 gh（登记复审、查 CI、合并）：gh 未登录，先运行 gh auth login，或改用 pre-push 流程且全量在本机跑');
+  conflicts.push(...ghConflicts(values, facts));
   // 与安装时的配置校验同一口径：detect 阶段就把安装会报的错列出来（只在没有别的冲突时补，避免重复）
   if (conflicts.length === 0) {
     try {
@@ -125,16 +124,32 @@ export function recommend(facts, choices = {}) {
 /**
  * 自托管 runner 的冲突：没有自己的服务器（hasServer 不是 true，没声明也算——须明确确认）；
  * 仓库不是确认的私有（公开，或可见性读不出来）：外部 PR 能改工作流，在用户服务器上执行任意代码，工作流里的 fork 分流不是安全边界。主用或后备都查；
- * 读不出可见性时（没有 GitHub 远程、gh 没登录）按公开处理，用户确认私有后用 publicRepo=false。
+ * 读不出可见性时（没有 GitHub 远程、gh 没登录）按公开处理，用户确认私有后用 publicRepo=false；探测到的结果优先于声明。
  */
 function serverConflicts(values, choices, facts = {}) {
   const selfKeys = ['ciRunner', 'ciFallback'].filter((k) => values[k] === 'self-hosted');
   const out = [];
   if (choices.hasServer !== true) out.push(...selfKeys.map((k) => `${k} 选了自托管 runner，但没有确认有自己的服务器（用 hasServer=true 明确确认）：改选 github-hosted，或先准备服务器`));
-  const isPublic = choices.publicRepo ?? facts.repoPublic ?? null;
+  const isPublic = repoPublicOf(facts, choices);
   if (isPublic === true) out.push(...selfKeys.map((k) => `${k} 选了自托管 runner，但仓库是公开的：外部 PR 能改工作流并在你的服务器上执行任意代码，公开仓库请用 github-hosted`));
   else if (isPublic !== false) out.push(...selfKeys.map((k) => `${k} 选了自托管 runner，但无法确认仓库是私有的（可见性未知）：外部 PR 能改工作流并在你的服务器上执行任意代码；确认是私有仓库后用 publicRepo=false，否则用 github-hosted`));
   return out;
+}
+
+/**
+ * 仓库是否公开：true / false / null（未知）。任一来源说公开就按公开（保守）；声明私有只在探测不到时采信，不能把探测到的公开仓库声明成私有。
+ */
+function repoPublicOf(facts = {}, choices = {}) {
+  if (facts.repoPublic === true || choices.publicRepo === true) return true;
+  return facts.repoPublic ?? choices.publicRepo ?? null;
+}
+
+/** ci 与 pr 流程的复审登记、合并、查 CI 都走 gh：gh 没登录时安装能成功、后面会卡住，所以对最终选定的取值统一检查（推荐与只给选择两种模式共用）。 */
+function ghConflicts(values, facts = {}) {
+  if ((values.fullTests === 'ci' || values.reviewFlow === 'pr') && facts.ghAvailable === false) {
+    return ['fullTests 为 ci 或 reviewFlow 为 pr 都要用 gh（登记复审、查 CI、合并）：gh 未登录，先运行 gh auth login，或改用 pre-push 流程且全量在本机跑'];
+  }
+  return [];
 }
 
 /** 一句话说明命令写法：按本机系统。 */
@@ -191,7 +206,7 @@ export function resolveEnvironment(root, { recommended = false, choices = {} } =
   if (recommended && recommendation.conflicts.length > 0) throw new Error(`环境选择有冲突：${recommendation.conflicts.join('；')}`);
   const values = recommended ? { ...recommendation.values } : Object.fromEntries(VALUE_KEYS.filter((k) => choices[k] !== undefined).map((k) => [k, choices[k]]));
   // 只写用户给出的项时不拿推荐值制造冲突，只核对用户自己选的；推荐模式的冲突上面已拦
-  const own = serverConflicts(values, choices, facts);
+  const own = [...serverConflicts(values, choices, facts), ...ghConflicts(values, facts)];
   if (own.length > 0) throw new Error(`环境选择有冲突：${own.join('；')}`);
   // 已有 CI 时由用户写明哪些检查跑全量（requiredChecks）：不属于推荐，原样带上
   if (choices.requiredChecks !== undefined) values.requiredChecks = choices.requiredChecks;

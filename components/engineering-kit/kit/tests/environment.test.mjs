@@ -158,7 +158,15 @@ test('工作流：按选择生成——多系统矩阵、自托管后备用仓�
   assert.ok(selfFirst.includes(`(vars.CI_RUNNER == 'github-hosted' || ${EXT}) && 'ubuntu-latest' || ${SELF}`));
   const selfOnly = renderCiWorkflow({ ...WF, ciRunner: 'self-hosted' });
   assert.ok(selfOnly.includes('runner: ${{ ' + EXT + " && 'ubuntu-latest' || " + SELF + ' }}'));
-  assert.ok(!/runner: ubuntu-latest\n/.test(selfOnly.split('  test:')[1]), '分流被删成固定的托管 runner 时必须失败');
+  // 作业与矩阵的绑定：changes、ci-gate 的 runs-on 必须就是矩阵里 linux 项的分流表达式，test 作业必须用 matrix.runner；
+  // 任一作业被改成固定的托管 runner（绕过分流）都要失败
+  for (const wf of [fb, selfFirst, selfOnly, multi]) {
+    const lin = wf.match(/- os: linux\n\s+runner: (.+)\n/)[1];
+    const runsOn = (job) => wf.match(new RegExp(`\\n  ${job}:[\\s\\S]*?\\n    runs-on: (.+)\\n`))[1];
+    assert.equal(runsOn('changes'), lin, 'changes 作业用同一分流');
+    assert.equal(runsOn('ci-gate'), lin, 'ci-gate 作业用同一分流');
+    assert.equal(runsOn('test'), '${{ matrix.runner }}', 'test 作业按矩阵项选 runner（含 Windows、macOS 项）');
+  }
   assert.match(selfOnly, /不要把自托管 runner 用在接受外部 PR 的公开仓库/, '说明自托管 runner 的安全风险');
   const py = renderCiWorkflow({ ...WF, testCommand: 'python -m pytest -q' });
   assert.match(py, /setup-python/);
@@ -284,6 +292,17 @@ test('推荐：仓库可见性未知时按公开处理，不推荐也不接受�
   assert.ok(recommend(noGh, {}).conflicts.some((c) => /gh/.test(c)), 'ci 与 pr 流程都要用 gh：未登录要先登录');
   assert.equal(recommend(noGh, { fullTests: 'local', reviewFlow: 'pre-push' }).conflicts.length, 0, '不用 pr 流程时不需要 gh');
   assert.ok(recommend(LAPTOP, { requiredChecks: ['unit', 'unit'] }).conflicts.length > 0);
+  // H1：探测到公开时，用户声明 publicRepo=false 不能盖过探测结果（只在探测不到时采信声明）
+  const detectedPublic = { ...LAPTOP, repoPublic: true };
+  assert.ok(recommend(detectedPublic, { hasServer: true, publicRepo: false, ciRunner: 'self-hosted' }).conflicts.some((c) => /公开/.test(c)), '探测为公开，声明私有也拒绝主用自托管');
+  assert.ok(recommend(detectedPublic, { hasServer: true, publicRepo: false, ciFallback: 'self-hosted' }).conflicts.some((c) => /公开/.test(c)), '后备同理');
+  assert.equal(recommend(detectedPublic, { hasServer: true, publicRepo: false }).values.ciFallback, null, '探测为公开时不推荐后备');
+  assert.throws(() => resolveEnvironment(tmpRepo(), { recommended: false, choices: { ciRunner: 'self-hosted', hasServer: true, publicRepo: false, fullTests: 'local' } }, detectedPublic), /公开/);
+  // M1：只用 --choice（非推荐模式）安装时也要核对 gh：pr 流程或 ci 要用 gh
+  for (const choices of [{ reviewFlow: 'pr' }, { fullTests: 'ci', reviewFlow: 'pr', ciRunner: 'github-hosted' }]) {
+    assert.throws(() => resolveEnvironment(tmpRepo(), { recommended: false, choices }, noGh), /gh/, JSON.stringify(choices));
+  }
+  assert.doesNotThrow(() => resolveEnvironment(tmpRepo(), { recommended: false, choices: { reviewFlow: 'pre-push' } }, noGh), '不用 pr 流程时不需要 gh');
 });
 
 test('推荐：公开仓库不推荐也不允许自托管；自托管须用 hasServer=true 明确确认；detect 阶段就列出安装会报的配置错误', () => {
