@@ -5,8 +5,8 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { classify, shellSegments } from '../hooks/pre-bash.mjs';
-import { featureRepo } from './helpers.mjs';
+import { classify, pushDirs, shellSegments } from '../hooks/pre-bash.mjs';
+import { featureRepo, git, SRC_HEADER, tmpDir, write } from './helpers.mjs';
 
 /** Claude 推送钩子脚本（按真实方式起子进程、从 stdin 传 JSON）。 */
 const HOOK = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'pre-bash.mjs');
@@ -267,4 +267,108 @@ test('旧判定兜底：结果不比 main 的判定松，唯一例外是没有�
   // 放宽的条件全部满足时取新判定
   assert.equal(classify('echo git push --no-verify'), 'other');
   assert.equal(classify('printf "%s" x git push'), 'other');
+});
+
+// ───────────── LearnMap 试点缺口 3：推送钩子按命令实际推送的工作树核对 ─────────────
+
+test('pushDirs：git -C、先行的 cd / Set-Location 给出推送所在目录，相对路径逐级叠加；没有显式目录时就是会话目录', () => {
+  const cwd = path.resolve('/sess/feat');
+  const at = (...p) => path.resolve(cwd, ...p);
+  assert.deepEqual(pushDirs('git push origin x', cwd), [cwd]);
+  assert.deepEqual(pushDirs('git -C ../wt push origin x', cwd), [at('../wt')]);
+  assert.deepEqual(pushDirs('git -C a -C b push', cwd), [at('a/b')]);
+  assert.deepEqual(pushDirs(`git -C ${at('../abs').replaceAll('\\', '/')} push`, cwd), [at('../abs')]);
+  assert.deepEqual(pushDirs('cd ../wt && git push origin x', cwd), [at('../wt')]);
+  assert.deepEqual(pushDirs('cd ../wt; git -C sub push', cwd), [at('../wt/sub')]);
+  // PowerShell 工具只按 PowerShell 方言切词（Windows 路径里的反斜杠在 sh 方言下是转义）
+  assert.deepEqual(pushDirs('Set-Location ../wt; git push origin x', cwd, ['ps']), [at('../wt')]);
+  assert.deepEqual(pushDirs('Set-Location -LiteralPath ../wt; git push origin x', cwd, ['ps']), [at('../wt')]);
+  assert.deepEqual(pushDirs('git -C ../wt push origin x', cwd, ['ps']), [at('../wt')]);
+  if (process.platform === 'win32') {
+    // 反斜杠只在 Windows 上是路径分隔符
+    assert.deepEqual(pushDirs('Set-Location ..\\wt; git push origin x', cwd, ['ps']), [at('../wt')]);
+    assert.deepEqual(pushDirs('git -C ..\\wt push origin x', cwd, ['ps']), [at('../wt')]);
+  }
+  assert.deepEqual(pushDirs('pushd "../wt" && git push', cwd), [at('../wt')]);
+  assert.deepEqual(pushDirs('cd ../wt && gh pr create --fill', cwd), [at('../wt')]);
+  // 两处推送各在各的目录：逐个核对，去重
+  assert.deepEqual(pushDirs('cd ../a && git push && git push', cwd), [at('../a')]);
+  // 只输出文本的命令里的 cd 不是 cd
+  assert.deepEqual(pushDirs('echo cd ../wt; git push', cwd), [cwd]);
+});
+
+test('pushDirs：目录说不准时退回会话目录（与改动前一样严）——变量、~、命令替换、cd -、||、管道、后台、子 shell、--git-dir', () => {
+  const cwd = path.resolve('/sess/feat');
+  for (const command of [
+    'cd $WT && git push',
+    'cd ~/wt && git push',
+    'cd $(pwd)/../wt && git push',
+    'cd - && git push',
+    'cd && git push',
+    'cd ../wt || git push',
+    'cd ../wt | git push',
+    'cd ../wt & git push',
+    '(cd ../wt); git push',
+    '(cd ../wt && git push)',
+    'git --git-dir=../wt/.git push',
+    'git -C $WT push',
+    'git -C ~/wt push',
+  ]) {
+    assert.deepEqual(pushDirs(command, cwd), [cwd], command);
+  }
+  // 重定向里的 & 不是后台符：2>&1 照常解析 cd
+  assert.deepEqual(pushDirs('cd ../wt 2>&1 && git push', cwd), [path.resolve(cwd, '../wt')]);
+});
+
+/** 两个工作树：A 是会话目录、有未提交的源文件改动（推送核对不通过），B 是 A 的另一个工作树、没有改动（核对通过）。 */
+function twoWorktrees() {
+  const a = featureRepo();
+  write(a, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return items;\n}\n`);
+  const b = path.join(tmpDir('ekit-wt-'), 'wt');
+  git(a, ['worktree', 'add', '-q', '-b', 'other', b, 'feat']);
+  return { a, b };
+}
+
+test('Claude 推送钩子按命令实际推送的工作树核对：会话目录没过闸门、但从另一个工作树推送时放行；反过来会话目录没问题、推送的工作树没过闸门时拒绝', () => {
+  const { a, b } = twoWorktrees();
+  // 对照：在会话目录自己推，闸门没过，拒绝
+  const own = runHook('git push origin feat', a);
+  assert.equal(own.status, 2, own.stderr);
+  // 会话目录是 A，推送在 B：核对 B，放行（改动前这里会被 A 的状态错拦）
+  assert.equal(runHook(`git -C "${b}" push origin other`, a).status, 0);
+  assert.equal(runHook(`cd "${b}" && git push origin other`, a).status, 0);
+  // 反过来：会话目录是 B（没问题），推送的是 A（没过）：拒绝，说明核对的是 A
+  const wrong = runHook(`git -C "${a}" push origin feat`, b);
+  assert.equal(wrong.status, 2, wrong.stderr);
+  assert.match(wrong.stderr, /推送闸门未通过/);
+  // 一条命令里有两处推送：任一处没过就整体拒绝
+  assert.equal(runHook(`git -C "${b}" push origin other && git push origin feat`, a).status, 2);
+  // 目录不存在、不是仓库、或是别的仓库（顺手推送的另一个项目）：退回会话目录核对，不放行也不因别的仓库没装套件而新增误拦
+  assert.equal(runHook(`git -C "${path.join(b, 'nope')}" push origin x`, a).status, 2);
+  const other = featureRepo();
+  assert.equal(runHook(`git -C "${other}" push origin feat`, a).status, 2, '会话目录没过闸门：别的仓库不改变这一点');
+  assert.equal(runHook(`git -C "${other}" push origin feat`, b).status, 0, '会话目录通过：别的仓库按会话目录核对，不拿它自己的闸门记录拦');
+});
+
+test('pushDirs：cd 不一定执行或不一定在原处（条件执行、前面有别的命令、popd、Push-Location、GIT_DIR、env -C）时退回会话目录（PR #31 复审 M2）', () => {
+  const cwd = path.resolve('/sess/feat');
+  for (const command of [
+    'git fetch && cd ../wt; git push',
+    '[ -d ../wt ] && cd ../wt; git push',
+    'make; cd ../wt; git push',
+    'if [ -d ../wt ]; then cd ../wt; fi; git push',
+    'pushd ../wt; make; popd; git push',
+    'cd ../wt; cd -; git push',
+    'GIT_DIR=../wt/.git git push',
+    'GIT_WORK_TREE=../wt git push',
+    'env -C ../wt git push',
+    'git -c core.worktree=../wt push',
+  ]) {
+    assert.deepEqual(pushDirs(command, cwd, ['sh']), [cwd], command);
+  }
+  assert.deepEqual(pushDirs('Set-Location wt; Push-Location ..; git push', cwd, ['ps']), [cwd]);
+  assert.deepEqual(pushDirs('Set-Location wt; Pop-Location; git push', cwd, ['ps']), [cwd]);
+  // 开头连续的 cd 仍认；cd 之后推送，再 cd 的后一处说不准
+  assert.deepEqual(pushDirs('cd ../a && cd b && git push', cwd), [path.resolve(cwd, '../a/b')]);
+  assert.deepEqual(pushDirs('cd ../a && git push && cd ../b && git push', cwd), [path.resolve(cwd, '../a'), cwd]);
 });
