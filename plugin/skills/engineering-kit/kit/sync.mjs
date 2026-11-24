@@ -9,6 +9,8 @@
 //   node sync.mjs --target <项目> --check              整包漂移检查（有差异退出码 1）
 //   node sync.mjs --target <项目> --from-tag <标签>    回滚（或安装）到源仓库的某个版本标签
 //   node sync.mjs --target <项目> --init --profile ts|python   从零开始：非 git 目录先 git init -b main，并按技术栈写入配置与脚手架
+//   node sync.mjs --target <项目> --init --profile ts --env recommended [--choice <键=值>]…   首次安装时按环境选择（执行位置、CI 放哪、CI 系统、会话与并行）
+//     写配置并生成 CI 工作流：--choice 是用户的选择（键见 tools/environment.mjs），--env recommended 把没选的项按推荐补全；只给 --choice 时只写给出的项
 //   加 --force 覆盖项目里有本地修改的套件文件；加 --no-hooks 不安装钩子
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -17,6 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isMain, git, repoRoot } from './gate/lib.mjs';
 import { checkBundle, executePlan, loadBundle, planBundle } from './tools/bundle-lib.mjs';
+import { parseChoices, resolveEnvironment } from './tools/environment.mjs';
 import { PRESETS, projectName } from './tools/presets.mjs';
 
 /** 整包根目录（本文件所在 kit 目录的上一级，即 engineering-kit/）。 */
@@ -28,7 +31,7 @@ export const BUNDLE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.u
  *   preset（技术栈预设，仅首次创建配置时生效）、init（目标不是 git 仓库时，允许自动 git init -b main）。
  * 非 git 目录又未指定 init 时拒绝安装：闸门与钩子都依赖 git，不能装一半。
  */
-export function syncKit({ target, dryRun = false, force = false, hooks = true, bundleRoot = BUNDLE_ROOT, inject, preset = null, init = false } = {}) {
+export function syncKit({ target, dryRun = false, force = false, hooks = true, bundleRoot = BUNDLE_ROOT, inject, preset = null, init = false, env = null } = {}) {
   const root = path.resolve(target);
   const bundle = loadBundle(bundleRoot);
   const notes = [];
@@ -44,7 +47,7 @@ export function syncKit({ target, dryRun = false, force = false, hooks = true, b
       notes.push('已执行 git init -b main');
     }
   }
-  const plan = planBundle({ root, bundleRoot, bundle, force, hooks, preset, projectName: projectName(root) });
+  const plan = planBundle({ root, bundleRoot, bundle, force, hooks, preset, projectName: projectName(root), env });
   // 原子同步：存在未处理的冲突时整包一个文件也不写，列出冲突，由用户处理或 --force 覆盖
   const blocked = plan.conflicts.length > 0 && !force;
   if (!dryRun && !blocked) executePlan({ root, bundleRoot, bundle, plan, opts: { inject } });
@@ -105,6 +108,8 @@ function parseArgs(argv) {
     check: flags.has('--check'),
     init: flags.has('--init'),
     profile: val('--profile'),
+    env: val('--env'),
+    choices: argv.flatMap((x, i) => (x === '--choice' ? [argv[i + 1]] : [])),
   };
 }
 
@@ -131,7 +136,16 @@ if (isMain(import.meta.url)) {
       console.log(bad.length === 0 ? '整包与清单一致' : `有 ${bad.length} 项与清单不一致`);
       code = bad.length === 0 ? 0 : 1;
     } else {
-      const r = syncKit({ target: a.target, dryRun: a.dryRun, force: a.force, hooks: a.hooks, bundleRoot, init: a.init, preset: a.profile ? PRESETS[a.profile] : null });
+      let env = null;
+      const envFlags = process.argv.filter((x) => x === '--env').length;
+      if (envFlags > 1 || (envFlags === 1 && a.env !== 'recommended')) throw new Error('--env 只能写一次，且值只能是 recommended（把没选的项按推荐补全）；只给用户的选择时用 --choice');
+      if (envFlags === 1 || a.choices.length > 0) {
+        // 项目已有配置时环境选择不生效（同步只提示）：不再解析校验，免得无效组合在提示前就退出
+        env = fs.existsSync(path.join(path.resolve(a.target), 'engineering.config.json'))
+          ? { values: {}, facts: null }
+          : resolveEnvironment(path.resolve(a.target), { recommended: a.env === 'recommended', choices: parseChoices(a.choices) });
+      }
+      const r = syncKit({ target: a.target, dryRun: a.dryRun, force: a.force, hooks: a.hooks, bundleRoot, init: a.init, preset: a.profile ? PRESETS[a.profile] : null, env });
       console.log(`${r.dryRun ? '[试运行] ' : ''}整包版本 ${r.version}${a.fromTag ? `（来自标签 ${a.fromTag}）` : ''}`);
       for (const x of r.actions) console.log(`  [${x.type}] ${x.file}`);
       for (const m of r.messages) console.log(`  ! ${m}`);

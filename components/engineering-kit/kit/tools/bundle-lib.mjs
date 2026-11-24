@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeConfig, toFlat, toProfile } from '../gate/config.mjs';
+import { CI_GATE_JOB, CI_WORKFLOW_REL, applyEnvironment, describeEnvironment, renderCiWorkflow } from './environment.mjs';
 import { applyPreset, scaffoldFiles } from './presets.mjs';
 
 /** 项目内套件目录（相对项目根）。 */
@@ -263,7 +264,7 @@ function configContent(existingRaw, templateRaw, wantFormat) {
  * 返回 { ops: [{ rel, abs, content, exec, action }], actions, conflicts, messages, newLock }。
  * 任何结构错误在这里抛出，所以到写入阶段时已确认整包可安装。
  */
-export function planBundle({ root, bundleRoot, bundle, force = false, hooks = true, preset = null, projectName = 'project' }) {
+export function planBundle({ root, bundleRoot, bundle, force = false, hooks = true, preset = null, projectName = 'project', env = null }) {
   const lock = readLock(root);
   const ops = [];
   const actions = [];
@@ -275,8 +276,38 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
   const templateCfgComp = bundle.components.find((c) => c.kind === 'config');
   const templateRaw = templateCfgComp ? JSON.parse(fs.readFileSync(path.join(bundleRoot, templateCfgComp.source), 'utf8')) : {};
   // 技术栈预设只在首次创建配置时生效（配置之后由项目维护）；脚手架文件只在不存在时创建。
-  const newCfgRaw = preset ? applyPreset(templateRaw, preset) : templateRaw;
+  let newCfgRaw = preset ? applyPreset(templateRaw, preset) : templateRaw;
   if (preset && cfgRaw) messages.push('engineering.config.json 已存在，--profile 只在首次创建时生效；技术栈设置请手动修改该文件');
+  // 环境选择（执行位置、CI 放哪、CI 系统、会话与并行偏好）同样只在首次创建配置时生效；选了 CI 就按选择生成工作流（已有同名文件不覆盖）。
+  if (env && cfgRaw) messages.push('engineering.config.json 已存在，环境选择只在首次创建时生效；执行位置请手动修改 modules.gate.fullTests、ciRunner 与 modules.environment（改判定策略须合入主干后才生效）');
+  if (env && !cfgRaw) {
+    const v = env.values;
+    let requiredChecks;
+    if (v.ciRunner && v.ciRunner !== 'none') {
+      const wfAbs = path.join(root, CI_WORKFLOW_REL);
+      if (fs.existsSync(wfAbs)) {
+        // 套件看不出已有工作流跑不跑全量测试：全量交给 CI 时，必须由用户写明哪些检查跑全量，否则一个只跑 lint 的 CI 也能放行合并
+        if (v.fullTests === 'ci' && !(v.requiredChecks && v.requiredChecks.length > 0)) {
+          throw new Error(`项目已有 ${CI_WORKFLOW_REL}，套件无法确认它跑全量测试：fullTests 为 ci 时请用 --choice requiredChecks=<跑全量测试的检查名，逗号分隔> 写明（检查名查法见 process.md 第 4 节），或先删除/改名已有工作流让套件生成，或用 fullTests=local 安装；不写 requiredChecks 会让合并入口把任何一项成功的检查当作全量通过`);
+        }
+        // 防写错检查名：每个名字（去掉矩阵后缀）至少要在已有工作流文本里出现过；套件无法保证它真跑全量，名字仍由用户负责
+        const wfText = fs.readFileSync(wfAbs, 'utf8');
+        const unknown = (v.requiredChecks || []).filter((n) => !wfText.includes(n.replace(/\s*\(.*\)\s*$/, '')));
+        if (unknown.length > 0) throw new Error(`requiredChecks 里的 ${unknown.join('、')} 在已有的 ${CI_WORKFLOW_REL} 里找不到（检查名写 job 名，含矩阵后缀，查法见 process.md 第 4 节）；写错会让合并入口拦下所有 PR 或放行没跑全量的 PR`);
+        actions.push({ type: 'keep', file: CI_WORKFLOW_REL });
+        messages.push(`项目已有 ${CI_WORKFLOW_REL}，没有生成 CI 工作流${v.fullTests === 'ci' ? `；必需检查按你写明的 ${v.requiredChecks.join('、')} 配置` : ''}`);
+        if (v.fullTests === 'ci') requiredChecks = v.requiredChecks;
+      } else {
+        const gate = (newCfgRaw.modules || {}).gate || {};
+        const content = renderCiWorkflow({ ciRunner: v.ciRunner, ciFallback: v.ciFallback ?? null, ciOs: v.ciOs || ['linux'], testCommand: gate.testCommand || 'npm test', testEnv: gate.testEnv || {}, reviewIgnore: (newCfgRaw.rules || {}).reviewIgnore || [] });
+        ops.push({ rel: CI_WORKFLOW_REL, abs: wfAbs, content, action: 'create' });
+        actions.push({ type: 'create', file: CI_WORKFLOW_REL });
+        if (v.reviewFlow === 'pr') requiredChecks = [CI_GATE_JOB];
+      }
+    }
+    newCfgRaw = applyEnvironment(newCfgRaw, v, { requiredChecks });
+    messages.push(['本项目的执行方式（可在 engineering.config.json 里改）：', ...describeEnvironment(v, env.facts).map((l) => `  ${l}`)].join('\n'));
+  }
   // 项目配置归项目所有，同步不改它；但新规则块和设计文档约定依赖新默认值，旧配置缺了要明确提示，不能让规则和闸门各说各话。
   if (cfgRaw) {
     const cur = normalizeConfig(cfgRaw);

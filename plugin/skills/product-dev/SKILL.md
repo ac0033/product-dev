@@ -67,7 +67,7 @@ description: 产品开发的唯一入口。用户提出产品或开发相关的�
 
 | 步骤 | 目标 | 原则 | 工具 | 过关证据 |
 |---|---|---|---|---|
-| 装工程底座 | 装好规则、钩子、阶段目录和文档模板，设计文档从第一天就落在规定位置 | 能用脚本强制的不靠自觉 | 先看计划 `node "<插件根>/skills/engineering-kit/kit/sync.mjs" --target "<项目>" --init --dry-run`，再去掉 `--dry-run` 执行（技术栈未定时不加 `--profile`）；装好后用 `git add -A`、`git commit` 把生成的文件做成首次提交；说明见 [engineering-kit](../engineering-kit/SKILL.md) 第 1 节 | 同步成功的输出；`scripts/engineering/kit.lock.json` 存在；首次提交已做 |
+| 装工程底座 | 装好规则、钩子、阶段目录和文档模板，设计文档从第一天就落在规定位置 | 能用脚本强制的不靠自觉 | 先看计划 `node "<插件根>/skills/engineering-kit/kit/sync.mjs" --target "<项目>" --init --dry-run`，再去掉 `--dry-run` 执行（技术栈未定时不加 `--profile`）；首次安装前先问清执行环境：运行 `node "<插件根>/skills/engineering-kit/kit/tools/environment.mjs" detect --target "<项目>"` 看本机事实与推荐，把全量测试在 CI 还是本机跑、CI 放哪、CI 系统、本地还是云端会话、是否并行一次问完（推荐项放第一），用户没选就按推荐，并在安装命令里带上 `--env recommended` 和用户的 `--choice 键=值`；装好后用 `git add -A`、`git commit` 把生成的文件做成首次提交；说明见 [engineering-kit](../engineering-kit/SKILL.md) 第 1 节 | 同步成功的输出；`scripts/engineering/kit.lock.json` 存在；首次提交已做 |
 | 需求 PRD | 得到用户确认的 PRD 版本，每项需求有 ID 和验收标准 | 从问题出发；分清事实、分析和假设；把“方便、及时”改写成可检验的条件 | 经设计总控启动需求角色 [product-discovery-prd](../product-discovery-prd/SKILL.md) | `docs/01-需求/` 下的 PRD，用户确认了具体版本（或 R2 的授权记录） |
 | 原型与 UI | 产出信息架构、核心路径和可操作原型 | 按用户任务组织页面；模拟数据和占位功能逐处标明 | 经设计总控启动原型角色 [prototype-design](../prototype-design/SKILL.md)；界面的视觉与实现加载内部技能 `product-dev:impeccable`（[SKILL.md](../impeccable/SKILL.md)） | `docs/02-原型/` 下的原型说明和能打开操作的原型 |
 | 实际走查 | 留下走查证据，取得用户认可的体验基线 | 实际运行过才算验证；发现缺需求就退回需求角色，不自行改体验 | 用宿主的浏览器工具把原型实际操作一遍；再用 [impeccable](../impeccable/SKILL.md) 的 `critique` 和 `audit` 两个命令评审 | 走查记录（走了哪些路径、结果、截图或输出）；用户确认体验基线 |
@@ -108,7 +108,7 @@ description: 产品开发的唯一入口。用户提出产品或开发相关的�
 | 测试设计 | 依据场景表先写出测试，预期不从实现倒推 | 由不写实现的独立子代理按场景表写测试，做法见 [build.md](references/build.md) 第 4 节 | 按 [build.md](references/build.md) 的“测试设计”派发宿主的通用子代理，依据和任务书内容照那里写，不给实现代码 | 每条测试对应到场景表的哪一行；每片开工时那一片的测试在实现之前运行的输出：新增或改变行为的测试失败，已满足的行测试通过，逐条标明 |
 | 逐片开发 | 每片先写测试、再实现、通过后提交 | 测试先行；用最少的新代码解决整个问题；只动任务范围内的文件 | 按 [build.md](references/build.md) 逐片做，开发中跑哪些测试见 [process.md](references/process.md) 的“测试的四个阶段”；测试先行由闸门里的 `scripts/engineering/gate/check-test-first.mjs` 检查 | 每片一个提交，相关测试通过 |
 | 推送前自查 | 作者一侧的问题清零 | 自查不算独立复审（R7）；不靠屏蔽检查或跳过测试变绿（R4） | 按 [self-review.md](references/self-review.md) 的清单逐项过 | 自查发现的问题已修，或写明不修的理由 |
-| 机械闸门 | 静态检查、测试记录都与当前代码一致 | 标准只有达标与未达标；闸门失败就修代码，不改阈值（R4） | 首次候选 `node scripts/engineering/gate/gate.mjs`，修复后 `node scripts/engineering/gate/gate.mjs --affected`；各阶段跑什么见 [process.md](references/process.md) 的“测试的四个阶段” | 闸门输出通过；首次候选另有变异检查的输出（反转了哪个条件、哪条测试失败） |
+| 机械闸门 | 静态检查、测试记录都与当前代码一致 | 标准只有达标与未达标；闸门失败就修代码，不改阈值（R4） | 首次候选 `node scripts/engineering/gate/gate.mjs`（`fullTests` 为 `ci` 的项目它只做静态检查，不要求本机测试记录——此时“测试记录”一栏以 CI 在最终提交上的结果为准，全量由 CI 跑），修复后 `node scripts/engineering/gate/gate.mjs --affected`；各阶段跑什么见 [process.md](references/process.md) 的“测试的四个阶段” | 闸门输出通过；首次候选另有变异检查的输出（反转了哪个条件、哪条测试失败） |
 | PR 与 CI | PR 最终提交上的必需检查全部通过 | 命令返回 0 不等于业务成功（R5）；不绕过失败的检查 | `git push`（推送钩子运行 `scripts/engineering/gate/verify.mjs`）、`gh pr create`、`gh pr checks`；细则见 [套件流程文档](../engineering-kit/references/process.md) 第 4 节 | PR 链接和检查结果 |
 | 独立复审 | 代码复审和一致性审的结论绑定 PR 最终提交 | 复审者独立于作者，模型按 R9 分档；首轮查全、收齐再改、修后只复核修复；高、中级问题合并前修完，低级和提示级的默认记进后续清单（已登记、不扩大风险的可以同批改，见 [review.md](references/review.md) 第 8 节） | 首轮按 [review.md](references/review.md) 第 1、2 节对同一提交并行派发代码复审 `product-dev:code-reviewer`（[定义](../../agents/code-reviewer.md)，中高风险带上同一文件的安全清单）和一致性审，也可以改用外部复审者（其他厂商的模型，接入与调用见同一文件第 1 节末“外部复审者”）。任务书一律用同一文件第 2 节的模板（首轮用首轮任务书，修后用修后复核任务书）原样填写，不自拟；差异先存成文件，路径写进任务书；报告由主对话原样落盘，不改写，核对后再登记。不通过时按同一文件的“一轮与修复循环”处理；登记用 `node scripts/engineering/gate/review.mjs`，两种流程的登记与延期命令见 [套件流程文档](../engineering-kit/references/process.md) 第 4 节“套件闸门的两种流程”一段 | 登记成功的输出；PR 里的复审摘要和后续清单 |
 | 合并与收工 | 经合并入口合并，删除分支和工作树，清理临时文件 | 汇报“完成”前确认已清理（R8、R10）；经验提炼分清用户提出和 agent 总结 | `pr` 流程用 `node scripts/engineering/gate/merge.mjs <PR>`，`pre-push` 流程走项目约定的入口；收工步骤见 [套件流程文档](../engineering-kit/references/process.md) 第 7 节；之后跑 `node scripts/engineering/gate/hygiene.mjs` | 合并提交；分支与工作树已删；巡检无新增问题 |
@@ -130,7 +130,7 @@ description: 产品开发的唯一入口。用户提出产品或开发相关的�
 | 最小修复 | 在共用代码里修一次，测试转绿 | 改动越小越好；不顺手重构无关代码；改之前先搜这个函数的全部调用方 | 按 [build.md](references/build.md) 的“修 bug 时” | 该测试通过，其余测试不变红 |
 | 查同类与调用方 | 确认同一个函数的其他调用方没有被改坏 | 同类问题一并列出，范围外的不顺手改 | 宿主的代码搜索；范围大时派发 `product-dev:code-explorer`（[定义](../../agents/code-explorer.md)） | 调用方清单和处理结论；同类问题清单 |
 | 自查到合并 | 走完交付段的自查、闸门、CI、独立复审和合并 | bug 修复不免审；涉及数据库、权限的按中高风险审 | 第 4 节从“推送前自查”到“合并与收工”：[self-review.md](references/self-review.md)、`node scripts/engineering/gate/gate.mjs`、`product-dev:code-reviewer`（[定义](../../agents/code-reviewer.md)） | 同第 4 节对应各步 |
-| 回归入库 | 失败测试留在测试集里；线上事故另查为何漏检 | 每个漏掉的问题都变成可重复的回归用例 | 测试随修复一起合并，闸门的测试记录为证；事故按 [套件流程文档](../engineering-kit/references/process.md) 第 5 节 | 测试已在主干；事故有漏检分析 |
+| 回归入库 | 失败测试留在测试集里；线上事故另查为何漏检 | 每个漏掉的问题都变成可重复的回归用例 | 测试随修复一起合并，闸门的测试记录（`fullTests` 为 `ci` 时是 CI 结果）为证；事故按 [套件流程文档](../engineering-kit/references/process.md) 第 5 节 | 测试已在主干；事故有漏检分析 |
 
 “是需求缺口?”为“是”时告诉用户并转第 3 节。前两步里不改文件、不切换检出的部分可以直接做；第一个会改文件或切换检出的动作（加临时日志、人为加延迟、`git bisect`、写失败测试）之前，先按第 1 节得到批准，并做第 3 节的“开工检查”。失败测试不必单独提交：留下它失败时的输出作证据，测试和修复可以放在同一个提交里。
 
