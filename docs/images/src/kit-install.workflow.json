@@ -1,0 +1,133 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "装或升级工程套件：先问环境再安装",
+    "output": "kit-install.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "visual_preset": "classic"
+  },
+  "lanes": [
+    {
+      "id": "ask",
+      "label": "问清环境"
+    },
+    {
+      "id": "install",
+      "label": "安装"
+    },
+    {
+      "id": "config",
+      "label": "配置"
+    }
+  ],
+  "mainPath": [
+    "detect",
+    "choose",
+    "user",
+    "sync",
+    "tune",
+    "trial"
+  ],
+  "nodes": [
+    {
+      "id": "detect",
+      "lane": "ask",
+      "col": 0,
+      "type": "backend",
+      "label": "读本机事实",
+      "sublabel": "系统、CPU、内存、GitHub 远程、gh"
+    },
+    {
+      "id": "choose",
+      "lane": "ask",
+      "col": 1,
+      "type": "backend",
+      "icon": "decision",
+      "label": "用户选了吗?",
+      "sublabel": "CI 或本机、云端或本地、并行或串行"
+    },
+    {
+      "id": "user",
+      "lane": "ask",
+      "col": 2,
+      "type": "external",
+      "label": "按用户的选择"
+    },
+    {
+      "id": "rec",
+      "lane": "install",
+      "col": 1,
+      "type": "frontend",
+      "label": "按推荐",
+      "sublabel": "本机实际情况 + 更快、更便宜、更高效、更准确"
+    },
+    {
+      "id": "sync",
+      "lane": "install",
+      "col": 3,
+      "type": "backend",
+      "label": "首次安装",
+      "sublabel": "按选择写配置，需要时生成 CI"
+    },
+    {
+      "id": "tune",
+      "lane": "config",
+      "col": 3,
+      "type": "backend",
+      "label": "配置闸门",
+      "sublabel": "测试命令、源码与测试匹配规则"
+    },
+    {
+      "id": "trial",
+      "lane": "config",
+      "col": 4,
+      "type": "security",
+      "label": "试跑闸门",
+      "sublabel": "故意失败被拦，恢复后通过"
+    }
+  ],
+  "edges": [
+    {
+      "from": "detect",
+      "to": "choose"
+    },
+    {
+      "from": "choose",
+      "to": "user",
+      "label": "选了"
+    },
+    {
+      "from": "choose",
+      "to": "rec",
+      "label": "没选或不知道",
+      "route": "drop",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "user",
+      "to": "sync",
+      "route": "drop",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "rec",
+      "to": "sync"
+    },
+    {
+      "from": "sync",
+      "to": "tune",
+      "route": "drop",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "tune",
+      "to": "trial",
+      "variant": "emphasis"
+    }
+  ]
+}

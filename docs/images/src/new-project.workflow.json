@@ -34,7 +34,8 @@
     "walk",
     "design",
     "review",
-    "gate"
+    "gate",
+    "plan"
   ],
   "nodes": [
     {
@@ -92,6 +93,13 @@
       "col": 4,
       "type": "backend",
       "label": "配置闸门"
+    },
+    {
+      "id": "plan",
+      "lane": "handoff",
+      "col": 5,
+      "type": "external",
+      "label": "开发方案确认"
     }
   ],
   "edges": [
@@ -140,7 +148,12 @@
     {
       "from": "review",
       "to": "gate",
-      "label": "就绪",
+      "label": "就绪"
+    },
+    {
+      "from": "gate",
+      "to": "plan",
+      "label": "汇总方案",
       "variant": "emphasis"
     }
   ]
