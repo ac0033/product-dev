@@ -14,7 +14,7 @@
 export const FLAT_KEYS = [
   'base', 'sourceGlobs', 'testGlobs', 'reviewIgnore', 'commentMode', 'testCommand', 'testEnv',
   'reviewers', 'reviewMinChars', 'reviewSections', 'reviewKeyword', 'lockMaxAgeMinutes', 'reviewFlow', 'testGroups', 'maxReviewRounds', 'requiredChecks',
-  'externalExecutors', 'externalExclude', 'fullTests', 'ciRunner',
+  'externalExecutors', 'externalExclude', 'fullTests', 'ciRunner', 'ciFallback', 'ciOs', 'session', 'parallel',
 ];
 
 /**
@@ -44,6 +44,10 @@ export const DEFAULTS = {
   externalExclude: [],
   fullTests: 'local',
   ciRunner: null,
+  ciFallback: null,
+  ciOs: ['linux'],
+  session: null,
+  parallel: null,
 };
 
 /** 复审流程的合法取值：pre-push（推送前复审，推送核对只要求代码复审）或 pr（对 PR 最终提交做代码复审与一致性审：复审可以与 CI 并行开始；CI 全部通过后才登记、合并，经 merge.mjs 合并）。 */
@@ -55,6 +59,15 @@ export const REVIEW_FLOWS = ['pre-push', 'pr'];
  */
 export const FULL_TESTS = ['local', 'ci'];
 export const CI_RUNNERS = ['github-hosted', 'self-hosted', 'none'];
+
+/**
+ * 环境选项（modules.environment，装套件时按用户的实际情况选，用户不选时由 agent 按 tools/environment.mjs 的推荐原则给出）：
+ * ciOs 是 CI 跑在哪些系统上（默认只 linux：最快最便宜，Windows 按 2 倍、macOS 按 10 倍计费）；session 是开发和重复性工作更适合在本地会话（local）还是云端会话（cloud）做，
+ * 不写表示未声明，agent 按推荐原则选；parallel 是能并行的工作并行（parallel）还是串行（serial），不写同上。ciFallback 是主 CI 额度用完或不可用时改用的另一处（只能与 ciRunner 不同）。
+ */
+export const OS_NAMES = ['linux', 'windows', 'macos'];
+export const SESSIONS = ['local', 'cloud'];
+export const PARALLEL_MODES = ['parallel', 'serial'];
 
 /** 目录布局与巡检的缺省值（profile 的 layout、hygiene 段）。 */
 export const LAYOUT_DEFAULTS = {
@@ -115,6 +128,18 @@ function checkExecution(eff) {
   if (eff.ciRunner !== null && !CI_RUNNERS.includes(eff.ciRunner)) {
     throw new Error(`${where}.ciRunner 只能是 ${CI_RUNNERS.join('、')}，或不写表示未声明（当前 ${JSON.stringify(eff.ciRunner)}）`);
   }
+  if (eff.ciFallback !== null) {
+    if (!CI_RUNNERS.includes(eff.ciFallback) || eff.ciFallback === 'none') throw new Error(`${where}.ciFallback 只能是 github-hosted、self-hosted，或不写（当前 ${JSON.stringify(eff.ciFallback)}）`);
+    if (eff.ciRunner === null || eff.ciRunner === 'none' || eff.ciRunner === eff.ciFallback) {
+      throw new Error(`${where}.ciFallback 须在 ciRunner 已声明（不是 none）时才能写，且不能与 ciRunner 相同（ciRunner ${JSON.stringify(eff.ciRunner)}，ciFallback ${JSON.stringify(eff.ciFallback)}）`);
+    }
+  }
+  const env = 'engineering.config.json 的 modules.environment';
+  if (!Array.isArray(eff.ciOs) || eff.ciOs.length === 0 || !eff.ciOs.every((o) => OS_NAMES.includes(o)) || new Set(eff.ciOs).size !== eff.ciOs.length) {
+    throw new Error(`${env}.ciOs 必须是不重复的非空数组，取值只能是 ${OS_NAMES.join('、')}（当前 ${JSON.stringify(eff.ciOs)}）`);
+  }
+  if (eff.session !== null && !SESSIONS.includes(eff.session)) throw new Error(`${env}.session 只能是 ${SESSIONS.join(' 或 ')}，或不写（当前 ${JSON.stringify(eff.session)}）`);
+  if (eff.parallel !== null && !PARALLEL_MODES.includes(eff.parallel)) throw new Error(`${env}.parallel 只能是 ${PARALLEL_MODES.join(' 或 ')}，或不写（当前 ${JSON.stringify(eff.parallel)}）`);
   if (eff.fullTests === 'ci') {
     if (eff.reviewFlow !== 'pr') throw new Error(`${where}.fullTests 为 ci 须搭配 pr 流程（reviewFlow: "pr"）：只有 pr 流程的合并入口核对 CI 全部通过，pre-push 流程不核对 CI`);
     if (eff.ciRunner !== 'github-hosted' && eff.ciRunner !== 'self-hosted') {
@@ -174,6 +199,7 @@ function expand(raw) {
   const review = isObject(modules.review) ? modules.review : (modules.review === undefined ? {} : (() => { throw new Error('engineering.config.json 的 modules.review 必须是对象'); })());
   const layout = section(raw, 'layout');
   const hygiene = section(raw, 'hygiene');
+  const environment = isObject(modules.environment) ? modules.environment : (modules.environment === undefined ? {} : (() => { throw new Error('engineering.config.json 的 modules.environment 必须是对象'); })());
   const rules = section(raw, 'rules');
   const lay = { ...LAYOUT_DEFAULTS, ...layout };
   const hyg = { ...HYGIENE_DEFAULTS, ...hygiene };
@@ -187,6 +213,10 @@ function expand(raw) {
     requiredChecks: gate.requiredChecks ?? DEFAULTS.requiredChecks,
     fullTests: gate.fullTests ?? DEFAULTS.fullTests,
     ciRunner: gate.ciRunner ?? DEFAULTS.ciRunner,
+    ciFallback: gate.ciFallback ?? DEFAULTS.ciFallback,
+    ciOs: environment.ciOs ?? DEFAULTS.ciOs,
+    session: environment.session ?? DEFAULTS.session,
+    parallel: environment.parallel ?? DEFAULTS.parallel,
     reviewers: review.reviewers ?? DEFAULTS.reviewers,
     reviewMinChars: review.reviewMinChars ?? DEFAULTS.reviewMinChars,
     reviewSections: review.reviewSections ?? DEFAULTS.reviewSections,
@@ -212,6 +242,7 @@ export function toProfile(flat, { keepZeroMinChars = false } = {}) {
   const { sourceGlobs, testGlobs, stages, topLevelAllowed } = { ...f.layout, sourceGlobs: f.sourceGlobs, testGlobs: f.testGlobs };
   const gate = { base: f.base, testCommand: f.testCommand, testEnv: f.testEnv, lockMaxAgeMinutes: f.lockMaxAgeMinutes, reviewFlow: f.reviewFlow, fullTests: f.fullTests };
   if (f.ciRunner !== null) gate.ciRunner = f.ciRunner;
+  if (f.ciFallback !== null) gate.ciFallback = f.ciFallback;
   if (f.testGroups.length > 0) gate.testGroups = f.testGroups;
   if (f.requiredChecks.length > 0) gate.requiredChecks = f.requiredChecks;
   const review = { reviewers: f.reviewers, reviewSections: f.reviewSections, reviewKeyword: f.reviewKeyword, maxReviewRounds: f.maxReviewRounds };
@@ -219,11 +250,17 @@ export function toProfile(flat, { keepZeroMinChars = false } = {}) {
   if (f.reviewMinChars > 0 || (keepZeroMinChars && f.reviewMinChars === 0)) review.reviewMinChars = f.reviewMinChars;
   if (f.externalExecutors.length > 0) review.externalExecutors = f.externalExecutors;
   if (f.externalExclude.length > 0) review.externalExclude = f.externalExclude;
+  // 环境选项只在有非默认值时才写：迁移旧配置不凭空多出一段
+  const environment = {};
+  if (JSON.stringify(f.ciOs) !== JSON.stringify(DEFAULTS.ciOs)) environment.ciOs = f.ciOs;
+  if (f.session !== null) environment.session = f.session;
+  if (f.parallel !== null) environment.parallel = f.parallel;
   return {
     profile: 2,
     modules: {
       gate,
       review,
+      ...(Object.keys(environment).length > 0 ? { environment } : {}),
     },
     layout: { sourceGlobs, testGlobs, stages, topLevelAllowed },
     hygiene: { ...f.hygiene },

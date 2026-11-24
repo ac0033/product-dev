@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeConfig, toFlat, toProfile } from '../gate/config.mjs';
+import { CI_GATE_JOB, CI_WORKFLOW_REL, applyEnvironment, describeEnvironment, renderCiWorkflow } from './environment.mjs';
 import { applyPreset, scaffoldFiles } from './presets.mjs';
 
 /** 项目内套件目录（相对项目根）。 */
@@ -263,7 +264,7 @@ function configContent(existingRaw, templateRaw, wantFormat) {
  * 返回 { ops: [{ rel, abs, content, exec, action }], actions, conflicts, messages, newLock }。
  * 任何结构错误在这里抛出，所以到写入阶段时已确认整包可安装。
  */
-export function planBundle({ root, bundleRoot, bundle, force = false, hooks = true, preset = null, projectName = 'project' }) {
+export function planBundle({ root, bundleRoot, bundle, force = false, hooks = true, preset = null, projectName = 'project', env = null }) {
   const lock = readLock(root);
   const ops = [];
   const actions = [];
@@ -275,8 +276,29 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
   const templateCfgComp = bundle.components.find((c) => c.kind === 'config');
   const templateRaw = templateCfgComp ? JSON.parse(fs.readFileSync(path.join(bundleRoot, templateCfgComp.source), 'utf8')) : {};
   // 技术栈预设只在首次创建配置时生效（配置之后由项目维护）；脚手架文件只在不存在时创建。
-  const newCfgRaw = preset ? applyPreset(templateRaw, preset) : templateRaw;
+  let newCfgRaw = preset ? applyPreset(templateRaw, preset) : templateRaw;
   if (preset && cfgRaw) messages.push('engineering.config.json 已存在，--profile 只在首次创建时生效；技术栈设置请手动修改该文件');
+  // 环境选择（执行位置、CI 放哪、CI 系统、会话与并行偏好）同样只在首次创建配置时生效；选了 CI 就按选择生成工作流（已有同名文件不覆盖）。
+  if (env && cfgRaw) messages.push('engineering.config.json 已存在，环境选择只在首次创建时生效；执行位置请手动修改 modules.gate.fullTests、ciRunner 与 modules.environment（改判定策略须合入主干后才生效）');
+  if (env && !cfgRaw) {
+    const v = env.values;
+    let requiredChecks;
+    if (v.ciRunner && v.ciRunner !== 'none') {
+      const wfAbs = path.join(root, CI_WORKFLOW_REL);
+      if (fs.existsSync(wfAbs)) {
+        actions.push({ type: 'keep', file: CI_WORKFLOW_REL });
+        messages.push(`项目已有 ${CI_WORKFLOW_REL}，没有生成 CI 工作流；pr 流程的必需检查请按你的 CI 配置 modules.gate.requiredChecks（不写时 PR 上每一项检查都算必需）`);
+      } else {
+        const gate = (newCfgRaw.modules || {}).gate || {};
+        const content = renderCiWorkflow({ ciRunner: v.ciRunner, ciFallback: v.ciFallback ?? null, ciOs: v.ciOs || ['linux'], testCommand: gate.testCommand || 'npm test', reviewIgnore: (newCfgRaw.rules || {}).reviewIgnore || [] });
+        ops.push({ rel: CI_WORKFLOW_REL, abs: wfAbs, content, action: 'create' });
+        actions.push({ type: 'create', file: CI_WORKFLOW_REL });
+        if (v.reviewFlow === 'pr') requiredChecks = [CI_GATE_JOB];
+      }
+    }
+    newCfgRaw = applyEnvironment(newCfgRaw, v, { requiredChecks });
+    messages.push(['本项目的执行方式（可在 engineering.config.json 里改）：', ...describeEnvironment(v, env.facts).map((l) => `  ${l}`)].join('\n'));
+  }
   // 项目配置归项目所有，同步不改它；但新规则块和设计文档约定依赖新默认值，旧配置缺了要明确提示，不能让规则和闸门各说各话。
   if (cfgRaw) {
     const cur = normalizeConfig(cfgRaw);

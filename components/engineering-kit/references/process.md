@@ -47,7 +47,24 @@
 | | `ci` | 全量交给 CI：`gate.mjs` 只做静态检查（`--affected` 跑受影响分组、`--full` 在本机强制跑全量，都要显式加），不写测试记录；推送核对不要求本机测试记录，静态检查、未提交改动、推送引用照常核对；`merge.mjs` 合并前核对 CI 在最终提交上全部通过。须搭配 `reviewFlow: "pr"`（只有它核对 CI）和 `ciRunner`，不满足时配置报错 |
 | `ciRunner` | `github-hosted` / `self-hosted` / `none`（不写 = 未声明） | CI 放哪：GitHub 托管 runner / 用户服务器上的自托管 runner（同样是 GitHub Actions，只是 `runs-on` 不同）/ 没有 CI。`fullTests` 为 `ci` 时只能是前两者；为 `local` 时只是声明 |
 
-默认 `fullTests: local`，保持原行为，没有 CI 的项目照常可用。装套件、首次定流程或换环境时，agent 按“按环境组合怎么办”核对这两项与实际环境是否匹配；用户有多种可行选择时一次问完，推荐项放第一，答复写进配置（经 PR 合入主干）或决定记录，之后不再重复问。
+默认 `fullTests: local`，保持原行为，没有 CI 的项目照常可用。另有不影响闸门判定、供 agent 和工作流生成使用的环境选项（`modules.environment`，`ciFallback` 在 `modules.gate`）：
+
+| 选项 | 取值 | 含义 |
+|---|---|---|
+| `ciFallback` | `github-hosted` / `self-hosted` / 不写 | 主 CI 额度用完或不可用时改用的另一处（须与 `ciRunner` 不同）。生成的工作流用仓库变量 `CI_RUNNER` 切换，不用改工作流、不用提交 |
+| `ciOs` | `linux` / `windows` / `macos` 的列表，默认只 `linux` | CI 跑在哪些系统上：Linux 最快最便宜（Windows 按 2 倍、macOS 按 10 倍计费），产品要在别的系统运行时再加（更准确）。自托管 runner 只用于 Linux |
+| `session` | `local` / `cloud` / 不写 | 开发和重复性工作更适合本地会话还是云端会话；不写时 agent 按下面的推荐原则选 |
+| `parallel` | `parallel` / `serial` / 不写 | 能并行的并行还是串行；不写时同上 |
+
+#### 装套件时怎么选（先问清楚，用户没选再推荐）
+
+套件是公开分发的，每个用户的环境不同，所以首次安装前先问清楚、再装对应的版本：
+
+1. 运行 `node <kit>/tools/environment.mjs detect --target <项目> [--choice 键=值]…`，得到本机事实（系统、CPU、内存、有没有 GitHub 远程与 `gh`）和推荐（每项带理由、冲突）。
+2. 把要问的事一次问完，推荐项放第一：全量测试在 CI 还是本机跑；CI 放哪（GitHub 托管 / 自托管服务器，有没有自己的服务器、要不要后备）；CI 跑哪些系统（产品要在哪些系统上运行）；开发更适合本地会话还是云端会话；能并行的是否并行。用户已经说了想法的按用户的，不再问。
+3. 用户没选或不知道怎么选：agent 直接用推荐，并告诉用户每项选了什么、为什么，用户可随时改。推荐按两条原则：一是本机的实际情况（系统决定命令写法，CPU 和内存决定本机扛不扛得住全量测试与并行任务，有没有 GitHub 和服务器决定 CI 放哪）；二是更快、更便宜、更高效、更准确——能并行就并行，并行受资源限制时先想能不能放到云端会话或 CI，不行才串行；CI 只用 Linux，除非产品要在别的系统上运行；有 GitHub 就把全量交给 CI。
+4. 装：`node <kit>/sync.mjs --target <项目> --init --profile ts|python --env recommended [--choice 键=值]…`（`--env recommended` 把没选的项按推荐补全；只给 `--choice` 时只写给出的项）。首次创建配置时写入选择、按选择生成 `.github/workflows/ci.yml`（草稿 PR 不跑、只改免审文档跳过测试、汇总检查 `ci-gate` 仍成功；选了 pr 流程时它就是必需检查），并输出“本项目的执行方式”几行说明。已有配置的项目环境选择不生效，只提示，要改手动改配置；已有 `ci.yml` 不覆盖。
+5. 之后换环境（换机器、有了服务器、额度用完）时，按下面的表重新核对，改配置（判定策略字段须合入主干后才生效）。
 
 #### 每类工作在哪做
 
@@ -70,12 +87,13 @@
 |---|---|
 | 只有本机（本地或云端会话），`github-hosted` | 推送后 CI 在 GitHub 托管 runner 上跑。作业因额度用完启动不了时，agent 不自行改配置，列出可行做法让用户选：等额度或充值；临时改 `local` 在本机或云端会话跑全量 |
 | 只有本机，选了 `self-hosted` | 没有服务器，行不通：说明原因，改选 `github-hosted` 或 `local` |
-| 本机加服务器（本地或云端会话），`self-hosted` | CI 在服务器上跑。runner 离线时如实报告，让用户选：启动 runner；临时改回 `github-hosted`（改 workflow 的 `runs-on`）；临时改 `local` |
-| 本机加服务器，`github-hosted` 额度用完 | 让用户选：改 `self-hosted`（需先装好 runner）、等额度、临时改 `local` |
+| 本机加服务器（本地或云端会话），`self-hosted` | CI 在服务器上跑。runner 离线时如实报告，让用户选：启动 runner；切到后备 `github-hosted`（把仓库变量 `CI_RUNNER` 设成 `github-hosted`）；临时改 `local` |
+| 本机加服务器，`github-hosted` 额度用完 | 配了 `ciFallback: self-hosted` 的，把仓库变量 `CI_RUNNER` 设成 `self-hosted` 即可，不用改工作流（设仓库变量是对外部服务的改动，按 R2 先问用户）；没配的让用户选：装好 runner 后改 `self-hosted`、等额度、临时改 `local` |
 
 - 改 `fullTests` / `ciRunner` 是判定策略改动，先合入主干才生效；CI 不可用而卡住这个 PR 本身时，由用户合并。
 - “临时改 `local`”不降低标准：全量测试仍要在某个环境跑通并有记录，只是不由 CI 跑。
-- 本机和云端会话都能做的，按实际情况选；多种可行时问用户；只能本机做的，在汇报里写明为什么。
+- 本机和云端会话都能做的，按实际情况选；多种可行时问用户，用户不选时按上面的推荐原则（更快、更便宜、更高效、更准确）；只能本机做的，在汇报里写明为什么。
+- 操作系统决定命令写法：Windows 用 PowerShell 写法（路径含空格加引号），macOS、Linux 用 shell 写法；云端会话按沙箱的系统（通常是 Linux）。工作流里的 CI 系统由 `ciOs` 决定，与本机系统无关。
 
 ## 2. 需求与方案
 
