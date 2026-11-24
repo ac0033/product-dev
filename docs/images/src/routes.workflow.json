@@ -67,7 +67,7 @@
       "col": 0,
       "type": "frontend",
       "label": "新项目",
-      "sublabel": "设计段 → 配置闸门 → 交付段"
+      "sublabel": "设计段 → 配置闸门 → 方案确认"
     },
     {
       "id": "feature",

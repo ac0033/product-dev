@@ -69,7 +69,7 @@
       "col": 3,
       "type": "backend",
       "label": "首次安装",
-      "sublabel": "sync --env --choice 写配置并生成 CI 文件"
+      "sublabel": "按选择写配置，需要时生成 CI"
     },
     {
       "id": "tune",

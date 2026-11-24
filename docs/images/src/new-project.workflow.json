@@ -153,7 +153,7 @@
     {
       "from": "gate",
       "to": "plan",
-      "label": "用户确认",
+      "label": "汇总方案",
       "variant": "emphasis"
     }
   ]
