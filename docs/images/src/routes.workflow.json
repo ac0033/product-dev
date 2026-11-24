@@ -1,0 +1,155 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "分流：路线总览",
+    "output": "routes.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "visual_preset": "classic"
+  },
+  "lanes": [
+    {
+      "id": "entry",
+      "label": "入口"
+    },
+    {
+      "id": "full",
+      "label": "完整路线"
+    },
+    {
+      "id": "short",
+      "label": "缩短路线"
+    },
+    {
+      "id": "special",
+      "label": "修 bug"
+    },
+    {
+      "id": "ship",
+      "label": "交付"
+    }
+  ],
+  "mainPath": [
+    "restore",
+    "route",
+    "feature",
+    "delivery"
+  ],
+  "nodes": [
+    {
+      "id": "restore",
+      "lane": "entry",
+      "col": 0,
+      "type": "external",
+      "label": "恢复现场"
+    },
+    {
+      "id": "route",
+      "lane": "entry",
+      "col": 1,
+      "type": "backend",
+      "icon": "decision",
+      "label": "分流判断",
+      "sublabel": "拿不准按高一档"
+    },
+    {
+      "id": "kit",
+      "lane": "entry",
+      "col": 3,
+      "type": "backend",
+      "label": "装或升级工程套件",
+      "sublabel": "单独路线，不进交付段"
+    },
+    {
+      "id": "newproj",
+      "lane": "full",
+      "col": 0,
+      "type": "frontend",
+      "label": "新项目",
+      "sublabel": "设计段 → 配置闸门 → 交付段"
+    },
+    {
+      "id": "feature",
+      "lane": "full",
+      "col": 2,
+      "type": "backend",
+      "label": "加功能",
+      "sublabel": "契约 → 方案对比 → 选定"
+    },
+    {
+      "id": "short",
+      "lane": "short",
+      "col": 3,
+      "type": "backend",
+      "label": "小新增 / 小改动 / 只改文档",
+      "sublabel": "低风险、单模块、需求明确"
+    },
+    {
+      "id": "bug",
+      "lane": "special",
+      "col": 4,
+      "type": "backend",
+      "label": "修 bug",
+      "sublabel": "复现 → 根因 → 失败测试；需求缺口转加功能"
+    },
+    {
+      "id": "delivery",
+      "lane": "ship",
+      "col": 5,
+      "type": "security",
+      "label": "交付段",
+      "sublabel": "自查 → 闸门 → PR 与 CI → 复审 → 合并 → 验收与发布"
+    }
+  ],
+  "edges": [
+    {
+      "from": "restore",
+      "to": "route"
+    },
+    {
+      "from": "route",
+      "to": "kit",
+      "label": "装 / 升级 / 回滚"
+    },
+    {
+      "from": "route",
+      "to": "newproj",
+      "label": "还没有代码"
+    },
+    {
+      "from": "route",
+      "to": "feature",
+      "label": "新增或改变能力"
+    },
+    {
+      "from": "route",
+      "to": "short",
+      "label": "低风险"
+    },
+    {
+      "from": "route",
+      "to": "bug",
+      "label": "行为不符"
+    },
+    {
+      "from": "short",
+      "to": "feature",
+      "label": "升档",
+      "variant": "dashed",
+      "role": "return"
+    },
+    {
+      "from": "bug",
+      "to": "delivery"
+    },
+    {
+      "from": "short",
+      "to": "delivery"
+    },
+    {
+      "from": "feature",
+      "to": "delivery"
+    }
+  ]
+}
