@@ -2,6 +2,7 @@
 //   静态检查通过（测试先行、注释、断言）、测试记录通过、复审记录通过，且两份记录都对应当前代码树和当前基准提交（基线）。
 //   pre-push 流程的测试记录须是全量（gate.mjs 不带 --affected；没有 mode 字段的旧记录视为全量）；代码复审记录的结论为
 //   pass，或 accept（报告不通过、用户已知情并决定接受风险，输出写明“按用户决定接受风险放行”）。一致性审记录不要求。
+//   全量测试交给 CI（modules.gate.fullTests 为 ci，须搭配 pr 流程）时不要求本机测试记录：静态检查、未提交改动与推送引用照常核对，全量由 CI 在最终提交上跑、merge.mjs 核对。
 //   复审流程为 pr（modules.gate.reviewFlow）时不要求复审记录，测试记录接受按影响范围的（CI 会在最终提交上跑全量）：
 //   复审可以与 CI 并行开始；CI 全部通过后才针对 PR 最终提交登记、合并，由 merge.mjs 核对。
 // 闸门范围的口径见 lib.mjs 的 gateScope：本次改动中去掉文档的部分，判定文档用基准提交上配置的 reviewIgnore，
@@ -92,7 +93,9 @@ function verifyWith(root, config) {
   const hash = treeHash(root, scope);
 
   const tests = readRecord(root, 'tests.json');
-  if (!tests) problems.push('没有测试记录：先运行 node scripts/engineering/gate/gate.mjs');
+  if (config.fullTests === 'ci') {
+    // 全量测试交给 CI（fullTests=ci，须搭配 pr 流程）：不要求本机测试记录；静态检查、未提交改动照常核对，CI 由 merge.mjs 合并前核对
+  } else if (!tests) problems.push('没有测试记录：先运行 node scripts/engineering/gate/gate.mjs');
   else if (!tests.passed) problems.push('最近一次测试未通过（或运行期间代码变化）');
   else if (tests.base !== baseRev) problems.push('测试记录的基线已变化（基准提交与跑闸门时不同，例如合入了新主干），请重跑闸门');
   else if (tests.treeHash !== hash) problems.push('测试记录与当前代码不一致（代码已变化），请重跑闸门');

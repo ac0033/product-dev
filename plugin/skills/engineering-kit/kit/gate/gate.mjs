@@ -13,9 +13,12 @@
 // 结果复用：已有通过的记录且代码树、基线、测试配置摘要（testCommand、testEnv、testGroups）都一致、模式满足要求
 //   （要全量时须是全量记录）时不重跑，输出“沿用已有通过记录”；--force 强制重跑。最近一次运行说了算：同一代码树、基线、测试配置上
 //   刚有过未通过的运行（全量或分组）时不沿用任何记录，全量未通过时同一棵树的全量通过记录作废。静态检查两种模式、复用与否都照常做。
+// 执行位置（modules.gate.fullTests）：local（默认）如上；ci 时全量测试交给 CI，默认只做静态检查——不跑测试命令、不写测试记录，
+//   输出写明交给 CI（merge.mjs 合并前核对 CI 在最终提交上全部通过）；--affected 仍按上面的规则跑受影响的分组（本机快速自查），
+//   --full 或 --force 在本机跑全量并写记录（CI 暂不可用等应急）。fullTests 是判定策略字段，取基准提交上的值，分支自己改不生效。
 // 闸门范围的口径见 lib.mjs 的 gateScope；基准分支设置取默认主干上的配置，判定策略（reviewIgnore 等）取基准提交上的配置，
 // 工作区写的值与生效值不同时输出提示行。
-// 用法：node scripts/engineering/gate/gate.mjs [--affected] [--force]
+// 用法：node scripts/engineering/gate/gate.mjs [--affected] [--force] [--full]
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -164,7 +167,7 @@ function runCommands(root, config, commands) {
  * 运行闸门。返回 { ok, messages, record }。通过时 messages 先列静态检查，再列测试结果。
  * 静态检查未通过时直接返回，不运行测试，也不写测试记录。记录里的 base 是基准提交，verify 与 review 核对它。
  */
-function runChecks({ root, config, affected = false, force = false }) {
+function runChecks({ root, config, affected = false, force = false, full = false }) {
   const exempt = loadExempt(root);
   const release = acquireLock(root, config.lockMaxAgeMinutes);
   try {
@@ -188,6 +191,7 @@ function runChecks({ root, config, affected = false, force = false }) {
     }
     if (asserted.hints.length > 0) staticChecks.testCases = asserted.hints;
     const passLines = [...staticMessages(staticChecks, asserted.stats), ...hintLines];
+    if (full) affected = false;
     const digest = configDigest(config);
     const files = fileHashes(root, before.scope);
     const beforeHash = hashOfFiles(files);
@@ -203,6 +207,10 @@ function runChecks({ root, config, affected = false, force = false }) {
           messages: [`有代码文件但没有任何文件匹配 layout.sourceGlobs / testGlobs，测试不会运行：请检查 engineering.config.json 的 layout.sourceGlobs 与 testGlobs（例：${stray.slice(0, 3).join('、')}）`],
           record: null,
         };
+      }
+      // 全量交给 CI 且没有要求在本机跑：不写测试记录（文档承诺默认不写），合并看 CI
+      if (config.fullTests === 'ci' && !full && !affected && !force) {
+        return { ok: true, messages: [...passLines, '尚无源码与测试文件，未运行测试命令；全量测试交给 CI（modules.gate.fullTests=ci），本机不写测试记录'], record: null };
       }
       fs.mkdirSync(recordDir(root), { recursive: true });
       const noTestRecord = {
@@ -225,6 +233,16 @@ function runChecks({ root, config, affected = false, force = false }) {
       };
       writeRecord(root, 'tests.json', noTestRecord);
       return { ok: true, messages: [...passLines, '尚无源码与测试文件，未运行测试命令（写第一份源码时，测试先行检查会要求先写测试）'], record: noTestRecord };
+    }
+
+    // 全量测试交给 CI：只做静态检查（上面已通过，含源码/测试 glob 误配检查），不跑测试命令、不写测试记录；
+    // 要在本机跑，显式加 --affected（受影响的分组）、--full（全量）或 --force（重跑全量）
+    if (config.fullTests === 'ci' && !full && !affected && !force) {
+      return {
+        ok: true,
+        messages: [...passLines, `全量测试交给 CI（modules.gate.fullTests=ci，CI：${config.ciRunner}），本机未跑测试；CI 在最终提交上跑全量，merge.mjs 合并前核对。要在本机跑：--affected（受影响的分组）、--full 或 --force（全量）`],
+        record: null,
+      };
     }
 
     if (!force) {
@@ -302,16 +320,16 @@ function runChecks({ root, config, affected = false, force = false }) {
  * 运行闸门（配置只读一次）。affected 为 true 时按影响范围测试，force 为 true 时不沿用已有记录。
  * 工作区配置的 base 或判定策略字段与生效值不同时，在输出最前面加提示行（不算错误）。返回值同 runChecks。
  */
-export function runGate({ root, affected = false, force = false }) {
+export function runGate({ root, affected = false, force = false, full = false }) {
   const config = loadConfig(root);
-  const res = runChecks({ root, config, affected, force });
+  const res = runChecks({ root, config, affected, force, full });
   return config.notes.length > 0 ? { ...res, messages: [...config.notes, ...res.messages] } : res;
 }
 
 if (isMain(import.meta.url)) {
   try {
     const argv = process.argv.slice(2);
-    const res = runGate({ root: repoRoot(), affected: argv.includes('--affected'), force: argv.includes('--force') });
+    const res = runGate({ root: repoRoot(), affected: argv.includes('--affected'), force: argv.includes('--force'), full: argv.includes('--full') });
     for (const m of res.messages) console.log(m);
     process.exit(res.ok ? 0 : 1);
   } catch (e) {

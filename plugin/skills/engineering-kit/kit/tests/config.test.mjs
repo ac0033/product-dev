@@ -51,10 +51,12 @@ test('扁平 ⇄ profile 互转：字段不丢失', () => {
     requiredChecks: ['test (ubuntu-latest)', 'lint'],
     // 0.7.0 新增：外部复审允许的执行器与外发前追加排除
     externalExecutors: ['codex'], externalExclude: ['config/*.secrets.yaml'],
+    // 执行位置与环境选项：全量测试在哪跑、CI 放哪、CI 跑在哪些系统、会话与并行偏好
+    fullTests: 'ci', ciRunner: 'github-hosted', ciFallback: 'self-hosted', ciOs: ['linux', 'windows'], session: 'cloud', parallel: 'parallel',
   };
   const prof = toProfile(flat);
   assert.equal(prof.profile, 2);
-  assert.deepEqual(Object.keys(prof.modules).sort(), ['gate', 'review']);
+  assert.deepEqual(Object.keys(prof.modules).sort(), ['environment', 'gate', 'review'], '有非默认的环境选项时多一段 environment');
   const back = toFlat(prof);
   for (const k of FLAT_KEYS) assert.deepEqual(back[k], flat[k], `字段 ${k} 互转后不一致`);
 });

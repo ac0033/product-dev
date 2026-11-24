@@ -10,7 +10,7 @@ Product Dev 是独立项目。保持市场名 ac0033-skills、插件名 product-
 
 ## 验证、审查与合并
 
-运行 node --test evals/*.test.mjs。改工程套件时同时运行其自身测试。PR 的 Linux、Windows CI 成功后做独立代码复审与增量一致性审，将两份结论和最终 SHA 登记在 PR；高、中级问题修复后才能合并。合并入口为 GitHub PR merge API 或 gh pr merge，核对 expected head SHA，不绕过失败的检查。
+运行 node --test evals/*.test.mjs。改工程套件时同时运行其自身测试：本机只跑与改动相关的测试文件，套件全量测试交给 CI（本机全量要 589 秒，CI 的 Linux 上 25 秒）。草稿 PR 和只改 docs/ 下 Markdown 的 PR 不跑测试（推送到 main 与 release/** 照常全跑），草稿转为可审阅时才跑；只改 docs/ 下 Markdown 的 PR 没有 CI 结果可等，也不做代码复审（并入每周巡检），合并前确认本机 node --test evals/*.test.mjs 通过；含代码的 PR 在 Linux、Windows CI 成功后做独立代码复审与增量一致性审，将两份结论和最终 SHA 登记在 PR；高、中级问题修复后才能合并。合并入口为 GitHub PR merge API 或 gh pr merge，核对 expected head SHA，不绕过失败的检查。
 
 ## 发布
 
