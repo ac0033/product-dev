@@ -4,12 +4,13 @@
 // pre-push 与 pr 两种复审流程的环节不同；输入（函数参数、命令行）严格校验，不静默丢弃或改意思。
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { BUNDLE_ROOT } from '../sync.mjs';
 import { detectFacts, isConstrained } from '../tools/environment.mjs';
-import { STAGE_IDS, buildEnv, byPrinciples, decideStage, parseStageArgs, planFromArgs } from '../tools/stages.mjs';
-import { commitAll, git, tmpRepo, write } from './helpers.mjs';
+import { STAGE_IDS, buildEnv, byPrinciples, decideStage, parseStageArgs, planFromArgs, docRows } from '../tools/stages.mjs';
+import { commitAll, git, tmpDir, tmpRepo, write } from './helpers.mjs';
 
 const item = (stage, env, id) => decideStage(stage, env).items.find((i) => i.id === id);
 const ids = (stage, env) => decideStage(stage, env).items.map((i) => i.id);
@@ -71,12 +72,28 @@ test('环节表：全量测试按 fullTests 落地——ci 在 CI（托管或服
   assert.equal(item('B', { ...PR, ciRunner: 'self-hosted' }, 'ci-full-tests').where, 'server', '不知道有没有服务器时按项目选项');
 });
 
+test('来源如实标注：对具体工作的指定是 user，项目选项（可能是装套件时按推荐写入的）是 config，不冒充用户指定', () => {
+  const env = { fullTests: 'local', reviewFlow: 'pre-push', session: 'cloud' };
+  assert.equal(item('A', env, 'full-tests-local').source, 'config');
+  assert.match(item('A', env, 'full-tests-local').reason, /项目选项 session=cloud/);
+  assert.equal(item('A', { ...env, userChoices: { 'full-tests-local': 'cloud-session' } }, 'full-tests-local').source, 'user');
+});
+
+test('关键理由文字被锁住：pre-push 合并要等 CI 全部通过、记录只证明推送前；全量测试的 CI_RUNNER 说明', () => {
+  const merge = item('C', { reviewFlow: 'pre-push' }, 'merge');
+  assert.match(merge.reason, /CI 全部通过/, '不是只等必需检查');
+  assert.match(merge.reason, /推送前/);
+  assert.match(merge.reason, /用户授权/);
+  assert.match(item('C', PR, 'merge-entry').reason, /用户授权/);
+  assert.match(item('B', PR, 'review-register').reason, /不跨副本/);
+});
+
 test('决定顺序一：用户的选择最优先；指定了做不到的转问用户，理由写对', () => {
   const base = { fullTests: 'local', reviewFlow: 'pre-push', tight: true };
   const byConfig = item('A', { ...base, session: 'local' }, 'full-tests-local');
-  assert.deepEqual([byConfig.where, byConfig.source], ['local-session', 'user']);
+  assert.deepEqual([byConfig.where, byConfig.source], ['local-session', 'config']);
   const cloud = item('A', { ...base, session: 'cloud' }, 'full-tests-local');
-  assert.deepEqual([cloud.where, cloud.source], ['cloud-session', 'user']);
+  assert.deepEqual([cloud.where, cloud.source], ['cloud-session', 'config']);
   const specific = item('A', { ...base, session: 'cloud', userChoices: { 'full-tests-local': 'local-session' } }, 'full-tests-local');
   assert.deepEqual([specific.where, specific.source], ['local-session', 'user']);
   const noServer = item('W', { hasServer: false, userChoices: { 'weekly-inspection': 'server' } }, 'weekly-inspection');
@@ -127,6 +144,8 @@ test('输入校验：取值不对就报错，不静默当成别的意思；undef
     assert.throws(() => decideStage('A', bad), /环境取值不成立|必须是/, JSON.stringify(bad));
   }
   assert.doesNotThrow(() => decideStage('A', { ...PR, ciRunner: 'self-hosted', ciFallback: 'github-hosted' }));
+  // null 不是“没给”：fullTests、reviewFlow 必须有值，传 null 明确拒绝，不静默漏排工作
+  for (const k of ['fullTests', 'reviewFlow']) assert.throws(() => decideStage('A', { [k]: null }), /不能是 null/, k);
   // undefined 不覆盖默认值（命令行没有配置文件时传来的就是 undefined）
   assert.deepEqual(ids('A', { fullTests: undefined, reviewFlow: undefined, ciRunner: undefined }), ['static', 'affected', 'full-tests-local', 'independent-reviews', 'review-record']);
   // 对具体工作的指定：必须是该环节里可选的工作、取值必须是三个去处之一
@@ -181,7 +200,7 @@ test('命令行：项目配置的各字段正确映射（reviewFlow、fullTests�
   assert.ok(parsed.items.some((i) => i.id === 'review-register'), 'reviewFlow=pr 映射');
   // session=cloud 映射成用户的选择；hasServer、tight 解析
   const w = JSON.parse(run('--stage', 'W', '--target', root, '--choice', 'tight=false', '--choice', 'hasServer=true').stdout);
-  assert.deepEqual([w.items[0].where, w.items[0].source], ['cloud-session', 'user']);
+  assert.deepEqual([w.items[0].where, w.items[0].source], ['cloud-session', 'config']);
   // 没有配置文件：按默认值（pre-push、全量在本机），资源紧张由 --choice tight 指定
   const empty = tmpRepo();
   const a = JSON.parse(run('--stage', 'A', '--target', empty, '--choice', 'tight=true').stdout);
@@ -207,6 +226,56 @@ test('planFromArgs：没给 tight 时用探测到的本机事实（可注入）�
   commitAll(bad, 'base');
   const planned = planFromArgs(['--stage', 'A', '--target', bad, '--choice', 'tight=false']);
   assert.match(planned.configSource, /^working-tree.*无法取得基准提交上的判定策略/, planned.configSource);
+  assert.match(planned.configSource, /no-such-branch/, '把 loadConfig 带回的具体原因写进来');
+});
+
+test('配置来源：基准上还没有配置时如实说是工作区值；基准上的配置是坏 JSON 时报真实错误，不压成“读不到基准”', () => {
+  // 首次安装：基准提交里没有 engineering.config.json，工作区才有
+  const first = tmpRepo();
+  write(first, 'README.md', '# x\n');
+  commitAll(first, 'base');
+  git(first, ['checkout', '-q', '-b', 'feat']);
+  write(first, 'engineering.config.json', cfg({}));
+  const planned = planFromArgs(['--stage', 'A', '--target', first, '--choice', 'tight=false']);
+  assert.match(planned.configSource, /^effective/);
+  assert.match(planned.configSource, /基准上还没有配置时就是工作区值/);
+  // 基准上的配置不是合法 JSON：真实错误原样报出
+  const broken = tmpRepo();
+  write(broken, 'engineering.config.json', '{ not json');
+  commitAll(broken, 'base');
+  git(broken, ['checkout', '-q', '-b', 'feat']);
+  write(broken, 'engineering.config.json', cfg({}));
+  assert.throws(() => planFromArgs(['--stage', 'A', '--target', broken, '--choice', 'tight=false']), /JSON|合法/);
+  // 不是 git 仓库的目录：取工作区文件并标注
+  const plain = tmpDir('stages-plain-');
+  write(plain, 'engineering.config.json', cfg({}));
+  assert.match(planFromArgs(['--stage', 'A', '--target', plain, '--choice', 'tight=false']).configSource, /^working-tree/);
+});
+
+test('命令行真实运行：没给 tight 时按本机探测，结果与同一台机器的判定一致', () => {
+  const root = tmpRepo();
+  write(root, 'engineering.config.json', cfg({}));
+  const out = run('--stage', 'A', '--target', root);
+  assert.equal(out.status, 0, out.stderr);
+  const full = JSON.parse(out.stdout).items.find((i) => i.id === 'full-tests-local');
+  // 本机紧张时（4 核或 8 GB 以内）本机慢、云端花钱，要问；否则本机
+  assert.equal(full.source, isConstrained(detectFacts(root)) ? 'ask' : 'principle');
+});
+
+test('文档与代码对齐：process.md 的环节表里，每个环节的每项工作都有一行，工作名、去处关键词、谁定三栏与代码一致', () => {
+  const doc = fs.readFileSync(path.join(BUNDLE_ROOT, 'references', 'process.md'), 'utf8');
+  const rows = docRows();
+  assert.ok(rows.length >= 11, '环节表的行数');
+  for (const r of rows) {
+    const line = doc.split('\n').find((l) => l.startsWith(`| ${r.stage} ${r.stageName} | ${r.doc} |`));
+    assert.ok(line, `process.md 环节表缺这一行：${r.stage} ${r.stageName} | ${r.doc}`);
+    const cells = line.split('|').map((c) => c.trim());
+    assert.ok(cells[3].includes(r.docWhere), `「${r.doc}」的去处栏应含「${r.docWhere}」：${cells[3]}`);
+    assert.equal(cells[4], r.who, `「${r.doc}」的谁定栏应是「${r.who}」`);
+  }
+  // 反过来：文档表里的环节行不能比代码多（多了说明代码里删了工作而文档没改）
+  const docRowsInDoc = doc.split('\n').filter((l) => /^\| [ABCW] (推送前|PR 阶段|合并与收尾|每周巡检) \|/.test(l));
+  assert.equal(docRowsInDoc.length, new Set(rows.map((r) => `${r.stage}|${r.doc}`)).size, '文档里的行数与代码里的工作行数相同');
 });
 
 test('planFromArgs：基准提交上的策略与工作区的非策略字段拼出不成立的组合时报错，不输出前后矛盾的计划', () => {

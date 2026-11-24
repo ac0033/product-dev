@@ -47,7 +47,7 @@ node "<kit>/sync.mjs" --target "<项目>"             # 执行
 | 项目（project） | engineering.config.json、豁免表、docs 索引、阶段目录、模板 | 只在首次创建；配置格式不同时只做格式迁移，取值保留 |
 | 共享（shared） | .claude/settings.json | 只追加本套件的钩子 |
 
-装之前先问清楚环境（0.7.1 之后）：公开分发的套件按用户的实际情况装对应的版本。先运行 `node "<kit>/tools/environment.mjs" detect --target "<项目>"` 看本机事实与推荐，把全量测试在 CI 还是本机跑、CI 放哪、CI 系统、本地还是云端会话、是否并行一次问完（推荐项放第一）；用户没选或不知道怎么选就按推荐，并告诉用户选了什么、为什么——告知后这个值就是用户接受的选择（`session` 等写进配置后，环节表把它当作用户的选择），用户随时可以改。推荐原则是本机实际情况加“更快、更便宜、更高效、更准确”，细则见 `references/process.md` 第 1 节“装套件时怎么选”。装好后每个环节（A 推送前、B PR 阶段、C 合并与收尾、W 每周巡检）里的工作在哪做，用 `node "<kit>/tools/stages.mjs" --stage A|B|C|W --target "<项目>"` 看：用户的选择优先，没选时按两条原则自动判断，多种可行且原则指向不同时问用户（见 `references/process.md` 的“每个环节的工作在哪做”）。然后首次安装时带上选择：
+装之前先问清楚环境（0.7.1 之后）：公开分发的套件按用户的实际情况装对应的版本。先运行 `node "<kit>/tools/environment.mjs" detect --target "<项目>"` 看本机事实与推荐，把全量测试在 CI 还是本机跑、CI 放哪、CI 系统、本地还是云端会话、是否并行一次问完（推荐项放第一）；用户没选或不知道怎么选就按推荐，并告诉用户选了什么、为什么——写进配置后环节表把它当作项目选项（来源标 `config`，不冒充用户对具体工作的指定），用户随时可以改。推荐原则是本机实际情况加“更快、更便宜、更高效、更准确”，细则见 `references/process.md` 第 1 节“装套件时怎么选”。装好后每个环节（A 推送前、B PR 阶段、C 合并与收尾、W 每周巡检）里的工作在哪做，用 `node "<kit>/tools/stages.mjs" --stage A|B|C|W --target "<项目>"` 看：用户的选择优先，没选时按两条原则自动判断，多种可行且原则指向不同时问用户（见 `references/process.md` 的“每个环节的工作在哪做”）。然后首次安装时带上选择：
 
 ```bash
 node "<kit>/sync.mjs" --target "<项目>" --init --profile ts --env recommended --choice fullTests=ci --choice hasServer=true

@@ -14,7 +14,8 @@
 | 环节 | 工作 | 在哪做 | 谁定 |
 |---|---|---|---|
 | D 发布（第 2 步，合并前） | 运行 `build-plugin.mjs` 和 `evals`（生成与相关测试） | 当前会话本机跑（AGENTS.md：本机只跑与改动相关的测试，生成物要提交） | 项目规则（AGENTS.md） |
-| D 发布（第 2 步，合并前） | 跨平台全量测试、双审 | PR 的 CI（Linux、Windows）；独立复审按 B 环节 | 项目规则（AGENTS.md） |
+| D 发布（第 2 步，合并前） | 跨平台全量测试 | PR 的 CI（Linux、Windows） | 项目规则（AGENTS.md） |
+| D 发布（第 2 步，合并前） | 独立代码复审与增量一致性审 | Linux、Windows CI 都成功后才做（本仓库 AGENTS.md 的规则，比套件通用规则的“可与 CI 并行”更严），执行位置按 B 环节：宿主子代理、或配了外部执行器（如 Codex）的那台机器 | 项目规则（AGENTS.md） |
 | D 发布（第 3 步） | 在合并提交上创建标签 | 当前会话，需要用户授权 | 用户授权 |
 | D 发布（第 4 步） | 在标签对应的提交上打包并核对 SHA256SUMS | 标签推送后 `release-artifacts` 工作流在 CI（Linux）上跑 `evals`、打包，并把 zip、tgz 和 `SHA256SUMS.txt` 作为产物上传；当前会话本机再按第 4 步运行 `package-release.mjs` 并核对哈希，发布用的是核对过的那一份 | 当前做法固定；改做法另开 PR |
 | D 发布（第 5–6 步的对外部分） | 发布 npm、创建 GitHub Release、同步 ac0033/skills 市场清单 | 当前会话，需要用户授权；每一步都是对外动作，不并行抢跑 | 用户授权 |
