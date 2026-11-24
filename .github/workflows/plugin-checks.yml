@@ -1,7 +1,13 @@
 name: Plugin checks
 
+# 降低 CI 频率：草稿 PR 不跑（转为可审阅时跑）；只改 docs/ 的 PR 跳过；同一 PR 的新提交取消上一次未完成的运行。
+# 推送到 main、release/** 不设跳过条件，每次合并后全量再跑一次兜底。仓库当前没有必需检查（无分支保护、无 ruleset），
+# 所以被跳过的运行不会拦住合并；日后开分支保护时，改成“汇总 job”再设必需检查，否则 paths-ignore 会让必需检查一直 pending。
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - 'docs/**'
   push:
     branches:
       - main
@@ -10,9 +16,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: plugin-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: Plugin tests (${{ matrix.os }})
+    if: github.event.pull_request.draft != true
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

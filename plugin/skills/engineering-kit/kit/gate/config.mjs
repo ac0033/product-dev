@@ -1,11 +1,11 @@
 // 项目配置（engineering.config.json）的 profile 结构与展开。业务含义：
 //   项目配置是唯一由项目自己维护的文件，结构分四段，便于升级时只改动套件认可的字段：
-//     modules  —— 模块参数：gate（基准分支、测试命令、环境变量、测试分组 testGroups、锁时长、复审流程 reviewFlow、必需检查 requiredChecks）、
+//     modules  —— 模块参数：gate（基准分支、测试命令、环境变量、测试分组 testGroups、锁时长、复审流程 reviewFlow、必需检查 requiredChecks、执行位置 fullTests 与 ciRunner）、
 //                 review（复审者名单、报告必需的节 reviewSections、可选的最少字数 reviewMinChars、结论关键词、复审轮次上限 maxReviewRounds、允许的外部复审执行器 externalExecutors、外发前追加排除 externalExclude）
 //     layout   —— 目录布局：源文件与测试的 glob、阶段目录、允许的顶层目录
 //     hygiene  —— 巡检参数：禁用文件名片段、草稿超期天数、记录类目录、合法状态值
 //     rules    —— 规则：不计入闸门的文档（reviewIgnore；项目配置、豁免表、套件脚本除外，永远计入）、注释检查模式（commentMode）
-//   这里只做结构展开与取值校验。闸门运行时 base 与判定策略字段（reviewIgnore、reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewSections、reviewKeyword、maxReviewRounds、externalExecutors、externalExclude）
+//   这里只做结构展开与取值校验。闸门运行时 base 与判定策略字段（reviewIgnore、reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewSections、reviewKeyword、maxReviewRounds、externalExecutors、externalExclude、fullTests、ciRunner）
 //   的生效值不取工作区，而取主干或基准提交上的配置，见 lib.mjs 的 loadConfig。
 //   闸门内部只使用“扁平”字段（FLAT_KEYS），由 normalizeConfig 展开；旧版扁平配置仍可读取，便于回滚。
 // 同步器通过 toProfile / toFlat 在两种结构之间转换，保证回滚到旧版本时配置格式也随之回退。
@@ -14,7 +14,7 @@
 export const FLAT_KEYS = [
   'base', 'sourceGlobs', 'testGlobs', 'reviewIgnore', 'commentMode', 'testCommand', 'testEnv',
   'reviewers', 'reviewMinChars', 'reviewSections', 'reviewKeyword', 'lockMaxAgeMinutes', 'reviewFlow', 'testGroups', 'maxReviewRounds', 'requiredChecks',
-  'externalExecutors', 'externalExclude',
+  'externalExecutors', 'externalExclude', 'fullTests', 'ciRunner',
 ];
 
 /**
@@ -42,10 +42,19 @@ export const DEFAULTS = {
   requiredChecks: [],
   externalExecutors: [],
   externalExclude: [],
+  fullTests: 'local',
+  ciRunner: null,
 };
 
 /** 复审流程的合法取值：pre-push（推送前复审，推送核对只要求代码复审）或 pr（对 PR 最终提交做代码复审与一致性审：复审可以与 CI 并行开始；CI 全部通过后才登记、合并，经 merge.mjs 合并）。 */
 export const REVIEW_FLOWS = ['pre-push', 'pr'];
+
+/**
+ * 执行位置（modules.gate.fullTests、ciRunner）的合法取值。fullTests：全量测试由谁跑——local（闸门在当前会话所在环境跑，默认）或 ci（交给 CI，闸门只做静态检查）；
+ * ciRunner：CI 放哪——github-hosted（GitHub 托管 runner）、self-hosted（用户服务器上的自托管 runner，同样是 GitHub Actions）、none（没有 CI）；不写表示未声明。
+ */
+export const FULL_TESTS = ['local', 'ci'];
+export const CI_RUNNERS = ['github-hosted', 'self-hosted', 'none'];
 
 /** 目录布局与巡检的缺省值（profile 的 layout、hygiene 段）。 */
 export const LAYOUT_DEFAULTS = {
@@ -83,6 +92,7 @@ export function normalizeConfig(raw) {
   if (!Number.isInteger(eff.maxReviewRounds) || eff.maxReviewRounds < 1) {
     throw new Error(`engineering.config.json 的 modules.review.maxReviewRounds 必须是正整数（当前 ${JSON.stringify(eff.maxReviewRounds)}）`);
   }
+  checkExecution(eff);
   checkTestGroups(eff.testGroups);
   checkRequiredChecks(eff.requiredChecks);
   if (!Array.isArray(eff.reviewSections) || !eff.reviewSections.every((x) => typeof x === 'string' && x.trim() && x === x.trim() && !x.includes(String.fromCharCode(10))) || new Set(eff.reviewSections).size !== eff.reviewSections.length) {
@@ -93,6 +103,24 @@ export function normalizeConfig(raw) {
     if (!Array.isArray(v) || !v.every((x) => typeof x === 'string' && x.trim())) throw new Error(`engineering.config.json 的 modules.review.${k} 必须是非空字符串数组`);
   }
   return eff;
+}
+
+/**
+ * 校验执行位置：fullTests、ciRunner 的取值；fullTests 为 ci 时须是 pr 流程（只有 pr 流程的合并入口核对 CI 在最终提交上全部通过，
+ * pre-push 流程不核对 CI，配成 ci 等于全量测试没有强制执行点），且 ciRunner 已声明为 github-hosted 或 self-hosted。不满足时报错，不静默降级。
+ */
+function checkExecution(eff) {
+  const where = 'engineering.config.json 的 modules.gate';
+  if (!FULL_TESTS.includes(eff.fullTests)) throw new Error(`${where}.fullTests 只能是 ${FULL_TESTS.join(' 或 ')}（当前 ${JSON.stringify(eff.fullTests)}）`);
+  if (eff.ciRunner !== null && !CI_RUNNERS.includes(eff.ciRunner)) {
+    throw new Error(`${where}.ciRunner 只能是 ${CI_RUNNERS.join('、')}，或不写表示未声明（当前 ${JSON.stringify(eff.ciRunner)}）`);
+  }
+  if (eff.fullTests === 'ci') {
+    if (eff.reviewFlow !== 'pr') throw new Error(`${where}.fullTests 为 ci 须搭配 pr 流程（reviewFlow: "pr"）：只有 pr 流程的合并入口核对 CI 全部通过，pre-push 流程不核对 CI`);
+    if (eff.ciRunner !== 'github-hosted' && eff.ciRunner !== 'self-hosted') {
+      throw new Error(`${where}.fullTests 为 ci 须声明 ciRunner 为 github-hosted 或 self-hosted（当前 ${JSON.stringify(eff.ciRunner)}）`);
+    }
+  }
 }
 
 /**
@@ -157,6 +185,8 @@ function expand(raw) {
     reviewFlow: gate.reviewFlow ?? DEFAULTS.reviewFlow,
     testGroups: gate.testGroups ?? DEFAULTS.testGroups,
     requiredChecks: gate.requiredChecks ?? DEFAULTS.requiredChecks,
+    fullTests: gate.fullTests ?? DEFAULTS.fullTests,
+    ciRunner: gate.ciRunner ?? DEFAULTS.ciRunner,
     reviewers: review.reviewers ?? DEFAULTS.reviewers,
     reviewMinChars: review.reviewMinChars ?? DEFAULTS.reviewMinChars,
     reviewSections: review.reviewSections ?? DEFAULTS.reviewSections,
@@ -180,7 +210,8 @@ function expand(raw) {
 export function toProfile(flat, { keepZeroMinChars = false } = {}) {
   const f = normalizeConfig(flat);
   const { sourceGlobs, testGlobs, stages, topLevelAllowed } = { ...f.layout, sourceGlobs: f.sourceGlobs, testGlobs: f.testGlobs };
-  const gate = { base: f.base, testCommand: f.testCommand, testEnv: f.testEnv, lockMaxAgeMinutes: f.lockMaxAgeMinutes, reviewFlow: f.reviewFlow };
+  const gate = { base: f.base, testCommand: f.testCommand, testEnv: f.testEnv, lockMaxAgeMinutes: f.lockMaxAgeMinutes, reviewFlow: f.reviewFlow, fullTests: f.fullTests };
+  if (f.ciRunner !== null) gate.ciRunner = f.ciRunner;
   if (f.testGroups.length > 0) gate.testGroups = f.testGroups;
   if (f.requiredChecks.length > 0) gate.requiredChecks = f.requiredChecks;
   const review = { reviewers: f.reviewers, reviewSections: f.reviewSections, reviewKeyword: f.reviewKeyword, maxReviewRounds: f.maxReviewRounds };
