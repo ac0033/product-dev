@@ -86,7 +86,8 @@ function configAt(root, rev, label) {
  *                  （首次安装）时用工作区的值。
  * 主干或基准提交上的配置读不出、不合法时抛错。基准分支解析不了时不在这里抛错（巡检、编辑钩子仍要能用）：
  * 判定策略保持工作区的值并记下 policyError，判定入口（gate、verify、review、merge）调用 assertPolicy 拒绝运行。
- * 返回的配置另带：worktree（工作区里这些字段的原值）、notes（工作区值与生效值不同时的提示行，不算错误）、policyError。
+ * 返回的配置另带：worktree（工作区里这些字段的原值）、notes（工作区值与生效值不同时的提示行，不算错误）、policyError、
+ * baseRev（判定时用的基准提交号；解析不了时为 null，首次提交前是空树）——调用方要引用基准提交时用它，不要自己再解析一次。
  */
 export function loadConfig(root) {
   const file = path.join(root, CONFIG_FILE);
@@ -125,7 +126,7 @@ export function loadConfig(root) {
       notes.push(`提示：工作区配置的 ${differ.join('、')} 与基准提交 ${rev.slice(0, 12)} 上的不同，闸门按基准上的值判定；这些改动合入主干后才生效`);
     }
   }
-  return { ...config, ...policy, base, worktree, notes, policyError };
+  return { ...config, ...policy, base, worktree, notes, policyError, baseRev: rev };
 }
 
 /** 判定入口（gate、verify、review、merge）调用：判定策略没能从基准提交取得（基准分支解析不了）时抛错，不按工作区的值放行。 */

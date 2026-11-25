@@ -100,7 +100,7 @@ export function detectFacts(root, override = {}, run = spawnSync) {
 }
 
 /** 本机资源紧张：CPU 不超过 4 核或内存不超过 8 GB（全量测试和并行任务在本机会明显卡）。 */
-const isConstrained = (facts) => facts.cpus <= 4 || facts.memGB <= 8;
+export const isConstrained = (facts) => facts.cpus <= 4 || facts.memGB <= 8;
 
 /**
  * 推荐：返回 { values, reasons, sources, conflicts }。choices 里用户给出的项一律优先（sources 记 user），没给的按原则推荐（recommended）。
@@ -225,8 +225,8 @@ export function describeEnvironment(values, facts) {
   lines.push(values.session === 'cloud'
     ? '会话：开发和重复性工作优先放云端会话（不占本机资源；启动云端会话有费用，开工前先问用户）'
     : values.session === 'local'
-      ? '会话：优先本地会话（不额外花钱）；本机装不下的重复性工作再问用户要不要放云端'
-      : '会话：未声明，agent 按“更快、更便宜、更高效、更准确”和本机实际情况选，有多种可行时问用户');
+      ? '会话：优先本地会话（不额外花钱）；本机装不下的工作按环节表的三步再定，原则指向不同时问用户要不要放云端'
+      : '会话：未声明，agent 按“更快、更便宜、更高效、更准确”和本机实际情况选，有多种可行且原则指向不同时问用户（环节表见 process.md）');
   lines.push(values.parallel === 'serial'
     ? '并行：串行（本机资源受限）；能放云端会话或 CI 的部分可以并行'
     : values.parallel === 'parallel'
