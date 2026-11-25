@@ -222,18 +222,42 @@ export function describeEnvironment(values, facts) {
     ? `全量测试：交给 CI（${values.ciRunner}${values.ciFallback ? `，后备 ${values.ciFallback}` : ''}）。闸门只做静态检查，推送后 CI 在最终提交上跑，pr 流程的合并入口核对通过；本机不跑全量`
     : '全量测试：在会话所在环境（本地会话在本机，云端会话在云端沙箱）由闸门跑，写测试记录');
   lines.push(`CI 系统：${(values.ciOs || DEFAULTS.ciOs).join('、')}${values.ciFallback === 'self-hosted' || values.ciRunner === 'self-hosted' ? '；自托管 runner 只用于 Linux，切换用仓库变量 CI_RUNNER，不用改工作流' : ''}`);
-  lines.push(values.session === 'cloud'
-    ? '会话：开发和重复性工作优先放云端会话（不占本机资源；启动云端会话有费用，开工前先问用户）'
-    : values.session === 'local'
-      ? '会话：优先本地会话（不额外花钱）；本机装不下的工作按环节表的三步再定，原则指向不同时问用户要不要放云端'
-      : '会话：未声明，agent 按“更快、更便宜、更高效、更准确”和本机实际情况选，有多种可行且原则指向不同时问用户（环节表见 process.md）');
-  lines.push(values.parallel === 'serial'
-    ? '并行：串行（本机资源受限）；能放云端会话或 CI 的部分可以并行'
-    : values.parallel === 'parallel'
-      ? '并行：能并行的并行；资源受限时先想放云端，不行才串行'
-      : '并行：未声明，agent 默认能并行就并行，资源受限时放云端或串行');
+  lines.push(`会话：${SESSION_TEXT[values.session ?? 'none']}`);
+  lines.push(`并行：${PARALLEL_TEXT[values.parallel ?? 'none']}`);
   return lines;
 }
+
+/** session、parallel 每个取值对应的一句话：装完时的说明（describeEnvironment）和写进规则块的偏好（renderEnvironmentSection）共用，不各写一份。 */
+const SESSION_TEXT = {
+  cloud: '开发和重复性工作优先放云端会话（不占本机资源；启动云端会话有费用，开工前先问用户）',
+  local: '优先本地会话（不额外花钱）；本机装不下的工作按环节表的三步再定，原则指向不同时问用户要不要放云端',
+  none: '未声明，agent 按“更快、更便宜、更高效、更准确”和本机实际情况选，有多种可行且原则指向不同时问用户（环节表见 process.md）',
+};
+const PARALLEL_TEXT = {
+  serial: '串行（本机资源受限）；能放云端会话或 CI 的部分可以并行',
+  parallel: '能并行的并行；资源受限时先想放云端，不行才串行',
+  none: '未声明，agent 默认能并行就并行，资源受限时放云端或串行',
+};
+
+/**
+ * 写进项目 AGENTS.md 规则块的“执行偏好”一节（同步时按项目配置生成，agent 每次开工都读到）。
+ * 只是默认偏好：不改变流程步骤与标准；具体任务仍按条件判断，用户当次的选择优先。取值不合法时报错，不渲染。
+ */
+export function renderEnvironmentSection({ session = null, parallel = null } = {}) {
+  if (session !== null && !SESSIONS.includes(session)) throw new Error(`session 只能是 ${SESSIONS.join(' 或 ')} 或不写（当前 ${JSON.stringify(session)}）`);
+  if (parallel !== null && !PARALLEL_MODES.includes(parallel)) throw new Error(`parallel 只能是 ${PARALLEL_MODES.join(' 或 ')} 或不写（当前 ${JSON.stringify(parallel)}）`);
+  return [
+    ENV_SECTION_HEADING,
+    '',
+    `- 会话（\`session\`）：${SESSION_TEXT[session ?? 'none']}`,
+    `- 并行（\`parallel\`）：${PARALLEL_TEXT[parallel ?? 'none']}`,
+    '',
+    '以上是默认偏好，不改变流程步骤与标准；具体任务仍按条件（代码是否已推送、是否依赖本机的东西、资源是否受限）和 process.md“每个环节的工作在哪做”的三步判断，用户当次的选择优先；云端会话有费用，授权按 R2。',
+  ].join('\n');
+}
+
+/** 渲染段的标题行：检查工具靠它区分“配置变了、块没跟上”和“块被手改”。 */
+export const ENV_SECTION_HEADING = '### 本项目的执行偏好（按 engineering.config.json 的 `modules.environment` 渲染，同步时更新；要改值先改配置再同步）';
 
 /** 复制并按选定的取值改写 profile 配置（不改入参）。requiredChecks 只在给出时写入。 */
 export function applyEnvironment(profile, values, { requiredChecks = values.requiredChecks } = {}) {

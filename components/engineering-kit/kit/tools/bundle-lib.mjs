@@ -11,8 +11,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeConfig, toFlat, toProfile } from '../gate/config.mjs';
-import { CI_GATE_JOB, CI_WORKFLOW_REL, applyEnvironment, describeEnvironment, renderCiWorkflow } from './environment.mjs';
+import { PARALLEL_MODES, SESSIONS, normalizeConfig, toFlat, toProfile } from '../gate/config.mjs';
+import { CI_GATE_JOB, CI_WORKFLOW_REL, applyEnvironment, describeEnvironment, renderCiWorkflow, renderEnvironmentSection } from './environment.mjs';
 import { applyPreset, scaffoldFiles } from './presets.mjs';
 
 /** 项目内套件目录（相对项目根）。 */
@@ -22,6 +22,26 @@ export const LOCK_REL = `${TARGET_DIR}/kit.lock.json`;
 /** pre-push 钩子里的标记，用来识别这是本套件安装的钩子。 */
 export const HOOK_MARK = 'engineering-kit:pre-push';
 const OWNERS = new Set(['kit', 'block', 'project', 'shared']);
+const RENDERS = new Set(['environment']);
+
+/** 块内容是不是“规则正文 + 某一种合法取值渲染出的执行偏好段”：是，说明只是配置与块里的渲染不一致；否则是块被手改。 */
+function isRenderedVariant(body, head) {
+  for (const session of [null, ...SESSIONS]) {
+    for (const parallel of [null, ...PARALLEL_MODES]) {
+      if (body === `${head}\n\n${renderEnvironmentSection({ session, parallel })}`) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 规则块要写入的正文：规则源文件，加上清单要求的渲染段（comp.render 为 environment 时，按项目配置渲染 session、parallel）。
+ * cfg 是已规范化的项目配置（没有项目配置时用模板配置）；没有 render 的组件（含旧版清单）原样返回源文件。
+ */
+function ruleBody(comp, srcText, cfg) {
+  if (comp.render !== 'environment') return srcText;
+  return `${srcText.trim()}\n\n${renderEnvironmentSection({ session: cfg.session, parallel: cfg.parallel })}`;
+}
 const KINDS = new Set(['gate', 'hooks', 'git-hook', 'claude-settings', 'rules', 'config', 'project-file', 'docs', 'docs-stages']);
 const END_MARK = '<!-- engineering-kit:end -->';
 
@@ -146,6 +166,8 @@ export function validateBundle(b, bundleRoot) {
     ids.add(c.id);
     if (!KINDS.has(c.kind)) errs.push(`${c.id}：未知 kind ${c.kind}`);
     if (!OWNERS.has(c.owner)) errs.push(`${c.id}：未知 owner ${c.owner}`);
+    // render：规则块正文之后按项目配置追加的渲染段，目前只有 environment（session、parallel 的执行偏好），只用于规则块
+    if (c.render !== undefined && (c.kind !== 'rules' || !RENDERS.has(c.render))) errs.push(`${c.id}：render 只能是 ${[...RENDERS].join('、')}，且只用于规则块（kind 为 rules）`);
     if (!c.target || path.isAbsolute(c.target) || c.target.split(/[\\/]/).includes('..')) errs.push(`${c.id}：target 必须是项目内相对路径`);
     if (!c.source) {
       if (c.kind !== 'claude-settings') errs.push(`${c.id}：缺少 source`);
@@ -344,6 +366,8 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
     }
   }
 
+  // 规则块里渲染的执行偏好取自项目配置：已有配置就用它（项目所有，同步不改），首次安装用本次要写的新配置
+  const renderCfg = normalizeConfig(cfgRaw ?? newCfgRaw);
   for (const comp of bundle.components) {
     if ((comp.kind === 'claude-settings' || comp.kind === 'git-hook') && !hooks) continue;
 
@@ -408,7 +432,7 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
           actions.push({ type: 'skip', file: rel });
           continue;
         }
-        const next = applyBlock(cur === null ? '' : cur.toString('utf8'), bundle.bundleVersion, srcBuf.toString('utf8'));
+        const next = applyBlock(cur === null ? '' : cur.toString('utf8'), bundle.bundleVersion, ruleBody(comp, srcBuf.toString('utf8'), renderCfg));
         newLock.blocks[rel] = bundle.bundleVersion;
         if (cur !== null && next === cur.toString('utf8')) actions.push({ type: 'skip', file: rel });
         else {
@@ -583,6 +607,9 @@ export function checkBundle({ root, bundleRoot }) {
   const items = [];
   const push = (component, file, state, detail) => items.push({ component, file, state, ...(detail ? { detail } : {}) });
   const hookFile = gitHookPath(root);
+  // 规则块里渲染的执行偏好取自项目配置；项目还没有配置时按模板配置（与同步时一致）
+  const projectCfgAbs = path.join(root, 'engineering.config.json');
+  const renderCfg = normalizeConfig(fs.existsSync(projectCfgAbs) ? JSON.parse(fs.readFileSync(projectCfgAbs, 'utf8')) : loadTemplateConfig(bundleRoot, bundle));
 
   for (const comp of bundle.components) {
     if (comp.kind === 'docs-stages') {
@@ -623,11 +650,16 @@ export function checkBundle({ root, bundleRoot }) {
           continue;
         }
         const found = findBlock(fs.readFileSync(abs, 'utf8'));
-        const want = fs.readFileSync(srcAbs, 'utf8').trim();
+        const srcText = fs.readFileSync(srcAbs, 'utf8');
+        const want = ruleBody(comp, srcText, renderCfg).trim().replace(/\r\n/g, '\n');
         if (!found) push(comp.id, rel, 'missing-block');
         else if (found.version !== bundle.bundleVersion) push(comp.id, rel, 'outdated', `v${found.version} -> v${bundle.bundleVersion}`);
-        else if (found.body !== want) push(comp.id, rel, 'modified');
-        else push(comp.id, rel, 'ok');
+        else if (found.body !== want) {
+          // 规则正文没动、只有渲染的执行偏好与配置不一致：配置改了块没跟上，重新同步即可；其余都是块被改动
+          const head = srcText.trim().replace(/\r\n/g, '\n');
+          if (comp.render === 'environment' && isRenderedVariant(found.body, head)) push(comp.id, rel, 'outdated', '配置里的 session/parallel 与块里渲染的不一致，重新同步即可');
+          else push(comp.id, rel, 'modified');
+        } else push(comp.id, rel, 'ok');
         continue;
       }
       if (comp.kind === 'config') {
