@@ -24,6 +24,7 @@ import {
   parseCodex,
   changedParts,
   configFingerprint,
+  registerReport,
   registerRun,
   renderReport,
   repoState,
@@ -829,6 +830,36 @@ test('缺口 1 accept：外部复审判不通过时，register --accept 带用�
   assert.match(done.message, /用户决定接受风险/);
 });
 
+test('补登 accept 的拒绝路径（registerReport 直接调用）：判定不是 fail、缺少用户决定、最终提交已变化（pr 与 pre-push 两种流程）都不登记', async () => {
+  const { root, head } = repo();
+  const res = await run(root, head, 'fail');
+  const base = { root, headSha: head, kind: 'code', reviewer: 'external:fake', reportPath: res.reportPath, summary: 's', accept: true };
+  // 判定不是 fail：pass 与不可登记都拒绝
+  for (const verdict of ['pass', 'unregistrable']) {
+    const r = registerReport({ ...base, verdict, pr: '7', gh: fakeGh([head]), userDecision: '用户接受（测试）' });
+    assert.equal(r.ok, false, verdict);
+    assert.match(r.message, /accept 只对判定为不通过/);
+  }
+  // 缺少用户决定
+  for (const userDecision of [undefined, '', ' \n ']) {
+    const r = registerReport({ ...base, verdict: 'fail', pr: '7', gh: fakeGh([head]), userDecision });
+    assert.equal(r.ok, false);
+    assert.match(r.message, /--user-decision/);
+  }
+  // pr 流程：PR 最终提交已变化
+  const moved = registerReport({ ...base, verdict: 'fail', pr: '7', gh: fakeGh(['d'.repeat(40)]), userDecision: '用户接受（测试）' });
+  assert.equal(moved.ok, false);
+  assert.match(moved.message, /PR 最终提交已变为 dddddddddddd/);
+  // pre-push 流程：本地 HEAD 不是被审提交，或工作区有未提交的改动
+  const other = registerReport({ ...base, headSha: 'e'.repeat(40), verdict: 'fail', userDecision: '用户接受（测试）' });
+  assert.equal(other.ok, false);
+  assert.match(other.message, /须本地 HEAD 是被审提交 eeeeeeeeeeee/);
+  write(root, 'scratch.txt', 'x');
+  const dirty = registerReport({ ...base, verdict: 'fail', userDecision: '用户接受（测试）' });
+  assert.equal(dirty.ok, false);
+  assert.match(dirty.message, /有未提交的改动/);
+});
+
 test('缺口 1 accept：防伪约束不变——review.mjs 命令行仍拒绝 external: 名字的 accept，并提示改走 external-review.mjs register --accept', async () => {
   const { root, head } = repo();
   const res = await run(root, head, 'fail');
@@ -927,6 +958,32 @@ test('缺口 2 configFingerprint：branch.* 不入指纹、其余键入；文件
   assert.match(broken, /^raw:/);
   fs.appendFileSync(file, '[branch "zz"]\n');
   assert.notEqual(configFingerprint(root, file), broken);
+});
+
+test('configFingerprint：当前分支的 branch.<名>.remote / merge 入指纹，改推送或上游目标即算变化；写同样的值、改别的分支不算', () => {
+  const { root } = repo();
+  const dir = tmpDir('ekit-cfg-cur-');
+  const file = path.join(dir, 'config');
+  const head = '[core]\n\tbare = false\n[remote "origin"]\n\turl = https://example.invalid/x.git\n[remote "fork"]\n\turl = https://example.invalid/fork.git\n';
+  const cur = (remote, merge) => `[branch "feat.x"]\n\tremote = ${remote}\n\tmerge = ${merge}\n`;
+  fs.writeFileSync(file, head + cur('origin', 'refs/heads/feat.x'));
+  const base = configFingerprint(root, file, 'feat.x');
+  fs.writeFileSync(file, head + cur('origin', 'refs/heads/feat.x'));
+  assert.equal(configFingerprint(root, file, 'feat.x'), base, '写入同样的值不算');
+  fs.appendFileSync(file, '[branch "other"]\n\tremote = fork\n\tmerge = refs/heads/other\n');
+  assert.equal(configFingerprint(root, file, 'feat.x'), base, '别的分支的上游跟踪项不算');
+  for (const [remote, merge] of [['fork', 'refs/heads/feat.x'], ['origin', 'refs/heads/main'], ['.', 'refs/heads/feat.x']]) {
+    fs.writeFileSync(file, head + cur(remote, merge));
+    assert.notEqual(configFingerprint(root, file, 'feat.x'), base, `${remote} ${merge}`);
+  }
+  fs.writeFileSync(file, head);
+  assert.notEqual(configFingerprint(root, file, 'feat.x'), base, '删掉当前分支的上游也算');
+  // 不传分支名时取 root 当前检出的分支
+  const branch = spawnSync('git', ['-C', root, 'symbolic-ref', '--short', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  fs.writeFileSync(file, head);
+  const b0 = configFingerprint(root, file);
+  fs.appendFileSync(file, `[branch "${branch}"]\n\tremote = origin\n\tmerge = refs/heads/${branch}\n`);
+  assert.notEqual(configFingerprint(root, file), b0);
 });
 
 test('缺口 2 复审期间：别的会话写 branch.* 不作废复审；写 alias、钩子仍作废，原因写明是哪一项', async () => {

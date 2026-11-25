@@ -2,6 +2,7 @@
 // 业务含义：误拦会让 agent 无法正常工作，漏拦会绕过推送闸门，两者都要测。
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -272,7 +273,10 @@ test('旧判定兜底：结果不比 main 的判定松，唯一例外是没有�
 // ───────────── LearnMap 试点缺口 3：推送钩子按命令实际推送的工作树核对 ─────────────
 
 test('pushDirs：git -C、先行的 cd / Set-Location 给出推送所在目录，相对路径逐级叠加；没有显式目录时就是会话目录', () => {
-  const cwd = path.resolve('/sess/feat');
+  // git -C 按文件系统解析，目录要真实存在
+  const root = fs.realpathSync.native(tmpDir('ekit-pushdirs-'));
+  for (const d of ['sess/feat/a/b', 'sess/wt/sub', 'sess/abs']) fs.mkdirSync(path.join(root, d), { recursive: true });
+  const cwd = path.join(root, 'sess', 'feat');
   const at = (...p) => path.resolve(cwd, ...p);
   assert.deepEqual(pushDirs('git push origin x', cwd), [cwd]);
   assert.deepEqual(pushDirs('git -C ../wt push origin x', cwd), [at('../wt')]);
@@ -295,6 +299,25 @@ test('pushDirs：git -C、先行的 cd / Set-Location 给出推送所在目录�
   assert.deepEqual(pushDirs('cd ../a && git push && git push', cwd), [at('../a')]);
   // 只输出文本的命令里的 cd 不是 cd
   assert.deepEqual(pushDirs('echo cd ../wt; git push', cwd), [cwd]);
+  // git -C 的目录不存在：git 自己会失败，退回会话目录
+  assert.deepEqual(pushDirs('git -C ../nosuch push', cwd), [cwd]);
+});
+
+test('pushDirs：git -C 经过符号链接时按文件系统解析 ..（与 git 的 chdir 一致），不按字符串折叠', (t) => {
+  const root = fs.realpathSync.native(tmpDir('ekit-pushdirs-link-'));
+  fs.mkdirSync(path.join(root, 'real', 'inner'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'sess'), { recursive: true });
+  try {
+    fs.symlinkSync(path.join(root, 'real', 'inner'), path.join(root, 'sess', 'link'), process.platform === 'win32' ? 'junction' : 'dir');
+  } catch {
+    t.skip('本机不能建目录符号链接');
+    return;
+  }
+  const cwd = path.join(root, 'sess');
+  // POSIX 上 link/.. 是 real（符号链接目标的上级）；Windows 的路径解析本身按字符串折叠 ..，与 git 一致即可
+  const expected = process.platform === 'win32' ? cwd : path.join(root, 'real');
+  assert.deepEqual(pushDirs('git -C link/.. push', cwd), [expected]);
+  assert.deepEqual(pushDirs('git -C link push', cwd), [path.join(root, 'real', 'inner')]);
 });
 
 test('pushDirs：目录说不准时退回会话目录（与改动前一样严）——变量、~、命令替换、cd -、||、管道、后台、子 shell、--git-dir', () => {

@@ -8,8 +8,10 @@ import { test } from 'node:test';
 import { DEFAULTS, normalizeConfig, toFlat, toProfile } from '../gate/config.mjs';
 import { runGate } from '../gate/gate.mjs';
 import { POLICY_KEYS, loadConfig, readRecord } from '../gate/lib.mjs';
+import { mergePr } from '../gate/merge.mjs';
+import { recordReview } from '../gate/review.mjs';
 import { verify } from '../gate/verify.mjs';
-import { commitAll, featureRepo, git, SRC_HEADER, TEST_CONFIG, tmpRepo, write } from './helpers.mjs';
+import { commitAll, featureRepo, git, reportFile, SRC_HEADER, TEST_CONFIG, tmpRepo, write } from './helpers.mjs';
 
 /** ci 模式的合法配置片段。 */
 const CI = { reviewFlow: 'pr', fullTests: 'ci', ciRunner: 'github-hosted', requiredChecks: ['test'] };
@@ -197,4 +199,44 @@ test('闸门：ci 模式加 force 也在本机重跑全量；默认的静态检�
   const res = runGate({ root: bad });
   assert.equal(res.ok, false, res.messages.join('\n'));
   assert.match(res.messages.join('\n'), /sourceGlobs|没有任何文件匹配/);
+});
+
+test('合并入口：ci 模式本机没有测试记录，最终提交上缺少必需的全量检查或它没成功时不能合并；齐了才合并', () => {
+  const root = featureRepo(CI);
+  changeDedup(root);
+  assert.equal(runGate({ root }).ok, true);
+  assert.equal(readRecord(root, 'tests.json'), null, 'ci 模式本机不写测试记录');
+  const head = git(root, ['rev-parse', 'HEAD']).trim();
+  const report = reportFile('范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n已逐条核对 PR 的最终提交，dedup 函数与测试用例的边界条件（空数组、重复项）均有覆盖。\n处置：无需处理。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n结论\n通过\n');
+  const view = (checks) => ({ state: 'OPEN', headRefOid: head, statusCheckRollup: checks, files: [{ path: 'src/dedup.ts', additions: 1, deletions: 0 }, { path: 'test/dedup.test.ts', additions: 1, deletions: 0 }] });
+  const gh = (v) => {
+    const calls = [];
+    const f = (args) => {
+      calls.push(args);
+      return args[1] === 'view' ? { status: 0, stdout: JSON.stringify(v), stderr: '' } : { status: 0, stdout: '', stderr: '' };
+    };
+    f.calls = calls;
+    return f;
+  };
+  const full = { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' };
+  const lint = { __typename: 'CheckRun', name: 'lint', status: 'COMPLETED', conclusion: 'SUCCESS' };
+  for (const kind of ['code', 'consistency']) {
+    const r = recordReview({ root, verdict: 'pass', pr: '7', kind, gh: gh(view([full, lint])), reviewer: 'feature-dev:code-reviewer', reportPath: report, summary: 's' });
+    assert.equal(r.ok, true, r.message);
+  }
+  for (const [checks, why] of [
+    [[lint], /必需检查没有出现在 PR 上：test/],
+    [[{ ...full, conclusion: 'SKIPPED' }, lint], /必需检查没有成功：test/],
+    [[{ ...full, conclusion: 'FAILURE' }, lint], /CI 检查未通过：test/],
+  ]) {
+    const g = gh(view(checks));
+    const res = mergePr({ root, pr: '7', gh: g });
+    assert.equal(res.ok, false, JSON.stringify(checks));
+    assert.match(JSON.stringify(res.problems), why);
+    assert.equal(g.calls.some((a) => a[1] === 'merge'), false, '不得调用合并');
+  }
+  const ok = gh(view([full, lint]));
+  const res = mergePr({ root, pr: '7', gh: ok });
+  assert.equal(res.ok, true, JSON.stringify(res.problems));
+  assert.ok(ok.calls.some((a) => a[1] === 'merge'));
 });

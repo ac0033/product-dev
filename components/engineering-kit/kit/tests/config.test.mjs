@@ -134,3 +134,20 @@ test('N4 显式写了 reviewMinChars: 0 的项目：回滚到扁平格式保留�
   assert.equal(toFlat(toProfile(normalizeConfig(flat), { keepZeroMinChars: true })).reviewMinChars, 0, '来回一圈不变');
   assert.equal(toProfile(normalizeConfig(flat)).modules.review.reviewMinChars, undefined, '不带标记时 0 仍视为默认，不写');
 });
+
+test('显式 null 不静默回退默认值：fullTests、ciOs 等默认非 null 的键写 null 报错；默认就是 null 的键写 null 等于不写', () => {
+  assert.throws(() => normalizeConfig({ profile: 2, modules: { gate: { fullTests: null } } }), /modules\.gate\.fullTests 不能是 null/);
+  assert.throws(() => normalizeConfig({ profile: 2, modules: { environment: { ciOs: null } } }), /modules\.environment\.ciOs 不能是 null/);
+  assert.throws(() => normalizeConfig({ profile: 2, modules: { gate: { reviewFlow: null } } }), /reviewFlow 不能是 null/);
+  assert.throws(() => normalizeConfig({ profile: 2, rules: { reviewIgnore: null } }), /rules\.reviewIgnore 不能是 null/);
+  // 显式的非法值同样报错（不回退）
+  assert.throws(() => normalizeConfig({ profile: 2, modules: { gate: { fullTests: 'cloud' } } }), /fullTests 只能是/);
+  assert.throws(() => normalizeConfig({ profile: 2, modules: { environment: { ciOs: [] } } }), /ciOs 必须是/);
+  // 旧版扁平结构里的 null 也由取值校验拦下
+  assert.throws(() => normalizeConfig({ base: 'main', fullTests: null }), /fullTests 只能是/);
+  assert.throws(() => normalizeConfig({ base: 'main', ciOs: null }), /ciOs 必须是/);
+  const eff = normalizeConfig({ profile: 2, modules: { gate: { ciRunner: null, ciFallback: null }, environment: { session: null, parallel: null } } });
+  assert.equal(eff.ciRunner, null);
+  assert.equal(eff.fullTests, DEFAULTS.fullTests);
+  assert.deepEqual(eff.ciOs, DEFAULTS.ciOs);
+});

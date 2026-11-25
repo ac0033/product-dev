@@ -533,8 +533,9 @@ export function pushDirs(command, cwd, dialects = DIALECTS) {
         let dir = cur;
         let ok = known && !subst && !push.redirected;
         for (const c of ok ? push.dirs : []) {
-          if (UNRESOLVABLE_DIR.test(c)) ok = false;
-          else dir = path.resolve(dir, c);
+          const next = UNRESOLVABLE_DIR.test(c) ? null : gitChdir(dir, c);
+          if (next === null) ok = false;
+          else dir = next;
         }
         found.add(ok ? dir : cwd);
       }
@@ -546,6 +547,21 @@ export function pushDirs(command, cwd, dialects = DIALECTS) {
     }
   }
   return found.size > 0 ? [...found] : [cwd];
+}
+
+/**
+ * git -C <c> 实际进入的目录：git 用 chdir，按文件系统解析（先进符号链接、再走 ..），不能像 path.resolve 那样按字符串折叠 ..。
+ * 先取 from 的真实路径，再把 c 原样拼上交给 realpath；目录不存在（git 自己也会报错）时返回 null，调用方退回会话目录。
+ */
+function gitChdir(from, c) {
+  try {
+    const base = fs.realpathSync.native(from);
+    const joined = path.isAbsolute(c) ? c : `${base}${path.sep}${c}`;
+    const real = fs.realpathSync.native(joined);
+    return fs.statSync(real).isDirectory() ? real : null;
+  } catch {
+    return null;
+  }
 }
 
 /** 目录所在仓库的 git 公共目录（真实路径）；目录不存在或不在仓库里返回 null。同一仓库的各个工作树公共目录相同。 */
