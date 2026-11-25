@@ -9,7 +9,7 @@
     { "id": "version", "kind": "gate", "owner": "kit", "source": "kit/VERSION", "target": "scripts/engineering/VERSION" },
     { "id": "git-pre-push", "kind": "git-hook", "owner": "kit", "source": "kit/hooks/pre-push.sh", "target": ".git/hooks/pre-push" },
     { "id": "claude-hooks", "kind": "claude-settings", "owner": "shared", "target": ".claude/settings.json" },
-    { "id": "rules-agents", "kind": "rules", "owner": "block", "source": "kit/rules/AGENTS.block.md", "target": "AGENTS.md", "createIfMissing": true },
+    { "id": "rules-agents", "kind": "rules", "owner": "block", "source": "kit/rules/AGENTS.block.md", "target": "AGENTS.md", "createIfMissing": true, "render": "environment" },
     { "id": "rules-claude", "kind": "rules", "owner": "block", "source": "kit/rules/CLAUDE.block.md", "target": "CLAUDE.md", "createIfMissing": false },
     { "id": "config", "kind": "config", "owner": "project", "source": "kit/templates/engineering.config.json", "target": "engineering.config.json" },
     { "id": "gitattributes", "kind": "project-file", "owner": "project", "source": "kit/templates/gitattributes", "target": ".gitattributes" },
