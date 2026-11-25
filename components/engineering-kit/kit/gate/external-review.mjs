@@ -6,7 +6,7 @@
 //     记下输入 SHA 与输入哈希。执行器只拿到环境变量允许清单（ENV_ALLOW）里的变量。
 //   - 硬超时，超时或取消时结束整个进程树；原始输出、任务、结果全部落盘到仓库之外。
 //   - 返回后核对：副本和仓库工作区没有被改动、PR 最终提交（或本地 HEAD）没有变化；变了就作废，原因写明是 HEAD、工作区状态、钩子目录还是配置。
-//     共用的 .git/config 里上游跟踪项（branch.<名>.merge / description，以及指向已配置远端名的 branch.<名>.remote）的变化不算
+//     共用的 .git/config 里别的分支的上游跟踪项（branch.<名>.merge / description，以及指向已配置远端名的 branch.<名>.remote）的变化不算，当前分支的 remote、merge 照算
 //     （本机别的会话 push -u 会写它们，见 configFingerprint），其余配置键（含 branch.*.pushRemote、指向地址的 remote）与钩子目录照旧核对。
 //   - 退出码 0、JSON 合法、发现为空都不单独算通过；结论由代码按 verdict 与发现定出并渲染成 review.mjs 认可的报告，
 //     模型写的文字只放在引用块里（行首加“｜”，闸门不会把它认成结论行）；未完成或失败时不生成可登记的报告。
@@ -346,17 +346,21 @@ export function dirHash(dir) {
  * 配置项（`键\n值`）是不是别的会话做 git push -u、git branch --set-upstream-to 时会写的上游跟踪项，且不会改变推送去向：
  *   branch.<名>.merge：值是 refs/ 开头的引用名；branch.<名>.description：任意文字；
  *   branch.<名>.remote：值是 "."（本地分支做上游），或是同一份配置里已有 remote.<值>.url 的远端名（不是 URL、路径）。
+ * 只容忍别的分支的这些项：当前分支（currentBranch）的 remote、merge 一律入指纹，改了它的推送或上游目标即作废复审。
  * 其余 branch.* 键（pushRemote、rebase、mergeOptions 等）和不合这些条件的值（remote 写成 URL）都不容忍：
  * branch.<名>.pushRemote、remote 可以直接写成地址，git push、pull 会去那里。
  */
-function isTrackingEntry(entry, remotesWithUrl) {
+function isTrackingEntry(entry, remotesWithUrl, currentBranch) {
   const nl = entry.indexOf('\n');
   const key = nl < 0 ? entry : entry.slice(0, nl);
   const value = nl < 0 ? '' : entry.slice(nl + 1);
-  const m = /^branch\..+\.([^.]+)$/i.exec(key);
+  const m = /^branch\.(.+)\.([^.]+)$/i.exec(key);
   if (!m) return false;
-  const name = m[1].toLowerCase();
+  const name = m[2].toLowerCase();
   if (name === 'description') return true;
+  // 复审的分支（当前分支）的 remote、merge 决定它的有效远端和上游引用：一律入指纹，
+  // 写入同样的值指纹不变（容忍），改成别的值、新增或删除都算变化。
+  if (currentBranch && m[1] === currentBranch) return false;
   if (name === 'merge') return value.startsWith('refs/');
   if (name === 'remote') return value === '.' || remotesWithUrl.has(value);
   return false;
@@ -369,17 +373,32 @@ function isTrackingEntry(entry, remotesWithUrl) {
  * branch.*.pushRemote 与指向地址的 branch.*.remote 等）照旧取指纹。
  * 文件解析不了（git config 报错）时退回整文件哈希（偏严：这时连上游跟踪项的写入也算变化）。
  */
-export function configFingerprint(root, file) {
+export function configFingerprint(root, file, currentBranch = currentBranchOf(root)) {
   if (!fs.existsSync(file)) return '-';
   const r = git(root, ['config', '--file', file, '--list', '-z']);
   if (!r.ok) return `raw:${sha256(fs.readFileSync(file))}`;
   const entries = r.out.split('\0').filter(Boolean);
   const remotesWithUrl = new Set(entries.map((e) => /^remote\.(.+)\.url\n/i.exec(e)?.[1]).filter(Boolean));
-  return `keys:${sha256(entries.filter((e) => !isTrackingEntry(e, remotesWithUrl)).join('\0'))}`;
+  return `keys:${sha256(entries.filter((e) => !isTrackingEntry(e, remotesWithUrl, currentBranch)).join('\0'))}`;
+}
+
+/** root 当前检出的分支名（refs/heads/ 之后的部分）；分离 HEAD 时为空串。 */
+function currentBranchOf(root) {
+  return git(root, ['symbolic-ref', '--quiet', 'HEAD']).out.trim().replace(/^refs\/heads\//, '');
 }
 
 /** repoState 的分项名（顺序即报告里的顺序）与中文说明。 */
-const STATE_PARTS = { head: 'HEAD', status: '工作区状态', hooks: 'git 钩子目录', config: 'git 配置' };
+const STATE_PARTS = { head: 'HEAD', status: '工作区状态', hooks: 'git 钩子目录', config: 'git 配置', tracking: '当前分支生效的远端与上游' };
+
+/**
+ * 当前分支生效的推送、拉取去向：用 git 实际生效的配置视图（含 config.worktree、include、全局配置）读 branch.<名>.remote / merge / pushRemote
+ * 与 remote.pushDefault、push.default。configFingerprint 只读共享的 .git/config 一个文件，看不到工作树配置和 include 里的覆盖，这里补上。
+ */
+export function trackingFingerprint(root, branch = currentBranchOf(root)) {
+  const keys = ['remote.pushDefault', 'push.default'];
+  if (branch) keys.push(...['remote', 'merge', 'pushRemote'].map((k) => `branch.${branch}.${k}`));
+  return sha256(keys.map((k) => `${k}=${git(root, ['config', '--get-all', k]).out}`).join('\0'));
+}
 
 /**
  * 仓库状态的指纹：HEAD、git status（含未跟踪文件），以及 git 钩子目录和 git 配置的内容（配置见 configFingerprint，上游跟踪项除外）。
@@ -391,7 +410,7 @@ export function repoState(root) {
   const status = gitOk(root, ['status', '--porcelain=v1', '-z', '-uall'], '读取工作区状态');
   const gitPath = (p) => path.resolve(root, git(root, ['rev-parse', '--git-path', p]).out.trim());
   const hooks = gitPath('hooks');
-  const parts = { head, status: sha256(status), hooks: fs.existsSync(hooks) ? dirHash(hooks) : '-', config: configFingerprint(root, gitPath('config')) };
+  const parts = { head, status: sha256(status), hooks: fs.existsSync(hooks) ? dirHash(hooks) : '-', config: configFingerprint(root, gitPath('config')), tracking: trackingFingerprint(root) };
   return { head, clean: status === '', hash: sha256(Object.values(parts).join('\0')), parts };
 }
 

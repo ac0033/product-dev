@@ -105,6 +105,7 @@ export function normalizeConfig(raw) {
   if (!Number.isInteger(eff.maxReviewRounds) || eff.maxReviewRounds < 1) {
     throw new Error(`engineering.config.json 的 modules.review.maxReviewRounds 必须是正整数（当前 ${JSON.stringify(eff.maxReviewRounds)}）`);
   }
+  checkTypes(eff);
   checkExecution(eff);
   checkTestGroups(eff.testGroups);
   checkRequiredChecks(eff.requiredChecks);
@@ -116,6 +117,29 @@ export function normalizeConfig(raw) {
     if (!Array.isArray(v) || !v.every((x) => typeof x === 'string' && x.trim())) throw new Error(`engineering.config.json 的 modules.review.${k} 必须是非空字符串数组`);
   }
   return eff;
+}
+
+/** 注释检查模式的合法取值。 */
+export const COMMENT_MODES = ['header', 'header+exports'];
+
+/**
+ * 校验其余字段的类型（新旧两种结构展开后共用）：写错的类型会让某项检查静默失效（如 reviewMinChars 写成字符串，最少字数检查就不执行），
+ * 所以一律报错，不回退默认值。允许 null 的只有 ciRunner、ciFallback、session、parallel（表示未声明，见 checkExecution）。
+ */
+function checkTypes(eff) {
+  const at = (k) => `engineering.config.json 的 ${k}`;
+  const nonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
+  if (!nonEmpty(eff.base)) throw new Error(`${at('modules.gate.base')} 必须是非空字符串（当前 ${JSON.stringify(eff.base)}）`);
+  if (!nonEmpty(eff.testCommand)) throw new Error(`${at('modules.gate.testCommand')} 必须是非空字符串（当前 ${JSON.stringify(eff.testCommand)}）`);
+  if (!isObject(eff.testEnv) || !Object.values(eff.testEnv).every((v) => typeof v === 'string')) throw new Error(`${at('modules.gate.testEnv')} 必须是值为字符串的对象（当前 ${JSON.stringify(eff.testEnv)}）`);
+  if (typeof eff.lockMaxAgeMinutes !== 'number' || !Number.isFinite(eff.lockMaxAgeMinutes) || eff.lockMaxAgeMinutes <= 0) throw new Error(`${at('modules.gate.lockMaxAgeMinutes')} 必须是正数（当前 ${JSON.stringify(eff.lockMaxAgeMinutes)}）`);
+  if (!Number.isInteger(eff.reviewMinChars) || eff.reviewMinChars < 0) throw new Error(`${at('modules.review.reviewMinChars')} 必须是非负整数（当前 ${JSON.stringify(eff.reviewMinChars)}）`);
+  if (!nonEmpty(eff.reviewKeyword)) throw new Error(`${at('modules.review.reviewKeyword')} 必须是非空字符串（当前 ${JSON.stringify(eff.reviewKeyword)}）`);
+  if (!COMMENT_MODES.includes(eff.commentMode)) throw new Error(`${at('rules.commentMode')} 只能是 ${COMMENT_MODES.join(' 或 ')}（当前 ${JSON.stringify(eff.commentMode)}）`);
+  for (const [k, where] of [['reviewers', 'modules.review.reviewers'], ['sourceGlobs', 'layout.sourceGlobs'], ['testGlobs', 'layout.testGlobs'], ['reviewIgnore', 'rules.reviewIgnore']]) {
+    const v = eff[k];
+    if (!Array.isArray(v) || !v.every(nonEmpty)) throw new Error(`${at(where)} 必须是非空字符串组成的数组（当前 ${JSON.stringify(v)}）`);
+  }
 }
 
 /**
@@ -184,16 +208,28 @@ function checkRequiredChecks(names) {
   if (dup !== undefined) throw new Error(`${where} 的检查名 ${dup} 重复`);
 }
 
+/**
+ * 取配置段里的一项：没写（键不存在或 undefined）用默认值；写了就原样交给 normalizeConfig 校验。
+ * 显式写成 null 而默认值不是 null 的（如 fullTests、ciOs）报错，不静默回退默认值：null 不是“未写”，写错了要让人看见。
+ * 默认值本身是 null 的键（ciRunner、ciFallback、session、parallel）写 null 等于不写。
+ */
+function pick(obj, key, where) {
+  if (!Object.hasOwn(obj, key) || obj[key] === undefined) return DEFAULTS[key];
+  if (obj[key] === null && DEFAULTS[key] !== null) throw new Error(`engineering.config.json 的 ${where ? `${where}.` : ''}${key} 不能是 null：不写表示用默认值 ${JSON.stringify(DEFAULTS[key])}，要改就写合法取值`);
+  return obj[key];
+}
+
 /** 展开两种结构（取值校验由 normalizeConfig 统一做）。 */
 function expand(raw) {
   if (!isObject(raw)) throw new Error('engineering.config.json 必须是 JSON 对象');
   if (raw.profile === undefined) {
     // 旧版扁平结构：原样使用，缺省值补齐；_profile 段（回滚时保存的 profile 专有设置）同样生效
     const prof = isObject(raw._profile) ? raw._profile : {};
+    for (const k of FLAT_KEYS) pick(raw, k, '');
     return {
       ...DEFAULTS,
       ...raw,
-      layout: { ...LAYOUT_DEFAULTS, ...(prof.layout || {}), sourceGlobs: raw.sourceGlobs ?? DEFAULTS.sourceGlobs, testGlobs: raw.testGlobs ?? DEFAULTS.testGlobs },
+      layout: { ...LAYOUT_DEFAULTS, ...(prof.layout || {}), sourceGlobs: pick(raw, 'sourceGlobs', ''), testGlobs: pick(raw, 'testGlobs', '') },
       hygiene: { ...HYGIENE_DEFAULTS, ...(prof.hygiene || {}) },
     };
   }
@@ -208,30 +244,30 @@ function expand(raw) {
   const lay = { ...LAYOUT_DEFAULTS, ...layout };
   const hyg = { ...HYGIENE_DEFAULTS, ...hygiene };
   return {
-    base: gate.base ?? DEFAULTS.base,
-    testCommand: gate.testCommand ?? DEFAULTS.testCommand,
-    testEnv: gate.testEnv ?? DEFAULTS.testEnv,
-    lockMaxAgeMinutes: gate.lockMaxAgeMinutes ?? DEFAULTS.lockMaxAgeMinutes,
-    reviewFlow: gate.reviewFlow ?? DEFAULTS.reviewFlow,
-    testGroups: gate.testGroups ?? DEFAULTS.testGroups,
-    requiredChecks: gate.requiredChecks ?? DEFAULTS.requiredChecks,
-    fullTests: gate.fullTests ?? DEFAULTS.fullTests,
-    ciRunner: gate.ciRunner ?? DEFAULTS.ciRunner,
-    ciFallback: gate.ciFallback ?? DEFAULTS.ciFallback,
-    ciOs: environment.ciOs ?? DEFAULTS.ciOs,
-    session: environment.session ?? DEFAULTS.session,
-    parallel: environment.parallel ?? DEFAULTS.parallel,
-    reviewers: review.reviewers ?? DEFAULTS.reviewers,
-    reviewMinChars: review.reviewMinChars ?? DEFAULTS.reviewMinChars,
-    reviewSections: review.reviewSections ?? DEFAULTS.reviewSections,
-    reviewKeyword: review.reviewKeyword ?? DEFAULTS.reviewKeyword,
-    maxReviewRounds: review.maxReviewRounds ?? DEFAULTS.maxReviewRounds,
-    externalExecutors: review.externalExecutors ?? DEFAULTS.externalExecutors,
-    externalExclude: review.externalExclude ?? DEFAULTS.externalExclude,
-    sourceGlobs: lay.sourceGlobs ?? DEFAULTS.sourceGlobs,
-    testGlobs: lay.testGlobs ?? DEFAULTS.testGlobs,
-    reviewIgnore: rules.reviewIgnore ?? DEFAULTS.reviewIgnore,
-    commentMode: rules.commentMode ?? DEFAULTS.commentMode,
+    base: pick(gate, 'base', 'modules.gate'),
+    testCommand: pick(gate, 'testCommand', 'modules.gate'),
+    testEnv: pick(gate, 'testEnv', 'modules.gate'),
+    lockMaxAgeMinutes: pick(gate, 'lockMaxAgeMinutes', 'modules.gate'),
+    reviewFlow: pick(gate, 'reviewFlow', 'modules.gate'),
+    testGroups: pick(gate, 'testGroups', 'modules.gate'),
+    requiredChecks: pick(gate, 'requiredChecks', 'modules.gate'),
+    fullTests: pick(gate, 'fullTests', 'modules.gate'),
+    ciRunner: pick(gate, 'ciRunner', 'modules.gate'),
+    ciFallback: pick(gate, 'ciFallback', 'modules.gate'),
+    ciOs: pick(environment, 'ciOs', 'modules.environment'),
+    session: pick(environment, 'session', 'modules.environment'),
+    parallel: pick(environment, 'parallel', 'modules.environment'),
+    reviewers: pick(review, 'reviewers', 'modules.review'),
+    reviewMinChars: pick(review, 'reviewMinChars', 'modules.review'),
+    reviewSections: pick(review, 'reviewSections', 'modules.review'),
+    reviewKeyword: pick(review, 'reviewKeyword', 'modules.review'),
+    maxReviewRounds: pick(review, 'maxReviewRounds', 'modules.review'),
+    externalExecutors: pick(review, 'externalExecutors', 'modules.review'),
+    externalExclude: pick(review, 'externalExclude', 'modules.review'),
+    sourceGlobs: pick(layout, 'sourceGlobs', 'layout'),
+    testGlobs: pick(layout, 'testGlobs', 'layout'),
+    reviewIgnore: pick(rules, 'reviewIgnore', 'rules'),
+    commentMode: pick(rules, 'commentMode', 'rules'),
     layout: lay,
     hygiene: hyg,
   };
