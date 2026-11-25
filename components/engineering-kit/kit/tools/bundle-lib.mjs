@@ -24,8 +24,12 @@ export const HOOK_MARK = 'engineering-kit:pre-push';
 const OWNERS = new Set(['kit', 'block', 'project', 'shared']);
 const RENDERS = new Set(['environment']);
 
-/** 块内容是不是“规则正文 + 某一种合法取值渲染出的执行偏好段”：是，说明只是配置与块里的渲染不一致；否则是块被手改。 */
+/**
+ * 块内容是不是“规则正文 + 某一种合法取值渲染出的执行偏好段”，或只有规则正文（还没有渲染段，例如同版本号下的旧静态块）：
+ * 是，说明只是配置与块里的渲染不一致或块还没渲染，重新同步即可；否则是块被手改。
+ */
 function isRenderedVariant(body, head) {
+  if (body === head) return true;
   for (const session of [null, ...SESSIONS]) {
     for (const parallel of [null, ...PARALLEL_MODES]) {
       if (body === `${head}\n\n${renderEnvironmentSection({ session, parallel })}`) return true;

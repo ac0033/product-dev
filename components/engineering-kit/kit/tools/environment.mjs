@@ -229,7 +229,7 @@ export function describeEnvironment(values, facts) {
 
 /** session、parallel 每个取值对应的一句话：装完时的说明（describeEnvironment）和写进规则块的偏好（renderEnvironmentSection）共用，不各写一份。 */
 const SESSION_TEXT = {
-  cloud: '开发和重复性工作优先放云端会话（不占本机资源；启动云端会话有费用，开工前先问用户）',
+  cloud: '开发和重复性工作优先放云端会话（不占本机资源；启动云端会话有费用，按 R2 项目授权表执行，表里未列的先问用户）',
   local: '优先本地会话（不额外花钱）；本机装不下的工作按环节表的三步再定，原则指向不同时问用户要不要放云端',
   none: '未声明，agent 按“更快、更便宜、更高效、更准确”和本机实际情况选，有多种可行且原则指向不同时问用户（环节表见 process.md）',
 };

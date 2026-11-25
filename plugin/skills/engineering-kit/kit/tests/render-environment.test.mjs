@@ -34,7 +34,8 @@ const blockOf = (root) => findBlock(read(root, 'AGENTS.md')).body;
 
 test('渲染文本：四种取值各有明确说法，未声明时写按推荐原则由 agent 判断；不含标记行', () => {
   const text = (session, parallel) => renderEnvironmentSection({ session, parallel });
-  assert.match(text('cloud', 'serial'), /会话（`session`）：.*云端会话.*费用.*先问用户/s);
+  assert.match(text('cloud', 'serial'), /会话（`session`）：.*云端会话.*费用.*按 R2.*授权表.*未列的先问用户/s);
+  assert.doesNotMatch(text('cloud', 'serial'), /开工前先问用户/, '项目授权表已列明启动云端会话时按表执行，不能一律写成要先问');
   assert.match(text('cloud', 'serial'), /并行（`parallel`）：串行/);
   assert.match(text('local', 'parallel'), /会话（`session`）：优先本地会话/);
   assert.match(text('local', 'parallel'), /并行（`parallel`）：能并行的并行/);
@@ -130,6 +131,21 @@ test('漂移检查：同步后一致；配置改了块没跟上报“过期”�
   syncKit({ target: root });
   write(root, 'AGENTS.md', read(root, 'AGENTS.md').replace('优先本地会话', '随便哪里'));
   assert.equal(agentsState().state, 'modified', '手改渲染段不能当成“只是配置变了”');
+});
+
+test('漂移检查：同一版本号下还是不带渲染段的旧静态块，报“过期”（缺渲染段，重新同步即可），不当成被手改', () => {
+  const root = repoWith({ session: 'cloud', parallel: 'serial' });
+  syncKit({ target: root });
+  const head = fs.readFileSync(path.join(BUNDLE_ROOT, 'kit', 'rules', 'AGENTS.block.md'), 'utf8');
+  const version = loadBundle(BUNDLE_ROOT).bundleVersion;
+  const text = read(root, 'AGENTS.md');
+  const found = findBlock(text);
+  write(root, 'AGENTS.md', `${text.slice(0, found.start)}<!-- engineering-kit:begin v${version} -->\n${head.trim()}\n<!-- engineering-kit:end -->${text.slice(found.end)}`);
+  const item = checkBundle({ root, bundleRoot: BUNDLE_ROOT }).items.find((i) => i.file === 'AGENTS.md');
+  assert.equal(item.state, 'outdated', JSON.stringify(item));
+  assert.match(item.detail, /重新同步/);
+  syncKit({ target: root });
+  assert.equal(checkBundle({ root, bundleRoot: BUNDLE_ROOT }).items.find((i) => i.file === 'AGENTS.md').state, 'ok');
 });
 
 test('清单：render 只认 environment，写错在写入前报错；当前清单只给 AGENTS 块渲染', () => {
