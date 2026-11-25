@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import { loadConfig } from '../gate/lib.mjs';
 import { BUNDLE_ROOT } from '../sync.mjs';
 import { detectFacts, isConstrained } from '../tools/environment.mjs';
 import { STAGE_IDS, buildEnv, byPrinciples, decideStage, parseStageArgs, planFromArgs, docRows } from '../tools/stages.mjs';
@@ -256,8 +257,16 @@ test('配置来源：基准上还没有配置时如实说是工作区值；基�
   write(based, 'engineering.config.json', cfg({}));
   commitAll(based, 'base');
   git(based, ['checkout', '-q', '-b', 'feat']);
+  // 功能分支上再提交一次：HEAD 与基准提交不同，提交号必须是基准提交（merge-base）的，且就是 loadConfig 判定时用的那个
+  write(based, 'x.txt', 'x\n');
+  commitAll(based, 'feat');
+  const baseSha = git(based, ['merge-base', 'HEAD', 'main']).trim();
+  const headSha = git(based, ['rev-parse', 'HEAD']).trim();
+  assert.notEqual(baseSha, headSha);
   const fromBase = planFromArgs(['--stage', 'A', '--target', based, '--choice', 'tight=false']);
   assert.match(fromBase.configSource, /^effective（策略字段取基准提交 [0-9a-f]{12} 上的/);
+  assert.ok(fromBase.configSource.includes(`基准提交 ${baseSha.slice(0, 12)} `), `提交号要是基准提交 ${baseSha.slice(0, 12)}：${fromBase.configSource}`);
+  assert.equal(loadConfig(based).baseRev, baseSha, 'loadConfig 把判定用的基准提交带出来，调用方不再自己解析第二次');
   assert.notEqual(fromBase.configSource, planned.configSource);
   // 基准上的配置不是合法 JSON：真实错误原样报出
   const broken = tmpRepo();
@@ -284,6 +293,23 @@ test('配置来源：基准上还没有配置时如实说是工作区值；基�
       else process.env[k] = v;
     }
   }
+});
+
+test('文档里“合并要等 CI 全部通过”的句子都带 ciRunner 为 none 的例外（无 CI 的项目没有这条），与环节表一致', () => {
+  const files = [
+    path.join(BUNDLE_ROOT, 'references', 'process.md'),
+    path.join(BUNDLE_ROOT, 'kit', 'rules', 'AGENTS.block.md'),
+  ];
+  let seen = 0;
+  for (const f of files) {
+    if (!fs.existsSync(f)) continue;
+    for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
+      if (!/等(?: PR 的)? CI 全部通过/.test(line)) continue;
+      seen += 1;
+      assert.ok(/ciRunner[^，。；]{0,6}none/.test(line), `${path.basename(f)} 里这句没写 ciRunner 为 none 的例外：${line.slice(0, 80)}`);
+    }
+  }
+  assert.ok(seen >= 3, `至少要查到环节表、pre-push 条款、规则块三处，实际 ${seen}`);
 });
 
 test('命令行真实运行：没给 tight 时按本机探测，结果与同一台机器的判定一致', () => {

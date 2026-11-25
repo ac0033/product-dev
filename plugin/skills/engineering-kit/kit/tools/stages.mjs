@@ -12,7 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeConfig } from '../gate/config.mjs';
-import { EMPTY_TREE, baseRevision, git, isMain, loadConfig } from '../gate/lib.mjs';
+import { EMPTY_TREE, git, isMain, loadConfig } from '../gate/lib.mjs';
 import { applyEnvironment, detectFacts, isConstrained } from './environment.mjs';
 
 export const STAGE_IDS = ['A', 'B', 'C', 'W'];
@@ -268,7 +268,7 @@ export function readProjectConfig(target) {
     return { config: loaded, configSource: `working-tree（无法取得基准提交上的判定策略：${loaded.policyError}；用工作区值，改配置的 PR 里可能比实际生效的更新）` };
   }
   // 策略字段取自哪里：基准提交上有配置就取它（标明提交号），没有（首次安装）就是工作区值，两种要分得清
-  const rev = baseRevision(target, loaded.base).rev;
+  const rev = loaded.baseRev; // 与 loadConfig 判定用的是同一个提交，不再自己解析第二次
   const baseHasConfig = rev !== EMPTY_TREE && git(target, ['cat-file', '-e', `${rev}:engineering.config.json`]).ok;
   return baseHasConfig
     ? { config: loaded, configSource: `effective（策略字段取基准提交 ${rev.slice(0, 12)} 上的，与闸门一致）` }
