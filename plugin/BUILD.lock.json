@@ -5,11 +5,11 @@
       "id": "engineering-kit",
       "dest": "skills/engineering-kit",
       "component": "engineering-kit",
-      "version": "0.7.1",
+      "version": "0.8.0",
       "license": "MIT",
       "changes": "头部去掉 disable-model-invocation，加 user-invocable: false",
       "fileCount": 59,
-      "sha256": "8d1bdd9bcbb6ddafb438dcf34d3a531a125c75cf39651e8a15ac4244bd629acd"
+      "sha256": "bd54e6608f5feb219547347349fb99225f45f3e6416592843a53402a6e73b50f"
     },
     {
       "id": "product-design-orchestrator",
