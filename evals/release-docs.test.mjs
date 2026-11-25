@@ -21,6 +21,9 @@ test('发布维护的执行位置表：步骤 2–6 都有对应行，与标签�
   assert.match(wf, /SHA256SUMS\.txt/);
   assert.ok(doc.includes('release-artifacts'), '第 4 步写明标签工作流');
   assert.ok(!/只打包、不上传|目前只打包/.test(doc), '不能再说 CI 只打包不上传');
+  // 第 3 步：插件和套件两个标签都要打（套件回滚与升级按 engineering-kit-v<版本> 定位），套件 SKILL.md 里写的约定与这里一致
+  assert.match(doc, /3\. 在同一个合并提交创建两个带说明的标签：插件的 `v<插件版本>` 和工程套件的 `engineering-kit-v<套件版本>`/);
+  assert.match(read('components/engineering-kit/SKILL.md'), /engineering-kit-vX\.Y\.Z/);
   // 独立复审的时点以项目规则为准
   const rules = read('AGENTS.md');
   assert.match(rules, /Linux、Windows CI 成功后做独立代码复审/);

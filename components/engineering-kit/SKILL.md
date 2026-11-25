@@ -103,7 +103,7 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 | `pre-push`（默认） | 静态检查、全量测试记录、代码复审记录（pass 或用户接受风险的 accept），都绑定当前代码树和基线（基准提交）；pre-push 钩子另核对实际推送的提交 | 推送前登记代码复审（可另登记一致性审或延期，推送核对不要求），记录里写明分支、HEAD 提交号和文档内容哈希；按分支计复审轮次（口径见第 6 节） | 套件不提供入口；钩子拒绝直接 `gh pr merge`，按项目约定的入口合并 |
 | `pr` | 静态检查、测试记录（绑定代码树和基线，按影响范围的也认）；不要求复审记录 | 复审可以与 CI 并行开始；CI 全部通过后才登记、合并：按 PR 登记代码复审与一致性审，绑定 PR 最终提交；按 PR 计复审轮次（口径见第 6 节） | `merge.mjs <PR>` 核对 PR 打开、CI 全过、两项记录与最终提交一致（代码复审之后只改文档的仍认；accept 按用户决定放行；只改文档的 PR 不要求记录）后执行 `gh pr merge --match-head-commit` |
 
-执行位置与环境选项（尚未发布，随下一个套件版本）：`modules.gate.fullTests` 为 `local`（默认）时上表不变；为 `ci` 时全量测试交给 CI——`gate.mjs` 只做静态检查（`--affected` 跑受影响分组、`--full` 或 `--force` 在本机跑全量，都须显式加（`--full` 遇到一致的通过记录会沿用，要重跑加 `--force`）），不写测试记录，`verify.mjs` 不要求本机测试记录（静态检查、未提交改动、推送引用照常核对），CI 全量由 `merge.mjs` 合并前核对。`ci` 须搭配 `pr` 流程、`ciRunner`（`github-hosted` 或 `self-hosted`）和 `requiredChecks`（写明跑全量测试的检查名，空表示每项检查都必需，一个只跑 lint 的 CI 也会放行），否则配置报错；`fullTests`、`ciRunner` 是判定策略字段，取主干上的值，分支自己改不生效。只有套件自己的测试覆盖，尚未在真实项目里走过。
+执行位置与环境选项（0.8.0 起）：`modules.gate.fullTests` 为 `local`（默认）时上表不变；为 `ci` 时全量测试交给 CI——`gate.mjs` 只做静态检查（`--affected` 跑受影响分组、`--full` 或 `--force` 在本机跑全量，都须显式加（`--full` 遇到一致的通过记录会沿用，要重跑加 `--force`）），不写测试记录，`verify.mjs` 不要求本机测试记录（静态检查、未提交改动、推送引用照常核对），CI 全量由 `merge.mjs` 合并前核对。`ci` 须搭配 `pr` 流程、`ciRunner`（`github-hosted` 或 `self-hosted`）和 `requiredChecks`（写明跑全量测试的检查名，空表示每项检查都必需，一个只跑 lint 的 CI 也会放行），否则配置报错；`fullTests`、`ciRunner` 是判定策略字段，取主干上的值，分支自己改不生效。只有套件自己的测试覆盖，尚未在真实项目里走过。
 
 `pr` 流程需要 GitHub 远程、已登录的 `gh`，且 PR 上有 CI 检查（一项都没有视为未通过；“全部通过”的口径和必需检查名 `modules.gate.requiredChecks` 怎样写，见 `references/process.md` 第 4 节）；不满足的项目留在 `pre-push`。要恢复旧流程，须在主干上把 `reviewFlow` 改回 `pre-push`，合入后才生效；这个改动的 PR 本身仍按当时的 `pr` 流程经 `merge.mjs` 合并，合并入口用不了时由用户合并或走项目约定的入口。
 
