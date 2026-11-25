@@ -388,7 +388,17 @@ function currentBranchOf(root) {
 }
 
 /** repoState 的分项名（顺序即报告里的顺序）与中文说明。 */
-const STATE_PARTS = { head: 'HEAD', status: '工作区状态', hooks: 'git 钩子目录', config: 'git 配置' };
+const STATE_PARTS = { head: 'HEAD', status: '工作区状态', hooks: 'git 钩子目录', config: 'git 配置', tracking: '当前分支生效的远端与上游' };
+
+/**
+ * 当前分支生效的推送、拉取去向：用 git 实际生效的配置视图（含 config.worktree、include、全局配置）读 branch.<名>.remote / merge / pushRemote
+ * 与 remote.pushDefault、push.default。configFingerprint 只读共享的 .git/config 一个文件，看不到工作树配置和 include 里的覆盖，这里补上。
+ */
+export function trackingFingerprint(root, branch = currentBranchOf(root)) {
+  const keys = ['remote.pushDefault', 'push.default'];
+  if (branch) keys.push(...['remote', 'merge', 'pushRemote'].map((k) => `branch.${branch}.${k}`));
+  return sha256(keys.map((k) => `${k}=${git(root, ['config', '--get-all', k]).out}`).join('\0'));
+}
 
 /**
  * 仓库状态的指纹：HEAD、git status（含未跟踪文件），以及 git 钩子目录和 git 配置的内容（配置见 configFingerprint，上游跟踪项除外）。
@@ -400,7 +410,7 @@ export function repoState(root) {
   const status = gitOk(root, ['status', '--porcelain=v1', '-z', '-uall'], '读取工作区状态');
   const gitPath = (p) => path.resolve(root, git(root, ['rev-parse', '--git-path', p]).out.trim());
   const hooks = gitPath('hooks');
-  const parts = { head, status: sha256(status), hooks: fs.existsSync(hooks) ? dirHash(hooks) : '-', config: configFingerprint(root, gitPath('config')) };
+  const parts = { head, status: sha256(status), hooks: fs.existsSync(hooks) ? dirHash(hooks) : '-', config: configFingerprint(root, gitPath('config')), tracking: trackingFingerprint(root) };
   return { head, clean: status === '', hash: sha256(Object.values(parts).join('\0')), parts };
 }
 

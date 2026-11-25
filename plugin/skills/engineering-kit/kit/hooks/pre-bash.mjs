@@ -556,7 +556,11 @@ export function pushDirs(command, cwd, dialects = DIALECTS) {
 function gitChdir(from, c) {
   try {
     const base = fs.realpathSync.native(from);
-    const joined = path.isAbsolute(c) ? c : `${base}${path.sep}${c}`;
+    // Windows 上 /x、\x 这类没有盘符的根路径落在“当前盘”：git 的当前盘是前一次 -C 进入的盘，不是钩子进程的盘
+    const rootless = process.platform === 'win32' && /^[\\/](?![\\/])/.test(c);
+    const baseRoot = path.parse(base).root; // C:\ 或 UNC 的 \\server\share\
+    const drive = /^[A-Za-z]:/.test(baseRoot) ? baseRoot.slice(0, 2) : baseRoot.replace(/[\\/]$/, '');
+    const joined = rootless ? `${drive}${c}` : path.isAbsolute(c) ? c : `${base}${path.sep}${c}`;
     const real = fs.realpathSync.native(joined);
     return fs.statSync(real).isDirectory() ? real : null;
   } catch {

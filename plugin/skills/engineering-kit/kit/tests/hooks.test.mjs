@@ -395,3 +395,18 @@ test('pushDirs：cd 不一定执行或不一定在原处（条件执行、前面
   assert.deepEqual(pushDirs('cd ../a && cd b && git push', cwd), [path.resolve(cwd, '../a/b')]);
   assert.deepEqual(pushDirs('cd ../a && git push && cd ../b && git push', cwd), [path.resolve(cwd, '../a'), cwd]);
 });
+
+test('pushDirs：Windows 上没有盘符的根路径（/x）落在前一次 git -C 进入的盘，不是钩子进程的盘', { skip: process.platform !== 'win32' }, () => {
+  const root = fs.realpathSync.native(tmpDir('ekit-pushdirs-drive-'));
+  const drive = root.slice(0, 2);
+  const rel = root.slice(2).replaceAll('\\', '/');
+  // 会话目录与仓库同盘：-C <盘>:/ 再 -C /<路径> 应回到同一盘上的那个目录
+  assert.deepEqual(pushDirs(`git -C ${drive}/ -C ${rel} push`, root, ['ps']), [root]);
+  // 钩子进程的当前盘与前一次 -C 的盘不同时也按前一次 -C 的盘：用 path.parse 的盘符比对
+  const [got] = pushDirs(`git -C ${drive}/ -C ${rel} push`, root, ['ps']);
+  assert.equal(got.slice(0, 2).toLowerCase(), drive.toLowerCase());
+  // 跨盘：钩子进程在别的盘时，/Windows 仍落在前一次 -C 的 C 盘（本机有 C:\Windows 且当前盘不是 C 时才测得到）
+  if (fs.existsSync('C:\\Windows') && !/^c:/i.test(process.cwd())) {
+    assert.deepEqual(pushDirs('git -C C:/Windows -C /Windows push', root, ['ps']), [fs.realpathSync.native('C:\\Windows')]);
+  }
+});

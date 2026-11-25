@@ -28,6 +28,7 @@ import {
   registerRun,
   renderReport,
   repoState,
+  trackingFingerprint,
   runExternalReview,
   runProcess,
   scanCodexTools,
@@ -933,7 +934,7 @@ test('缺口 2 repoState：别的工作树写共用配置里的 branch.*（push 
   assert.ok(changedParts(before, repoState(wt)).includes('HEAD'));
 });
 
-test('缺口 2 configFingerprint：branch.* 不入指纹、其余键入；文件解析不了时退回整文件哈希（偏严），连 branch.* 的写入也算变化', () => {
+test('缺口 2 configFingerprint：别的分支的上游跟踪项不入指纹、其余键入；文件解析不了时退回整文件哈希（偏严），连 branch.* 的写入也算变化', () => {
   const { root } = repo();
   const dir = tmpDir('ekit-cfg-');
   const file = path.join(dir, 'config');
@@ -1011,4 +1012,28 @@ test('参数解析：漏写值不吞下一个参数，run 不接受 --accept（P
   const runAccept = spawnSync(process.execPath, [cli, 'run', '--executor', 'fake', '--accept'], { cwd: repo().root, encoding: 'utf8' });
   assert.equal(runAccept.status, 1, runAccept.stdout + runAccept.stderr);
   assert.match(runAccept.stderr, /--accept 只用于 register/);
+});
+
+test('trackingFingerprint：按 git 生效的配置视图核对当前分支的远端与上游——config.worktree 里的覆盖也算变化', () => {
+  const { root } = repo();
+  git(root, ['remote', 'add', 'origin', 'https://example.invalid/x.git']);
+  git(root, ['remote', 'add', 'fork', 'https://example.invalid/fork.git']);
+  git(root, ['checkout', '-q', '-b', 'track']);
+  git(root, ['config', 'branch.track.remote', 'origin']);
+  git(root, ['config', 'branch.track.merge', 'refs/heads/track']);
+  const before = repoState(root);
+  // 写同样的值：不变
+  git(root, ['config', 'branch.track.remote', 'origin']);
+  assert.equal(repoState(root).hash, before.hash);
+  // 只在当前工作树的 config.worktree 里覆盖上游：共享 .git/config 没变，生效的去向变了
+  git(root, ['config', 'extensions.worktreeConfig', 'true']);
+  const mid = repoState(root);
+  git(root, ['config', '--worktree', 'branch.track.remote', 'fork']);
+  const after = repoState(root);
+  assert.equal(after.parts.config, mid.parts.config, '共享配置文件没变');
+  assert.notEqual(after.hash, mid.hash);
+  assert.deepEqual(changedParts(mid, after), ['当前分支生效的远端与上游']);
+  git(root, ['config', '--worktree', '--unset', 'branch.track.remote']);
+  git(root, ['config', '--worktree', 'branch.track.merge', 'refs/heads/main']);
+  assert.notEqual(trackingFingerprint(root), mid.parts.tracking, '覆盖 merge 也算');
 });

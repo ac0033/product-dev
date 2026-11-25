@@ -143,11 +143,28 @@ test('显式 null 不静默回退默认值：fullTests、ciOs 等默认非 null 
   // 显式的非法值同样报错（不回退）
   assert.throws(() => normalizeConfig({ profile: 2, modules: { gate: { fullTests: 'cloud' } } }), /fullTests 只能是/);
   assert.throws(() => normalizeConfig({ profile: 2, modules: { environment: { ciOs: [] } } }), /ciOs 必须是/);
-  // 旧版扁平结构里的 null 也由取值校验拦下
-  assert.throws(() => normalizeConfig({ base: 'main', fullTests: null }), /fullTests 只能是/);
-  assert.throws(() => normalizeConfig({ base: 'main', ciOs: null }), /ciOs 必须是/);
+  // 旧版扁平结构里的 null 同样报错
+  assert.throws(() => normalizeConfig({ base: 'main', fullTests: null }), /fullTests 不能是 null/);
+  assert.throws(() => normalizeConfig({ base: 'main', ciOs: null }), /ciOs 不能是 null/);
   const eff = normalizeConfig({ profile: 2, modules: { gate: { ciRunner: null, ciFallback: null }, environment: { session: null, parallel: null } } });
   assert.equal(eff.ciRunner, null);
   assert.equal(eff.fullTests, DEFAULTS.fullTests);
   assert.deepEqual(eff.ciOs, DEFAULTS.ciOs);
+});
+
+test('类型校验（新旧结构共用）：写错类型的字段报错，不让对应检查静默失效', () => {
+  for (const [raw, why] of [
+    [{ profile: 2, modules: { review: { reviewMinChars: 'abc' } } }, /reviewMinChars 必须是非负整数/],
+    [{ profile: 2, modules: { review: { reviewKeyword: '' } } }, /reviewKeyword 必须是非空字符串/],
+    [{ profile: 2, modules: { review: { reviewers: 'x' } } }, /reviewers 必须是/],
+    [{ profile: 2, modules: { gate: { lockMaxAgeMinutes: '90' } } }, /lockMaxAgeMinutes 必须是正数/],
+    [{ profile: 2, modules: { gate: { testEnv: { A: 1 } } } }, /testEnv 必须是/],
+    [{ profile: 2, modules: { gate: { base: 5 } } }, /base 必须是非空字符串/],
+    [{ profile: 2, layout: { sourceGlobs: 'src/**' } }, /layout\.sourceGlobs 必须是/],
+    [{ profile: 2, rules: { commentMode: 'all' } }, /commentMode 只能是/],
+    [{ base: 'main', sourceGlobs: null }, /sourceGlobs 不能是 null/],
+    [{ base: 'main', reviewMinChars: 'abc' }, /reviewMinChars 必须是非负整数/],
+  ]) assert.throws(() => normalizeConfig(raw), why, JSON.stringify(raw));
+  assert.doesNotThrow(() => normalizeConfig({ profile: 2 }));
+  assert.doesNotThrow(() => normalizeConfig({}));
 });
