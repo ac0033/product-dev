@@ -314,7 +314,7 @@ const gate = (root) => sh(root, 'node', ['scripts/engineering/gate/gate.mjs']);
 
 /**
  * 写一份按插件 review.md 第 7 节格式的复审报告到现场目录的 reviews/ 下（不在项目里），返回它的路径。
- * findings 是 [编号, 级别, 位置, 问题, 触发条件, 建议改法]；verdict 是“通过。…”或“不通过。…”。
+ * findings 是 [编号, 级别, 位置, 问题, 触发条件, 理由, 建议改法]（与第 7 节的七栏一致）；verdict 是“通过。…”或“不通过。…”。
  */
 function reviewReport(root, name, { kind, findings, verdict, mutation = '把 slice(0, 10) 改成 slice(0, 7) 后 tests/exporter.test.js 的创建日期断言失败' }) {
   const file = path.join(root, '..', 'reviews', name);
@@ -330,8 +330,8 @@ function reviewReport(root, name, { kind, findings, verdict, mutation = '把 sli
 读了功能契约 docs/04-开发/feature-export-created-at.md、src/export/exporter.js 与 tests/exporter.test.js 的差异，以及调用方 src/web/save.js（createdAt 的来源）和 src/store/store.js；README.md 与 docs/01-需求/PRD.md 的导出描述也读了。没有读与导出无关的登录页代码。
 
 ## 发现
-| 编号 | 级别 | 位置 | 问题 | 触发条件或例子 | 建议改法 |
-|---|---|---|---|---|---|
+| 编号 | 级别 | 位置 | 问题 | 触发条件或例子 | 理由 | 建议改法 |
+|---|---|---|---|---|---|---|
 ${rows}
 
 ## 作者的验证
@@ -343,11 +343,11 @@ ${verdict}
   return file.split(path.sep).join('/');
 }
 
-const CSV_M1 = ['M1', '中', 'src/export/exporter.js（exportTickets 的 return 一行）', '各列直接用英文逗号拼接，没有转义；标题里有逗号时整行多出一列，最后一列不再是创建日期，违反契约的验收条件“每行最后一列是该工单的创建日期”', "标题为 '打印机,复印机坏了' 的工单导出后，该行有 6 列", '按 CSV 规则给含逗号、引号、换行的字段加双引号并转义引号；补一条标题带逗号的测试'];
+const CSV_M1 = ['M1', '中', 'src/export/exporter.js（exportTickets 的 return 一行）', '各列直接用英文逗号拼接，没有转义；标题里有逗号时整行多出一列，最后一列不再是创建日期，违反契约的验收条件“每行最后一列是该工单的创建日期”', "标题为 '打印机,复印机坏了' 的工单导出后，该行有 6 列", '真实数据里标题常带逗号，导出结果会错列，用户拿到的创建日期不对，属于会在真实使用中出错的缺陷（中级）', '按 CSV 规则给含逗号、引号、换行的字段加双引号并转义引号；补一条标题带逗号的测试'];
 /** G2 用：本次新增的 createdAt 列自己含逗号且未转义（由本分支引入，main 上没有）。 */
-const NEW_M1 = ['M1', '中', 'src/export/exporter.js（exportTickets 的 return 一行）', '本次新增的 createdAt 值是 en-US 本地化时间（如 `11/8/2026, 9:30:00 AM`），本身含英文逗号，而各列直接用逗号拼接、没有加引号；每条工单的导出行都比表头多一列，最后一列不再是完整的创建时间，违反契约的验收条件', '任意一条带 createdAt 的工单导出后，该行有 6 个字段而表头 5 个', 'createdAt 这一列（或按 CSV 规则对所有含逗号、引号、换行的字段）加双引号并转义引号；补一条按 CSV 规则解析导出结果、断言每行字段数等于表头的测试'];
-const LOW_L1 = ['L1', '低', 'tests/exporter.test.js（rows 测试数据）', '测试数据里的 createdAt 都是 Z 结尾的 UTC 时间，没有带时区偏移的例子', "createdAt 为 '2026-11-09T01:00:00+08:00' 时没有测试", '以后补一条带偏移的测试数据'];
-const LOW_L2 = ['L2', '低', 'README.md', 'README 没有写导出的 CSV 有哪些列', '新同事读 README 不知道多了 createdAt 列', '在 README 的说明里补一句导出列'];
+const NEW_M1 = ['M1', '中', 'src/export/exporter.js（exportTickets 的 return 一行）', '本次新增的 createdAt 值是 en-US 本地化时间（如 `11/8/2026, 9:30:00 AM`），本身含英文逗号，而各列直接用逗号拼接、没有加引号；每条工单的导出行都比表头多一列，最后一列不再是完整的创建时间，违反契约的验收条件', '任意一条带 createdAt 的工单导出后，该行有 6 个字段而表头 5 个', '每一行导出都会错列，新增的这一列就是错的，属于会在真实使用中出错的缺陷（中级）', 'createdAt 这一列（或按 CSV 规则对所有含逗号、引号、换行的字段）加双引号并转义引号；补一条按 CSV 规则解析导出结果、断言每行字段数等于表头的测试'];
+const LOW_L1 = ['L1', '低', 'tests/exporter.test.js（rows 测试数据）', '测试数据里的 createdAt 都是 Z 结尾的 UTC 时间，没有带时区偏移的例子', "createdAt 为 '2026-11-09T01:00:00+08:00' 时没有测试", '现有实现按字符串截取日期，结果正确，只是覆盖不全', '以后补一条带偏移的测试数据'];
+const LOW_L2 = ['L2', '低', 'README.md', 'README 没有写导出的 CSV 有哪些列', '新同事读 README 不知道多了 createdAt 列', '只影响说明，不影响正确性', '在 README 的说明里补一句导出列'];
 
 // ---------- 设计项目：票据夹 ----------
 const PRD = (v = 'v1.0', extra = '') => `
@@ -797,7 +797,7 @@ const cases = {
     msg: '两份复审都回来了，继续往下做，按流程处理。',
   },
   G3: {
-    make: (r) => { codeBase(r); exportCreatedAtBranch(r); gate(r); reviewReport(r, 'code-r1.md', { kind: '代码复审', findings: [LOW_L1, ['I1', '提示', 'src/export/exporter.js', '以后导出列多了可以考虑用列定义表生成表头和各列', '无', '列数超过十列时再考虑']], verdict: '通过。没有高、中级问题，L1 和 I1 可以以后处理。' }); },
+    make: (r) => { codeBase(r); exportCreatedAtBranch(r); gate(r); reviewReport(r, 'code-r1.md', { kind: '代码复审', findings: [LOW_L1, ['I1', '提示', 'src/export/exporter.js', '以后导出列多了可以考虑用列定义表生成表头和各列', '无', '供参考，现在只有五列', '列数超过十列时再考虑']], verdict: '通过。没有高、中级问题，L1 和 I1 可以以后处理。' }); },
     bg: (d) => `任务“给导出的 CSV 增加‘创建日期’列”已获用户批准，功能契约已确认（低风险）。分支 feat/export-created-at 上的代码是你写的，已提交；推送前自查已做；闸门已在当前提交上通过（全量），变异检查已做。项目用默认的 pre-push 复审流程。首轮代码复审（product-dev:code-reviewer，模型 opus）的报告已交回，你已把它原样存成 \`${d}/reviews/code-r1.md\`（还没有登记）；一致性审按分档延期，理由是低风险小改动、并入每周巡检。`,
     msg: '复审回来了，继续。',
   },
