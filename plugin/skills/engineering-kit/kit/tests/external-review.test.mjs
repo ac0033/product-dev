@@ -1491,7 +1491,8 @@ test('H6 清理副本：先改名到随机名下再核对身份、逐项删除�
   const copy2 = path.join(runDir, 'workspace2');
   fs.mkdirSync(copy2);
   const id2 = fs.lstatSync(copy2);
-  fs.rmdirSync(copy2);
+  // 原目录挪开但保留，新目录才一定是另一个 inode（Linux 上删了马上重建常复用同一个）
+  fs.renameSync(copy2, path.join(runDir, 'workspace2-moved'));
   fs.mkdirSync(copy2);
   fs.writeFileSync(path.join(copy2, 'other.txt'), 'other');
   assert.match(String(ER.removeCopy(copy2, runDir, { dev: id2.dev, ino: id2.ino })), /替换|移走/);
