@@ -388,6 +388,9 @@ test('Codex 执行器：完整链路可登记；实际模型取 Codex 生效设�
   assert.deepEqual(argv.slice(0, 4), ['exec', '--json', '-s', 'read-only']);
   for (const flag of ['--ignore-user-config', '--ignore-rules', 'project_doc_max_bytes=0', 'web_search="disabled"', 'approval_policy="never"', 'model_reasoning_effort="medium"', 'features.multi_agent_v2.disable_native_tools=true']) assert.ok(argv.includes(flag), flag);
   for (const feat of ['multi_agent', 'memories', 'hooks', 'apps', 'code_mode_host']) assert.ok(argv.join(' ').includes(`--disable ${feat}`), feat);
+  // 配置项必须紧跟在自己的 -c 后面（只查值存在，-c 丢了或错位也会通过），且在提示（最后的 -）之前
+  const ov = argv.indexOf('features.multi_agent_v2.disable_native_tools=true');
+  assert.ok(ov > 0 && argv[ov - 1] === '-c' && ov < argv.length - 1, '子代理工具的配置是完整的 -c 参数对');
   assert.ok(!argv.some((x) => /dangerously|workspace-write|danger-full-access/.test(x)));
   assert.ok(!argv[argv.indexOf('--output-schema') + 1].startsWith(path.join(res.runDir, 'workspace')), '约束文件不在只读副本里');
   assert.deepEqual(schema.properties.findings.items.required, ['severity', 'title', 'file', 'line', 'detail']);
@@ -399,6 +402,14 @@ test('Codex 执行器：拿不到会话记录时实际模型为空，不用请�
   assert.equal(res.ok, false);
   assert.equal(res.result.provenance.actualModel, null);
   assert.match(res.message, /拿不到实际模型/);
+});
+
+test('Codex 参数：关子代理工具的配置是完整的 -c 参数对，每个 -c 后面都跟着值', () => {
+  const argv = codexArgs({ model: { id: 'm' } }, { cwd: '.', schemaFile: 's.json' });
+  const at = argv.indexOf(CODEX_CONFIG_OVERRIDES[1]);
+  assert.deepEqual(argv.slice(at - 1, at + 1), CODEX_CONFIG_OVERRIDES);
+  argv.forEach((a, i) => { if (a === '-c') assert.match(argv[i + 1], /^[a-z_.]+=\S+$/, `-c 后面要跟 键=值：${argv[i + 1]}`); });
+  assert.equal(argv[argv.length - 1], '-');
 });
 
 test('Codex 参数：推理强度只认固定的词（拼进 -c 配置）', () => {

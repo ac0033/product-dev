@@ -945,7 +945,8 @@ export const CODEX_DISABLED_FEATURES = ['apps', 'code_mode_host', 'goals', 'hook
  * 关不掉的功能要靠配置收紧（-c 参数，原样传给 Codex）：
  *   - features.multi_agent_v2.disable_native_tools=true：codex-cli 0.171 里子代理工具（collaboration.spawn_agent 等）改由 multi_agent_v2 提供，
  *     只 --disable multi_agent 挡不住：模型能 spawn 子代理（会话记录另存一份，留在用户的 Codex 历史里，子代理还可换模型）。
- *     加上这一项后，会话记录里的工具清单（additional_tools）不再含 collaboration.*（0.171.0-alpha.13 实测）。
+ *     加上这一项后，会话记录里的工具清单（additional_tools）不再含 collaboration.*（0.171.0-alpha.13 实测）；清单里剩下 exec（被 code_mode_host 的关闭拒绝）和
+ *     wait、request_user_input、send_message_to_user_async、sleep（不碰文件系统与网络，模型没有调用过；一旦调用，scanCodexTools 判作废）。
  * 取值写错或这一版不认时，Codex 报参数错误，执行器按“没有输出会话事件”失败，不会悄悄放开。
  */
 export const CODEX_CONFIG_OVERRIDES = ['-c', 'features.multi_agent_v2.disable_native_tools=true'];
