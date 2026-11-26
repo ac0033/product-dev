@@ -17,6 +17,9 @@ const cfg = { ...TEST_CONFIG };
 
 /** 一个合格的复审报告：字数够、含“结论”、结论为通过。 */
 const GOOD_REPORT = `范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n已逐条核对改动的 dedup 函数与测试用例，边界条件（空数组、重复项）均有覆盖。\n处置：无需处理。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n结论\n通过\n`;
+const FAIL_TABLE = `| 编号 | 级别 | 位置 | 问题 | 触发条件或例子 | 理由 | 建议改法 |
+|---|---|---|---|---|---|---|
+| H1 | 高 | src/dedup.ts | 去重改变顺序 | 输入重复项 | 调用方依赖输入顺序 | 保留首次出现的元素顺序 |`;
 
 test('测试先行：源文件改动时，引用它的测试也必须在本次改动里', () => {
   const root = featureRepo();
@@ -424,7 +427,7 @@ test('复审登记（pre-push）：代码改动里夹着文档时也记文档内
   assert.notEqual(r1.record.docHash, r2.record.docHash);
   git(root, ['checkout', '-q', '--detach']);
   // 0.5.1 起登记 fail 要求报告结论是不通过，所以这里用结论为不通过的报告
-  const r3 = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(GOOD_REPORT.replace('通过\n', '不通过\n')), summary: 's' });
+  const r3 = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(GOOD_REPORT.replace('通过\n', '不通过\n').replace('\n处置：', `\n${FAIL_TABLE}\n处置：`)), summary: 's' });
   assert.equal(r3.ok, true, r3.message);
   assert.equal(r3.record.branch, null);
   assert.match(r3.message, /游离/);

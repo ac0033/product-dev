@@ -26,6 +26,10 @@ const KIT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BODY = '范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n已逐条核对改动的 dedup 函数与测试用例，边界条件（空数组、重复项）均有覆盖，调用方也已核对。\n处置：无需处理。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n';
 /** 结论为通过的合格报告。 */
 const PASS_REPORT = `${BODY}结论\n通过\n`;
+const FAIL_TABLE = `| 编号 | 级别 | 位置 | 问题 | 触发条件或例子 | 理由 | 建议改法 |
+|---|---|---|---|---|---|---|
+| H1 | 高 | src/dedup.ts | 去重改变顺序 | 输入重复项 | 调用方依赖输入顺序 | 保留首次出现的元素顺序 |`;
+const FAIL_BODY = BODY.replace('\n处置：', `\n${FAIL_TABLE}\n处置：`);
 
 /** 在功能分支上做一份能过静态检查的改动（源文件与引用它的测试一起改）。 */
 function passingChange(root, tag = 'sorted') {
@@ -352,7 +356,7 @@ test('漏洞 4：登记 fail 要求结论是不通过；找不到明确结论或
   const f = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(PASS_REPORT), summary: 's' });
   assert.equal(f.ok, false, f.message);
   assert.match(f.message, /结论/);
-  const f2 = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(`${BODY}结论：有高级问题，不通过\n`), summary: 's' });
+  const f2 = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(`${FAIL_BODY}结论：有高级问题，不通过\n`), summary: 's' });
   assert.equal(f2.ok, true, f2.message);
   const none = reviewPass(root, `${BODY}结论部分见上面的发现表，整体看起来没有问题。\n`);
   assert.equal(none.ok, false, none.message);
@@ -570,7 +574,7 @@ test('漏洞 10：带句号的写法都能认出：“结论：通过。无高�
     const r = reviewPass(root, `${BODY}${tail}`);
     assert.equal(r.ok, true, `${tail} → ${r.message}`);
   }
-  const f = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(`${BODY}## 结论\n不通过。H1 未修复。\n`), summary: 's' });
+  const f = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(`${FAIL_BODY}## 结论\n不通过。H1 未修复。\n`), summary: 's' });
   assert.equal(f.ok, true, f.message);
 });
 

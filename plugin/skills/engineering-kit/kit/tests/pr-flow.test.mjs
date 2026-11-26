@@ -19,6 +19,9 @@ import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, tmpRepo, tra
 
 /** 一个合格的复审报告：字数够、含“结论”、结论为通过。 */
 const GOOD_REPORT = `范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n已逐条核对 PR 的最终提交，dedup 函数与测试用例的边界条件（空数组、重复项）均有覆盖。\n处置：无需处理。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n结论\n通过\n`;
+const FAIL_TABLE = `| 编号 | 级别 | 位置 | 问题 | 触发条件或例子 | 理由 | 建议改法 |
+|---|---|---|---|---|---|---|
+| H1 | 高 | src/dedup.ts | 去重改变顺序 | 输入重复项 | 调用方依赖输入顺序 | 保留首次出现的元素顺序 |`;
 
 /** PR 的两个最终提交（复审时的、复审后又推送的）。 */
 const HEAD = 'a'.repeat(40);
@@ -314,7 +317,7 @@ test('验收 7：缺少任一审查记录，或其中一份结论为 fail 时拒
   assert.ok(res.problems.some((p) => p.includes('缺少一致性审记录')), res.problems.join('\n'));
 
   register(root, gh, 'consistency');
-  const f = register(root, gh, 'code', 'fail', { reportPath: reportFile(GOOD_REPORT.replace('通过\n', '不通过\n')) });
+  const f = register(root, gh, 'code', 'fail', { reportPath: reportFile(GOOD_REPORT.replace('通过\n', '不通过\n').replace('\n处置：', `\n${FAIL_TABLE}\n处置：`)) });
   assert.equal(f.ok, true, f.message);
   res = mergePr({ root, pr: '7', gh });
   assert.equal(res.ok, false);
