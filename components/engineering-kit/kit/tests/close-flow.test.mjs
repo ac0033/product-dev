@@ -371,7 +371,8 @@ test('A12 最新一轮有高级：不能 close，应走最后一轮', () => {
 test('A12 --report 不是登记过的报告（sha256 对不上任何一条最新一轮的 fail 记录）：拒绝', () => {
   const { e, rows } = ready();
   finish(e, rows);
-  const neverRegistered = reportFile(failText([fr('M1', '中'), fr('L1', '低')]));
+  // 正文要与已登记的报告不同（M1 的问题描述换了），否则 sha256 相同，按计划本就应当接受
+  const neverRegistered = reportFile(failText([fr('M1', '中', { problem: '去重后顺序与输入不一致（未登记的另一份报告）' }), fr('L1', '低')]));
   assert.match(refused(e, neverRegistered), /最新一轮/);
 });
 
