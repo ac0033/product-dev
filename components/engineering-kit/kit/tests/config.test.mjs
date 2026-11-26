@@ -3,6 +3,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DEFAULTS, normalizeConfig, toFlat, toProfile, FLAT_KEYS } from '../gate/config.mjs';
+import { loadConfig, POLICY_KEYS } from '../gate/lib.mjs';
+import { featureRepo, TEST_CONFIG, write } from './helpers.mjs';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -167,4 +169,67 @@ test('类型校验（新旧结构共用）：写错类型的字段报错，不�
   ]) assert.throws(() => normalizeConfig(raw), why, JSON.stringify(raw));
   assert.doesNotThrow(() => normalizeConfig({ profile: 2 }));
   assert.doesNotThrow(() => normalizeConfig({}));
+});
+// ---------- 复审规则（契约 A 块）：收口与风险登记两个配置字段 ----------
+
+/** 收口配置的 profile 写法（收口要求 pr 流程，所以 reviewFlow 一并给）。 */
+const closureProfile = (review = {}, gate = {}) => ({ profile: 2, modules: { gate: { reviewFlow: 'pr', ...gate }, review: { roundClosure: 'fix-and-record', ...review } } });
+
+test('A11 配置：roundClosure 默认 off，riskRegister 默认 docs/04-开发/review-risks.md；两项在扁平字段清单里', () => {
+  assert.equal(DEFAULTS.roundClosure, 'off');
+  assert.equal(DEFAULTS.riskRegister, 'docs/04-开发/review-risks.md');
+  assert.ok(FLAT_KEYS.includes('roundClosure'));
+  assert.ok(FLAT_KEYS.includes('riskRegister'));
+  const eff = normalizeConfig({ profile: 2 });
+  assert.equal(eff.roundClosure, 'off');
+  assert.equal(eff.riskRegister, 'docs/04-开发/review-risks.md');
+  assert.equal(normalizeConfig({}).roundClosure, 'off', '旧扁平结构也补默认值');
+});
+
+test('A11 配置：roundClosure 只认 off 与 fix-and-record，非法值、null 报错；非 off 时要求 reviewFlow 为 pr', () => {
+  assert.equal(normalizeConfig(closureProfile()).roundClosure, 'fix-and-record');
+  assert.equal(normalizeConfig({ profile: 2, modules: { review: { roundClosure: 'off' } } }).roundClosure, 'off', 'off 不要求 pr 流程');
+  for (const bad of ['on', 'FIX-AND-RECORD', '', 1, true, null]) {
+    assert.throws(() => normalizeConfig(closureProfile({ roundClosure: bad })), /roundClosure/, JSON.stringify(bad));
+  }
+  assert.throws(() => normalizeConfig({ profile: 2, modules: { review: { roundClosure: 'fix-and-record' } } }), /roundClosure.*pr|pr.*roundClosure/, '默认 pre-push 流程下开启收口报错');
+  assert.throws(() => normalizeConfig(closureProfile({}, { reviewFlow: 'pre-push' })), /roundClosure.*pr|pr.*roundClosure/);
+  assert.throws(() => normalizeConfig({ reviewFlow: 'pre-push', roundClosure: 'fix-and-record' }), /roundClosure/, '扁平结构同样校验');
+  assert.equal(normalizeConfig({ reviewFlow: 'pr', roundClosure: 'fix-and-record' }).roundClosure, 'fix-and-record');
+});
+
+test('A11 配置：riskRegister 须是相对路径、正斜杠、不含 ..、不以 / 或 ./ 或盘符开头、以 .md 结尾', () => {
+  for (const good of ['docs/04-开发/review-risks.md', 'risks.md', 'a/b/c.md', 'docs/风险 登记.md']) {
+    assert.equal(normalizeConfig({ profile: 2, modules: { review: { riskRegister: good } } }).riskRegister, good, good);
+  }
+  for (const bad of ['', '  ', 1, null, '/abs/risks.md', './risks.md', 'C:/risks.md', 'c:risks.md', 'docs\risks.md', 'a/../risks.md', '../risks.md', 'docs/risks.txt', 'docs/risks', 'docs/']) {
+    assert.throws(() => normalizeConfig({ profile: 2, modules: { review: { riskRegister: bad } } }), /riskRegister/, JSON.stringify(bad));
+  }
+});
+
+test('A11 配置：toProfile 只在非默认时写出这两项，toFlat 往返不丢', () => {
+  const dflt = toProfile({});
+  assert.equal('roundClosure' in dflt.modules.review, false);
+  assert.equal('riskRegister' in dflt.modules.review, false);
+  const flat = { reviewFlow: 'pr', roundClosure: 'fix-and-record', riskRegister: 'docs/risks.md' };
+  const prof = toProfile(flat);
+  assert.equal(prof.modules.review.roundClosure, 'fix-and-record');
+  assert.equal(prof.modules.review.riskRegister, 'docs/risks.md');
+  const back = toFlat(prof);
+  assert.equal(back.roundClosure, 'fix-and-record');
+  assert.equal(back.riskRegister, 'docs/risks.md');
+  assert.equal(toProfile(back).modules.review.roundClosure, 'fix-and-record');
+  // 只改其中一项：另一项仍不写出
+  assert.equal('riskRegister' in toProfile({ reviewFlow: 'pr', roundClosure: 'fix-and-record' }).modules.review, false);
+  assert.equal('roundClosure' in toProfile({ riskRegister: 'docs/risks.md' }).modules.review, false);
+});
+
+test('A11 配置：两项是判定策略字段，取基准提交上的配置，分支自己改的不生效', () => {
+  assert.ok(POLICY_KEYS.includes('roundClosure'), '收口开关决定合并能否放行，分支不能自己打开');
+  assert.ok(POLICY_KEYS.includes('riskRegister'), '风险登记路径决定 close 核对哪份文件，分支不能自己改');
+  const root = featureRepo({ reviewFlow: 'pr' });
+  assert.equal(loadConfig(root).roundClosure, 'off');
+  write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, reviewFlow: 'pr', roundClosure: 'fix-and-record', riskRegister: 'elsewhere/risks.md' }, null, 2));
+  assert.equal(loadConfig(root).roundClosure, 'off', '分支改了不生效');
+  assert.equal(loadConfig(root).riskRegister, 'docs/04-开发/review-risks.md');
 });
