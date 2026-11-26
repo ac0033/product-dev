@@ -65,14 +65,22 @@ export function roundState({ entries, limit, closure, required = ['code', 'consi
   for (const head of firstFail.keys()) rounds.push(summarize(head, rounds.length + 1, byHead.get(head), required, rounds.at(-1)));
   const lastAllowed = rounds[limit - 1];
   let finalHead = null;
+  let finalKinds = [];
   if (lastAllowed?.collected && lastAllowed.high && !lastAllowed.unresolvable && !lastAllowed.systemic) {
-    // 最后一轮从第 N 轮收齐之后算起：收齐前（经用户同意）在别的提交上的登记不占用它
-    const seen = new Set();
-    const collectedAt = history.findIndex((e) => e.headSha === lastAllowed.head && seen.add(e.kind) && required.every((k) => seen.has(k)));
-    finalHead = history.slice(collectedAt + 1).find((e) => e.headSha !== lastAllowed.head && counted(e))?.headSha ?? null;
+    // 最后一轮从第 N 轮收齐之后算起。收齐位置以该提交首次不通过为下界（之前在该提交上的登记照算进收齐），
+    // 收齐前（经用户同意）在别的提交上的登记既不占用最后一轮，也不算最后一轮已登记的审查
+    const start = firstFail.get(lastAllowed.head);
+    const seen = new Set(history.slice(0, start).filter((e) => e.headSha === lastAllowed.head).map((e) => e.kind));
+    let collectedAt = -1;
+    for (let i = start; i < history.length && collectedAt < 0; i++) {
+      if (history[i].headSha === lastAllowed.head) seen.add(history[i].kind);
+      if (required.every((k) => seen.has(k))) collectedAt = i;
+    }
+    const after = history.slice(collectedAt + 1);
+    finalHead = after.find((e) => e.headSha !== lastAllowed.head && counted(e))?.headSha ?? null;
+    finalKinds = [...new Set(after.filter((e) => e.headSha === finalHead && counted(e)).map((e) => e.kind))];
   }
-  const state = { closure, limit, rounds, latest: rounds.at(-1) ?? null, finalHead,
-    finalKinds: [...new Set((byHead.get(finalHead) ?? []).filter(counted).map((e) => e.kind))] };
+  const state = { closure, limit, rounds, latest: rounds.at(-1) ?? null, finalHead, finalKinds };
   const [phase, reasons] = classify(state);
   return { ...state, phase, reasons };
 }
@@ -86,6 +94,8 @@ export function admitRegistration(state, { verdict, kind, head, userDecision }) 
     return '第 ' + latest.index + ' 轮还没收齐：先在 ' + latest.head.slice(0, 12) + ' 上登记 ' + latest.missingKinds.join('、') + '；收齐后才判定下一步';
   }
   if (verdict === 'defer') return null;
+  // 收口要求该轮每种审查都完整覆盖：只是部分覆盖的那种，可以在失败提交上补一份同种复审（补齐覆盖），不算加轮
+  if (phase === 'close-only' && head === latest.head && latest.records[kind] && latest.records[kind].verdict !== 'defer' && latest.records[kind].coverage !== 'full') return null;
   if (phase === 'close-only') return '第 ' + latest.index + ' 轮只剩中、低级：修完全部中级，用 review.mjs risks 写进风险登记并提交后，用 review.mjs close 登记，不再加轮';
   if (phase === 'final-next') {
     if (finalHead ? head === finalHead && !state.finalKinds.includes(kind) : head !== latest.head) return null;

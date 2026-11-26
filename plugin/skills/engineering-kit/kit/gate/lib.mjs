@@ -660,13 +660,22 @@ export function withLock(root, name, fn, label = `锁 ${name}`) {
   }
   const swapped = run(['update-ref', ref, mine, expected]);
   if (swapped.status !== 0) {
+    // git 改引用时自己先独占建 <引用>.lock；上次 git 进程异常退出会留下它，之后的比较交换都会失败，和“有人持锁”不是一回事
+    const common = run(['rev-parse', '--git-common-dir']).stdout.trim();
+    const gitLock = common ? path.join(path.resolve(root, common), ...ref.split('/')) + '.lock' : null;
+    if (gitLock && fs.existsSync(gitLock)) {
+      throw new Error(`${label}暂时取不到：git 的引用锁文件 ${gitLock} 残留（另一个 git 进程正在改这个引用，或上次异常退出）；确认没有 git 进程在运行后删除它再重试`);
+    }
     const now = run(['rev-parse', '--verify', '--quiet', ref]).stdout.trim();
     throw new Error(`${label}被占用：${holder(now).trim() || String(swapped.stderr).trim()}`);
   }
   try {
     return fn();
   } finally {
-    run(['update-ref', '-d', ref, mine]);
+    const released = run(['update-ref', '-d', ref, mine]);
+    if (released.status !== 0) {
+      process.stderr.write(`警告：${label}没有释放（${ref}）：${String(released.stderr).trim()}；确认没有进程在用后运行 git update-ref -d ${ref}\n`);
+    }
   }
 }
 

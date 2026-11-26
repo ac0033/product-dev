@@ -425,7 +425,7 @@ export function checkPrClosure(root, no, config, st, priorClose = {}) {
   // H7：部分覆盖的复审只能登记不通过，不能借收口放行；收口要求失败那一轮的每种审查都完整覆盖（一致性审的延期照旧）
   for (const [kind, record] of Object.entries(state.latest?.records ?? {})) {
     if (record.verdict === 'defer' || record.coverage === 'full') continue;
-    problems.push('第 ' + state.latest.index + ' 轮的' + KINDS[kind] + '只覆盖部分差异（' + (record.coverage ?? '没有覆盖记录') + '）：收口要求该轮每种审查都完整覆盖，先补一份从分叉点起审的复审');
+    problems.push('第 ' + state.latest.index + ' 轮的' + KINDS[kind] + '只覆盖部分差异（' + (record.coverage ?? '没有覆盖记录') + '）：收口要求该轮每种审查都完整覆盖；在失败提交 ' + state.latest.head.slice(0, 12) + ' 上补登一份从分叉点起审的' + KINDS[kind] + '（收口阶段放行，不要用户决定），再 close');
   }
   problems.push(...evidence.problems);
   return { failHead, round: state.latest?.index, entries: evidence.expected.length, problems };

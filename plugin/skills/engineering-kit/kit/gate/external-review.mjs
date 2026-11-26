@@ -957,7 +957,10 @@ export async function runExternalReview(opts) {
       const note = removeCopy(copy, runDir, identity);
       if (note) reasons.push(note);
     }
-    if (published) fs.rmSync(published, { force: true });
+    if (published) {
+      try { fs.rmSync(published, { force: true }); }
+      catch (err) { reasons.push(`已发布的报告没能撤下（${err.message}），残留在 ${published}；它不对应可登记的结果，请手动删除`); }
+    }
     const assessment = { registrable: false, verdict: null, reasons, notes: [] };
     const failure = path.join(runDir, 'assessment-' + crypto.randomUUID() + '.tmp');
     fs.writeFileSync(failure, JSON.stringify({ assessment }, null, 2) + '\n', { flag: 'wx' });

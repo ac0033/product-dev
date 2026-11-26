@@ -488,3 +488,29 @@ test('A13 admitRegistration：收齐前一致性审的延期也只能登记在�
   assert.equal(typeof admitRegistration(s, { verdict: 'defer', kind: 'consistency', head: B, userDecision: null }), 'string', '在别的提交上延期要用户决定');
   assert.equal(admitRegistration(s, { verdict: 'defer', kind: 'consistency', head: B, userDecision: '用户同意' }), null);
 });
+
+// ---------- PR #43 第 2 轮复审的回归 ----------
+
+test('A7 roundState：第 N 轮的收齐位置以该提交首次不通过为下界；更早在别的提交上的登记不占用最后一轮（PR #43 第 2 轮代码 M1、一致性 M1）', () => {
+  // B 先有两份通过，PR 到过 C，又回到 B 首次登记不通过：B 在那一刻收齐（之前的通过照算），C 的登记在它之前
+  const s = rs([...roundHigh(A), pass('code', B), pass('consistency', B), pass('code', C), fail('code', B, [f('H1'), f('M1')])]);
+  assert.equal(s.latest.head, B);
+  assert.equal(s.phase, 'final-next');
+  assert.equal(s.finalHead, null, 'B 首次不通过之前的登记不算最后一轮');
+});
+
+test('A7 roundState：最后一轮已登记的种类只算第 N 轮收齐之后的登记；收齐前（经用户同意）在同一提交上的登记不顶替最后一轮的审查（PR #43 第 2 轮代码 M1、一致性 M1）', () => {
+  const early = rec('consistency', 'pass', C, [], { userDecision: '用户同意先在 C 上登记' });
+  const s = rs([...roundHigh(A), fail('code', B, [f('H1'), f('M1')]), early, pass('consistency', B), pass('code', C)]);
+  assert.equal(s.finalHead, C);
+  assert.deepEqual(s.finalKinds, ['code'], '收齐前那份一致性审不算最后一轮已登记');
+  assert.equal(admitRegistration(s, { verdict: 'pass', kind: 'consistency', head: C, userDecision: null }), null, '最后一轮的一致性审照常放行');
+});
+
+test('A12 admitRegistration：收口阶段里某种审查只是部分覆盖时，放行在失败提交上补一份同种复审（补齐覆盖），别的登记照旧指向 close（PR #43 第 2 轮代码 M2、一致性 M2）', () => {
+  const s = rs([fail('code', A, [f('M1')]), pass('consistency', A), rec('code', 'fail', B, [f('M1')], { coverage: 'partial' }), rec('consistency', 'pass', B, [], { coverage: 'full' })]);
+  assert.equal(s.phase, 'close-only');
+  assert.equal(admitRegistration(s, { verdict: 'fail', kind: 'code', head: B, userDecision: null }), null, '在失败提交上补完整覆盖的代码复审');
+  assert.match(String(admitRegistration(s, { verdict: 'pass', kind: 'consistency', head: B, userDecision: null })), /close/, '已完整覆盖的那种不再放行');
+  assert.match(String(admitRegistration(s, { verdict: 'pass', kind: 'code', head: C, userDecision: null })), /close/, '别的提交不放行');
+});

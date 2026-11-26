@@ -574,3 +574,25 @@ test('A15 登记锁：多个进程同时取锁（开始时留着一把失效锁�
   }
   assert.equal(lockRef(root, 'pr-7'), '', '全部结束后锁已释放');
 });
+
+test('A15 登记锁：git 自己的引用锁文件残留时说明原因和处理办法；释放失败时写警告，不静默（PR #43 第 2 轮代码 M3、一致性 M3）', () => {
+  const { root } = prRepo();
+  const common = path.resolve(root, git(root, ['rev-parse', '--git-common-dir']).trim());
+  const leftover = path.join(common, 'refs', 'engineering-gate', 'locks', 'pr-7.lock');
+  fs.mkdirSync(path.dirname(leftover), { recursive: true });
+  fs.writeFileSync(leftover, '');
+  assert.throws(() => withPrLock(root, '7', () => 1), (e) => /残留/.test(e.message) && e.message.includes('pr-7.lock'));
+  fs.rmSync(leftover);
+  assert.equal(withPrLock(root, '7', () => 2), 2, '删掉残留后照常取锁');
+  // 临界区里别的进程留下了引用锁文件：释放失败要写警告
+  const warnings = [];
+  const write = process.stderr.write;
+  process.stderr.write = (s, ...rest) => { warnings.push(String(s)); return true; };
+  try {
+    assert.equal(withPrLock(root, '7', () => { fs.writeFileSync(leftover, ''); return 3; }), 3);
+  } finally {
+    process.stderr.write = write;
+  }
+  assert.match(warnings.join(''), /没有释放/);
+  fs.rmSync(leftover);
+});

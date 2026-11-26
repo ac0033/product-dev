@@ -504,3 +504,25 @@ test('A12 风险登记的读改写按文件串行：别的 PR 正在写同一份
   assert.equal(fs.existsSync(path.join(root, REG)), false, '没有写风险登记');
   must(await writeRisks(root, fix));
 });
+
+test('H7 收口被部分覆盖拦下后，在失败提交上补一份完整覆盖的同种复审（不要用户决定）即可收口（PR #43 第 2 轮代码 M2、一致性 M2）', async () => {
+  const { root } = rcRepo();
+  const c1 = addCommit(root, 1);
+  must(reg(root, 'code', 'fail', c1, [M()]));
+  must(reg(root, 'consistency', 'pass', c1));
+  const mid = addCommit(root, 2);
+  const c2 = addCommit(root, 3);
+  const partial = reviewData({ kind: 'code', verdict: 'fail', findings: [M('M2')], reviewedCommit: c2, reviewedBase: mid, dispositions: [{ id: 'M1', status: 'fixed', evidence: '已按建议修改并补了测试。' }] });
+  must(recordReview({ root, verdict: 'fail', reviewer: 'feature-dev:code-reviewer', reportPath: reviewDataFile(partial), summary: 's', pr: '7', kind: 'code', gh: fakeGh(c2) }));
+  must(reg(root, 'consistency', 'pass', c2));
+  const refused = await closeRound(root, c2);
+  assert.equal(refused.ok, false);
+  assert.match(msgOf(refused), /补/);
+  // 照提示在失败提交 c2 上补一份完整覆盖的代码复审：收口阶段放行
+  const full = must(reg(root, 'code', 'fail', c2, [M('M2')], { prHead: c2 }));
+  assert.equal(full.record.coverage, 'full');
+  const fix = fixCommit(root, 4);
+  must(await writeRisks(root, fix));
+  commitAll(root, 'risks');
+  must(await closeRound(root, headOf(root)));
+});
