@@ -2,16 +2,16 @@
 // 以 external: 开头的登记名只接受 external-review.mjs 的调用（recordReview 的 viaExternalReview 参数，命令行没有对应的参数），手动 review.mjs 登记一律拒绝；
 //   外部复审的 accept 与超过轮次上限后的 --user-decision 登记也走 external-review.mjs：register（--accept、--user-decision）核对运行目录后才调用 recordReview，
 //   run --register 也接受 --user-decision（复审跑完直接登记；--accept 只用于 register）；
-// 判定策略（复审流程、必需检查名、复审者名单、必需的节、最少字数、结论关键词、复审轮次上限）取基准提交上的配置，被审分支改了不算数（lib.mjs 的 loadConfig）。
+// 判定策略（复审流程、必需检查名、复审者名单、必需的节、最少字数、结论关键词、复审轮次上限、收口策略和风险登记路径）取基准提交上的配置，被审分支改了不算数（lib.mjs 的 loadConfig）。
 // 报告要有实质内容：必需的几节（modules.review.reviewSections，默认范围、发现、作者的验证，见 missingSections）齐全且各有内容，
 // 并且有一处明确的结论（写法见 reportVerdict）：登记 pass 要求结论是通过，登记 fail 要求结论是不通过，
-// 找不到明确结论、前后矛盾或与登记不符时拒绝。四种登记：
+// 找不到明确结论、前后矛盾或与登记不符时拒绝。fail、accept 还须有发现表，中高级每条写理由与建议改法。常规登记如下：
 //   pass / fail   复审结论。
 //   defer         一致性审延期（只限 consistency），须写理由。
 //   accept        用户接受风险：报告结论是不通过，但用户已知情并决定接受其中的问题、不再修改；须带 --user-decision 写明用户的决定及出处。
 // 复审轮次：一轮＝同一 PR（pr 流程）或同一分支（pre-push 流程）上登记过 fail 的一份被审内容：pr 流程是一个最终提交，
 //   pre-push 流程是一份工作区内容（树哈希加文档内容哈希，见 ROUND_KEYS）；同一份内容上两种 kind 都 fail 只算一轮。
-//   已有 maxReviewRounds（默认 3）份不同内容登记过 fail 后，再登记 pass 或 fail 须向用户说明后带 --user-decision；
+//   PR 收口开启时按 rounds.mjs 判定是否最后一轮、收口或停止；收口默认关闭。关闭时，已有 maxReviewRounds（默认 3）份不同内容登记过 fail 后，再登记 pass 或 fail 须向用户说明后带 --user-decision；
 //   唯一例外是在已计入的内容上首次登记另一种 kind（见 roundBlock）。accept 与 defer 不计轮次、不受拦截。每次登记成功的输出末尾给出轮次统计。
 // 按项目的复审流程（modules.gate.reviewFlow）分两种：
 //   pre-push：推送前复审，绑定当前代码树哈希和基准提交（基线）；登记 pass、fail、accept 前必须已有与当前代码、当前基线一致的通过测试记录
@@ -27,6 +27,7 @@
 //       node scripts/engineering/gate/review.mjs defer --kind consistency --reason "<理由>"
 //       node scripts/engineering/gate/review.mjs accept --kind code|consistency --reviewer <名> --report <报告文件> --user-decision "<用户的决定及出处>"
 //       pr 流程的同样命令加 --pr <编号>，且必须带 --kind。
+//       收口开启时：review.mjs close --pr <编号> --report <最新一轮任一份 fail 报告> --summary "<修复摘要>"。
 // 报告文件放在仓库之外（例如系统临时目录），它不属于被审代码。
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -35,12 +36,14 @@ import {
   assertPolicy,
   defaultGh,
   gateScope,
+  git,
   headInfo,
   isMain,
   loadConfig,
   prLogFile,
   prNumber,
   prRecordFile,
+  readLog,
   readPr,
   readRecord,
   recordDir,
@@ -49,142 +52,14 @@ import {
   uncommittedInScope,
   writeRecord,
 } from './lib.mjs';
+import { fenceHint, findingProblems, missingSections, parseFindings, reportVerdict } from './report.mjs';
+import { failKeys, lastFailRound, ROUND_KEYS, roundBlock, roundLine, roundState, trendWarnings } from './rounds.mjs';
+import { checkRegisterAt, REQUIRED } from './clearance.mjs';
 
-/** 转义正则特殊字符，使配置的结论关键词可以安全地放进正则。 */
-function escapeRe(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/** 去掉 Markdown 修饰（星号、下划线、反引号）和首尾空白，留下文字本身。 */
-function plain(s) {
-  return s.replace(/[*_`]/g, '').trim();
-}
-
-/** 结论词后紧跟括号的写法（如“通过（待 M2 修复后）”“通过（或 不通过）”）：不认，提示里说明。 */
-const BRACKETED = /^(?:通过|不通过|未通过)\s*[（(]/;
-
-/**
- * 一段文字是不是单独的结论词：通过 / 不通过 / 未通过（只认这三个中文词；允许句末标点）。返回 pass、fail、bracketed 或 null。
- * 结论词后带括号的返回 bracketed（不算结论）：括号里常是“待修复后”“或 不通过”这类让结论不再确定的话。
- */
-function verdictWord(s) {
-  const t = plain(s).replace(/[。.！!]+$/, '').trim();
-  if (t === '通过') return 'pass';
-  if (t === '不通过' || t === '未通过') return 'fail';
-  if (BRACKETED.test(t)) return 'bracketed';
-  return null;
-}
-
-/**
- * 两种写法共用的判定规则：把结论文字按 `，,；;。：:` 拆成小句，去掉修饰符号后整句恰好是结论词的小句才算。
- * 返回 { verdict: 'pass'|'fail'|'conflict'|null, bracketed }（conflict：同一处既有通过又有不通过；bracketed：有结论词后带括号的小句）。
- * 所以“有 2 个高级问题，不通过”是不通过，“通过。一句话理由”“不通过：H1 未修复”都认得出，
- * “通过前需修复 H1”“通过与否取决于…”“通过（待 M2 修复后）”都不算结论。
- */
-function clauseVerdict(s) {
-  const all = s.replace(/^[\s>-]*/, '').split(/[，,；;。：:]/).map(verdictWord);
-  const words = new Set(all.filter((w) => w === 'pass' || w === 'fail'));
-  const bracketed = all.includes('bracketed');
-  if (words.size > 1) return { verdict: 'conflict', bracketed };
-  return { verdict: words.size === 1 ? [...words][0] : null, bracketed };
-}
-
-/**
- * 逐行标出代码围栏。围栏用三个以上的反引号或波浪线开头（开头行的说明文字允许有，反引号围栏的说明文字里不能再有反引号），
- * 闭合行要用同一种字符、个数不少于开头、后面没有别的文字（CommonMark 的写法），所以四个反引号的围栏里可以放三个反引号的模板。
- * 比 CommonMark 宽松的地方：围栏标记前的缩进不限（CommonMark 只允许三个空格内，便于列表里缩进的围栏）；写在引用块（“>”开头）里的围栏不认。
- * 返回 { lines, unclosedAt }：lines 的每项是 { text, fenced, marker }（fenced 是在围栏内，含两条围栏标记行；marker 是围栏标记行本身）；
- * unclosedAt 是没闭合的围栏开头所在行号（从 1 数），都闭合了为 null。围栏没闭合时，其后的全部行都按围栏内处理。
- */
-export function markFences(text) {
-  const lines = [];
-  let open = null; // { ch, len, at }
-  String(text).split(/\r?\n/).forEach((raw, i) => {
-    if (open) {
-      const close = /^\s*(`{3,}|~{3,})\s*$/.exec(raw);
-      if (close && close[1][0] === open.ch && close[1].length >= open.len) {
-        open = null;
-        lines.push({ text: raw, fenced: true, marker: true });
-      } else lines.push({ text: raw, fenced: true, marker: false });
-      return;
-    }
-    const start = /^\s*(`{3,}|~{3,})(.*)$/.exec(raw);
-    if (start && !(start[1][0] === '`' && start[2].includes('`'))) {
-      open = { ch: start[1][0], len: start[1].length, at: i + 1 };
-      lines.push({ text: raw, fenced: true, marker: true });
-    } else lines.push({ text: raw, fenced: false, marker: false });
-  });
-  return { lines, unclosedAt: open ? open.at : null };
-}
-
-/** 围栏没闭合时给提示用的说明：围栏里的行不能当标题或结论，没闭合时其后的内容全被当成围栏。没有未闭合的围栏返回空串。 */
-function fenceHint(text) {
-  const { unclosedAt } = markFences(text);
-  return unclosedAt === null ? '' : `；报告里第 ${unclosedAt} 行起的代码围栏没有闭合（要用同一种围栏符号再写一行结束），围栏里的行不当标题或结论，其后的各节和结论都会认不出`;
-}
-
-/**
- * 从报告里找出明确的结论。认两种写法（keyword 默认是“结论”，可配置），判定规则相同（clauseVerdict）：
- *   同一行：`结论：……`，行首允许井号、引用符、列表符，词两边允许星号，判定冒号后的文字。
- *   标题行：只有关键词的一行（如 `## 结论`），判定其后第一个非空行。
- * 代码围栏里的行（含围栏标记行）不参与：报告把第 7 节模板原样放进围栏时，里面的“结论：通过”不能当真，标题行之后找“第一个非空行”也跳过围栏。
- * 返回 { verdict: 'pass'|'fail'|null, conflict, bracketed }：找不到时 verdict 为 null；出现多处且不一致时 conflict 为 true、verdict 为 null；
- * bracketed 表示有结论词后带括号的写法（没认作结论），提示里据此说明。
- */
-export function reportVerdict(text, keyword = '结论') {
-  const k = escapeRe(keyword);
-  const heading = new RegExp(`^[\\s>#*_-]*${k}[\\s*_]*[:：]?[\\s*_]*$`);
-  const inline = new RegExp(`^[\\s>#*_-]*${k}(?:[\\s*_]*[:：]|[\\s*_]+)[\\s*_]*(.+)$`);
-  const { lines } = markFences(text);
-  const found = [];
-  let bracketed = false;
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].fenced) continue;
-    let body = null;
-    if (heading.test(lines[i].text)) body = lines.slice(i + 1).find((l) => !l.fenced && l.text.trim() !== '')?.text ?? null;
-    else body = inline.exec(lines[i].text)?.[1] ?? null;
-    if (body === null) continue;
-    const v = clauseVerdict(body);
-    if (v.bracketed) bracketed = true;
-    if (v.verdict === 'conflict') found.push('pass', 'fail');
-    else if (v.verdict) found.push(v.verdict);
-  }
-  const kinds = new Set(found);
-  if (kinds.size > 1) return { verdict: null, conflict: true, bracketed };
-  return { verdict: kinds.size === 1 ? [...kinds][0] : null, conflict: false, bracketed };
-}
-
-/**
- * 报告里缺哪几节。一节算有，要同时满足：
- *   标题行：井号加空格开头（可带编号，如“## 1. 范围”“### 一、范围”），标题文字以节名开头，其后是空白、括号、冒号或行尾；或同一行写“节名：内容”
- *     （行首可以有引用符、列表符、星号；有井号的话和标题行一样，井号后要有空格，“##范围：x”不认）；
- *   有内容：标题行之后、下一个同级或更高级标题之前至少有一个非空、非标题的行（更深一级的子标题本身不算内容）；同一行写法的冒号后要有字。
- * 代码围栏（```）里的行不能当标题，防止把模板原样放进围栏冒充各节；围栏里写的内容算所在一节的内容（例如“作者的验证”下直接贴测试输出），
- * 但围栏标记行本身不算：只有两行围栏标记、里面什么也没有的空围栏不算有内容。围栏没闭合时其后的行都按围栏内处理（markFences）。节名只比较文字，不分大小写。
- */
-export function missingSections(text, sections) {
-  const { lines } = markFences(text);
-  const level = (l) => (l.fenced ? 0 : (/^\s{0,3}(#{1,6})\s/.exec(l.text)?.[1].length ?? 0));
-  return sections.filter((name) => {
-    const n = escapeRe(name);
-    const head = new RegExp(`^\\s{0,3}(#{1,6})\\s+(?:\\d+[.、)）]?\\s*|[一二三四五六七八九十]+[、.]\\s*)?[*_]*${n}[*_]*(?:[\\s（(:：]|$)`, 'i');
-    // 行首的引用符、列表符、井号各自吃掉自己后面的空白，组内不再另留 \s*：同一段空白只有一种分法，匹配失败时回溯量与行长成正比（有计时测试）
-    const inline = new RegExp(`^\\s*(?:(?:#{1,6}|[-*+])[ \\t]+|>[ \\t]*)*[*_]*${n}[\\s*_]*[:：][\\s*_]*\\S`, 'i');
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].fenced) continue;
-      if (inline.test(lines[i].text)) return false;
-      const m = head.exec(lines[i].text);
-      if (!m) continue;
-      const depth = m[1].length;
-      for (let j = i + 1; j < lines.length; j++) {
-        const lv = level(lines[j]);
-        if (lv > 0 && lv <= depth) break;
-        if (lv === 0 && !lines[j].marker && lines[j].text.trim() !== '') return false;
-      }
-    }
-    return true;
-  });
-}
+/** 旧入口保留报告检查接口，已有调用方可继续使用。 */
+export { markFences, missingSections, reportVerdict } from './report.mjs';
+/** 旧入口保留按流程选取轮次键的约定。 */
+export { ROUND_KEYS } from './rounds.mjs';
 
 /** 审查种类及中文名。 */
 const KINDS = { code: '代码复审', consistency: '一致性审' };
@@ -236,86 +111,23 @@ function checkReport(config, expect, reviewer, reportPath, label = expect) {
     const said = found.verdict === 'pass' ? '通过' : '不通过';
     return { ok: false, message: `报告结论写的是“${said}”，不能记录为 ${label}（${how}）` };
   }
+  if (expect === 'fail') {
+    const problems = findingProblems(text);
+    if (problems.length) return { ok: false, message: '复审报告发现表不合格：\n' + problems.join('\n') };
+  }
   return { ok: true, text };
 }
 
-/** 读取 jsonl 历史；文件不存在时为空，坏行跳过。路径被占成目录等读不了的情况抛错（不放行）。 */
-function readLog(file) {
-  if (!fs.existsSync(file)) return [];
-  return fs
-    .readFileSync(file, 'utf8')
-    .split('\n')
-    .filter((l) => l.trim())
-    .flatMap((l) => {
-      try {
-        return [JSON.parse(l)];
-      } catch {
-        return [];
-      }
-    });
-}
+const sha256 = (text) => crypto.createHash('sha256').update(text).digest('hex');
 
-/** 1–10 的中文数字（拦截提示里写“已审三轮”）；更大的写阿拉伯数字。 */
-function cnNumber(n) {
-  return n >= 1 && n <= 10 ? '一二三四五六七八九十'[n - 1] : String(n);
-}
-
-/**
- * 轮次的键：一轮＝登记过不通过的一份被审内容。pr 流程是 PR 的最终提交（headSha）；pre-push 流程是登记时的工作区内容，
- * 用记录里的树哈希加文档内容哈希（treeHash:docHash）——不用 HEAD 提交号：修复留在工作区不提交时 HEAD 不变；reset 回已经计入的
- * 旧提交时，HEAD 就是那个已计入的提交。两种情况按提交号计，新内容都会被当成已计入的那一轮而放行，上限失效。
- * 只用树哈希又分不出只改文档的各轮（树哈希不含 reviewIgnore 之内的文档）。缺这些字段的旧记录各算一个。
- */
-export const ROUND_KEYS = {
-  pr: { unit: '按提交计', of: (e, i) => e.headSha || `无提交号#${i}` },
-  'pre-push': { unit: '按被审内容计', of: (e, i) => (e.treeHash && e.docHash ? `${e.treeHash}:${e.docHash}` : `无内容哈希#${i}`) },
-};
-
-/** 已计入轮次的键（登记过 fail 的被审内容），按第一次登记 fail 的先后排列；同一份内容上两种审查都 fail 只算一个。 */
-function failKeys(entries, keyOf) {
-  const keys = [];
-  entries.forEach((e, i) => {
-    if (e.verdict !== 'fail') return;
-    const key = keyOf(e, i);
-    if (!keys.includes(key)) keys.push(key);
-  });
-  return keys;
-}
-
-/**
- * 轮次核对：prior 是同一 PR 或同一分支此前的登记，cur 是本次登记的 { key, kind }。返回拒绝信息，放行时返回 null。
- * - accept、defer 不计轮次、不受拦截；上限未满时任何 pass、fail（包括同一内容同一 kind 重新登记）都放行。
- * - 已有 limit 份不同内容登记过 fail 之后，pass、fail 须带 userDecision，只有一个例外：这份内容已经计入轮次，
- *   而本次的 kind 在这份内容上还没登记过 pass 或 fail——并行双审的第二份登记不能被它自己这一轮拦住。
- * 例（上限 3）：第 3 份内容上代码复审 fail 已登记，同一内容的一致性审第一次登记（fail 或 pass）照常；同一内容再登记代码复审、
- * 或一致性审第二次登记，都要 userDecision；第 4 份内容上的任何 pass、fail 都要 userDecision；改回已计入的旧内容（例如 reset）时，同一 kind 重登同样要。
- */
-function roundBlock(prior, verdict, limit, userDecision, scope, cur, keyOf) {
-  if (verdict !== 'pass' && verdict !== 'fail') return null;
+/** 为本次记录计算内容轮次、报告指纹和发现统计；延期没有报告，不能作为收口依据。 */
+function reportFields(prior, keyOf, key, text) {
   const counted = failKeys(prior, keyOf);
-  if (counted.length < limit || (userDecision && userDecision.trim())) return null;
-  const sameKindDone = prior.some((e, i) => keyOf(e, i) === cur.key && e.kind === cur.kind && (e.verdict === 'pass' || e.verdict === 'fail'));
-  if (counted.includes(cur.key) && !sameKindDone) return null;
-  return (
-    `已审${cnNumber(limit)}轮仍需再审：向用户说明剩余问题、原因和已做处置，由用户决定；用户同意继续的，带 --user-decision "<用户的决定及出处>" 重新登记` +
-    `（${scope}已有 ${counted.length} 份不同的被审内容登记过不通过，上限 ${limit} 轮，见 modules.review.maxReviewRounds）`
-  );
-}
-
-/**
- * 登记成功后的轮次统计行：第几轮（accept、defer 不计轮次）、累计登记次数、涉及的不同提交数。entries 含本次（在最后），key 是本次的键。
- * 本次的内容已计入时就是它那一轮；还没计入（本次是 pass）时是下一轮。
- */
-function roundLine(entries, verdict, limit, scope, key, keys) {
-  const counted = failKeys(entries, keys.of);
-  const commits = new Set(entries.map((e) => e.headSha).filter(Boolean)).size;
-  const tail = `${scope}累计登记 ${entries.length} 次，涉及 ${commits} 个不同提交`;
-  if (verdict === 'pass' || verdict === 'fail') {
-    const at = counted.indexOf(key);
-    const round = at >= 0 ? at + 1 : counted.length + 1;
-    return `复审轮次：第 ${round} 轮（${keys.unit}，上限 ${limit} 轮），${tail}`;
-  }
-  return `复审轮次：本次${verdict === 'accept' ? '接受风险' : '延期'}不计轮次；已审 ${counted.length} 轮（${keys.unit}，上限 ${limit} 轮），${tail}`;
+  const at = counted.indexOf(key);
+  const round = at < 0 ? counted.length + 1 : at + 1;
+  if (text === null) return { round, reportSha: null, findings: null };
+  const { rows, ...findings } = parseFindings(text);
+  return { round, reportSha: sha256(text), findings: rows.length ? findings : null };
 }
 
 /** 两种流程共用的参数校验：结论种类、defer 与 accept 的必填项。返回拒绝信息或 null。 */
@@ -342,6 +154,7 @@ export function recordReview({ root, verdict, reviewer, reportPath, summary = ''
   }
   const config = loadConfig(root);
   assertPolicy(config); // reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewSections、reviewKeyword、maxReviewRounds 取基准提交上的配置，取不到时不按工作区的值登记
+  if (verdict === 'close') return recordClose({ root, config, pr, reportPath, summary, kind, reviewer, gh });
   if (config.reviewFlow === 'pr') return recordPrReview({ root, config, verdict, reviewer, reportPath, summary, pr, kind, reason, userDecision, gh });
   if (pr !== undefined) {
     return { ok: false, message: '本项目的复审流程是 pre-push，不接受 --pr；要启用 PR 双审，在主干上把 modules.gate.reviewFlow 改为 pr（闸门按基准提交上的配置判定）' };
@@ -378,7 +191,7 @@ export function recordReview({ root, verdict, reviewer, reportPath, summary = ''
   const docHash = treeHash(root, docs);
   const keys = ROUND_KEYS['pre-push'];
   const key = keys.of({ treeHash: hash, docHash }, prior.length);
-  const blocked = roundBlock(prior, verdict, config.maxReviewRounds, userDecision, scopeName, { key, kind: k }, keys.of);
+  const blocked = roundBlock(prior, verdict, { limit: config.maxReviewRounds, userDecision, scope: scopeName, cur: { key, kind: k }, keyOf: keys.of });
   if (blocked) return { ok: false, message: blocked };
 
   const docsOnly = scope.length === 0;
@@ -392,6 +205,7 @@ export function recordReview({ root, verdict, reviewer, reportPath, summary = ''
     fs.writeFileSync(copy, text);
   }
   const record = {
+    ...reportFields(prior, keys.of, key, text),
     kind: k, verdict, reviewer: reviewer ?? null, treeHash: hash, base: baseRev, branch, headSha, docHash, docFiles: docs.length, docsOnly, uncommitted,
     summary, reason: reason ?? null, userDecision: userDecision ?? null, report: copy, at,
   };
@@ -431,7 +245,7 @@ function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, 
   if (st.ciProblems.length > 0) return { ok: false, message: `CI 未在最终提交 ${st.head.slice(0, 12)} 上全部通过，不能登记：\n  ${st.ciProblems.join('\n  ')}` };
   // 轮次按提交计，要先知道这次登记对应 PR 的哪个最终提交
   const keys = ROUND_KEYS.pr;
-  const blocked = roundBlock(prior, verdict, config.maxReviewRounds, userDecision, scopeName, { key: st.head, kind }, keys.of);
+  const blocked = roundBlock(prior, verdict, { limit: config.maxReviewRounds, userDecision, scope: scopeName, cur: { key: st.head, kind }, keyOf: keys.of, closure: config.roundClosure });
   if (blocked) return { ok: false, message: blocked };
 
   const file = prRecordFile(root, no, kind);
@@ -441,14 +255,75 @@ function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, 
     copy = path.join(path.dirname(file), `${kind}-${new Date().toISOString().replace(/[:.]/g, '-')}-${verdict}.md`);
     fs.writeFileSync(copy, text);
   }
-  const record = { pr: no, kind, verdict, reviewer: reviewer ?? null, headSha: st.head, summary, reason: reason ?? null, userDecision: userDecision ?? null, report: copy, at: new Date().toISOString() };
+  const record = {
+    ...reportFields(prior, keys.of, st.head, text), pr: no, kind, verdict, reviewer: reviewer ?? null,
+    headSha: st.head, summary, reason: reason ?? null, userDecision: userDecision ?? (config.roundClosure === 'off' ? null : undefined),
+    report: copy, at: new Date().toISOString(),
+  };
   // 先追加历史（轮次按它计数），再写最新记录（merge.mjs 读它）
-  fs.appendFileSync(logFile, `${JSON.stringify(record)}\n`);
-  fs.writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`);
+  savePrRecord(root, record);
   const lines = [`已登记 PR #${no} 的${KINDS[kind]}（${verdict}，最终提交 ${st.head.slice(0, 12)}）`];
   if (verdict === 'accept') lines.push(`用户决定接受风险：${userDecision}`);
-  lines.push(roundLine([...prior, record], verdict, config.maxReviewRounds, scopeName, st.head, keys));
+  const entries = [...prior, record];
+  lines.push(roundLine(entries, verdict, config.maxReviewRounds, scopeName, st.head, keys));
+  if (config.roundClosure === 'fix-and-record' && verdict === 'fail') {
+    const { phase } = roundState(entries, { keyOf: keys.of, limit: config.maxReviewRounds, closure: config.roundClosure });
+    if (phase === 'final-next') lines.push('下一轮是最后一轮，修后复核用 --final-round');
+    if (phase === 'close-only') lines.push('修复中级问题并写入风险登记后，运行 review.mjs close');
+    if (phase === 'stop') lines.push('停下向用户汇报，建议单开对话专项处理');
+    const warnings = trendWarnings(entries, keys.of);
+    if (warnings.length) lines.push(...warnings, '请先停下向用户汇报，建议专项处理');
+  }
   return { ok: true, message: lines.join('\n'), record };
+}
+
+
+/** 登记 PR 收口：从日志重建最新轮次，核对报告正文、修复提交和该提交里的风险登记后才写记录。 */
+function recordClose({ root, config, pr, reportPath, summary, kind, reviewer, gh }) {
+  if (config.reviewFlow !== 'pr' || config.roundClosure !== 'fix-and-record') {
+    return { ok: false, message: '本项目未开启 PR 轮次收口（roundClosure: fix-and-record）' };
+  }
+  if (pr === undefined) return { ok: false, message: '收口须带 --pr <编号>' };
+  const no = prNumber(pr);
+  const problems = [];
+  if (kind !== undefined || reviewer !== undefined) problems.push('close 不带 --kind 或 --reviewer');
+  if (!summary.trim()) problems.push('收口须用 --summary 写明修复摘要');
+  const st = readPr(root, no, gh, config.requiredChecks);
+  if (st.state !== 'OPEN') problems.push('PR #' + no + ' 不是打开状态（' + st.state + '）');
+  if (st.ciProblems.length) problems.push('最终提交 CI 未全部通过：' + st.ciProblems.join('、'));
+  const prior = readLog(prLogFile(root, no));
+  const keyOf = ROUND_KEYS.pr.of;
+  const { phase, counted } = roundState(prior, { keyOf, limit: config.maxReviewRounds, closure: config.roundClosure });
+  const { failHead, latest, mediumIds } = lastFailRound(prior, keyOf);
+  if (phase !== 'close-only') problems.push('当前轮次不满足收口条件（已审 ' + counted + ' 轮，阶段 ' + phase + '）');
+  if (latest.some((e) => e.findings?.high)) problems.push('最新一轮仍有高级问题');
+  if (phase === 'stop') problems.push('停下向用户汇报，建议单开对话专项处理');
+  const reportSha = reportPath && fs.existsSync(reportPath) && fs.statSync(reportPath).isFile()
+    ? sha256(fs.readFileSync(reportPath, 'utf8')) : null;
+  if (!reportSha || !latest.some((e) => e.reportSha === reportSha)) problems.push('--report 须与最新一轮已登记的 fail 报告正文一致');
+  if (failHead === st.head) problems.push('最终提交与最新一轮被审提交相同，没有新修复提交');
+  else if (failHead && !git(root, ['merge-base', '--is-ancestor', failHead, st.head]).ok) {
+    problems.push('无法确认最新一轮被审提交是最终提交的祖先，本地缺提交时请先 git fetch');
+  }
+  for (const required of REQUIRED) {
+    if (!prior.some((e) => e.kind === required.kind && VERDICTS.includes(e.verdict))) problems.push('缺少' + required.name + '的登记历史');
+  }
+  const record = {
+    pr: no, kind: 'close', verdict: 'close', reviewer: null, headSha: st.head, failHead, closedRound: counted,
+    riskRegister: config.riskRegister, registerRows: mediumIds.length, mediumIds, summary, at: new Date().toISOString(),
+  };
+  problems.push(...checkRegisterAt(root, st.head, config.riskRegister, record));
+  if (problems.length) return { ok: false, message: problems.join('\n') };
+  savePrRecord(root, record);
+  return { ok: true, message: '已登记 PR #' + no + ' 第 ' + counted + ' 轮收口（已修、未再复审）', record };
+}
+
+/** 先写 PR 日志再更新最新记录，日志写入失败时不能出现可放行的新记录。 */
+function savePrRecord(root, record) {
+  const file = prRecordFile(root, record.pr, record.kind);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(prLogFile(root, record.pr), JSON.stringify(record) + '\n');
+  fs.writeFileSync(file, JSON.stringify(record, null, 2) + '\n');
 }
 
 /** 解析命令行参数：第一个位置参数是结论，其余为 --key value。 */

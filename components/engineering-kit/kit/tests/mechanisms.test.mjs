@@ -17,8 +17,12 @@ import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, TEST_CONFIG,
 
 /** 合格的复审报告正文（不含结论），字数够。 */
 const BODY = '范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n已逐条核对改动的 dedup 函数与测试用例，边界条件（空数组、重复项）均有覆盖，调用方也已核对。\n处置：无需处理。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n';
+const FAIL_TABLE = `| 编号 | 级别 | 位置 | 问题 | 触发条件或例子 | 理由 | 建议改法 |
+|---|---|---|---|---|---|---|
+| H1 | 高 | src/dedup.ts | 去重改变顺序 | 输入重复项 | 调用方依赖输入顺序 | 保留首次出现的元素顺序 |`;
+const FAIL_BODY = BODY.replace('\n处置：', `\n${FAIL_TABLE}\n处置：`);
 const PASS_REPORT = `${BODY}## 结论\n通过。无高、中级问题。\n`;
-const FAIL_REPORT = `${BODY}## 结论\n不通过。H1 未修复。\n`;
+const FAIL_REPORT = `${FAIL_BODY}## 结论\n不通过。H1 未修复。\n`;
 
 /** 两个测试分组：dedup（源文件与测试）和 rank（一个目录）。 */
 const GROUPS = [

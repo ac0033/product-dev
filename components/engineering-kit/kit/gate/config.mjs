@@ -1,11 +1,11 @@
 // 项目配置（engineering.config.json）的 profile 结构与展开。业务含义：
 //   项目配置是唯一由项目自己维护的文件，结构分四段，便于升级时只改动套件认可的字段：
 //     modules  —— 模块参数：gate（基准分支、测试命令、环境变量、测试分组 testGroups、锁时长、复审流程 reviewFlow、必需检查 requiredChecks、执行位置 fullTests 与 ciRunner）、
-//                 review（复审者名单、报告必需的节 reviewSections、可选的最少字数 reviewMinChars、结论关键词、复审轮次上限 maxReviewRounds、允许的外部复审执行器 externalExecutors、外发前追加排除 externalExclude）
+//                 review（复审者名单、报告必需的节 reviewSections、可选的最少字数 reviewMinChars、结论关键词、复审轮次上限 maxReviewRounds、收口策略 roundClosure、风险登记路径 riskRegister、允许的外部复审执行器 externalExecutors、外发前追加排除 externalExclude）
 //     layout   —— 目录布局：源文件与测试的 glob、阶段目录、允许的顶层目录
 //     hygiene  —— 巡检参数：禁用文件名片段、草稿超期天数、记录类目录、合法状态值
 //     rules    —— 规则：不计入闸门的文档（reviewIgnore；项目配置、豁免表、套件脚本除外，永远计入）、注释检查模式（commentMode）
-//   这里只做结构展开与取值校验。闸门运行时 base 与判定策略字段（reviewIgnore、reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewSections、reviewKeyword、maxReviewRounds、externalExecutors、externalExclude、fullTests、ciRunner）
+//   这里只做结构展开与取值校验。闸门运行时 base 与判定策略字段（reviewIgnore、reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewSections、reviewKeyword、maxReviewRounds、roundClosure、riskRegister、externalExecutors、externalExclude、fullTests、ciRunner）
 //   的生效值不取工作区，而取主干或基准提交上的配置，见 lib.mjs 的 loadConfig。
 //   闸门内部只使用“扁平”字段（FLAT_KEYS），由 normalizeConfig 展开；旧版扁平配置仍可读取，便于回滚。
 // 同步器通过 toProfile / toFlat 在两种结构之间转换，保证回滚到旧版本时配置格式也随之回退。
@@ -13,7 +13,7 @@
 /** 闸门使用的扁平字段名（与旧版 engineering.config.json 相同）。 */
 export const FLAT_KEYS = [
   'base', 'sourceGlobs', 'testGlobs', 'reviewIgnore', 'commentMode', 'testCommand', 'testEnv',
-  'reviewers', 'reviewMinChars', 'reviewSections', 'reviewKeyword', 'lockMaxAgeMinutes', 'reviewFlow', 'testGroups', 'maxReviewRounds', 'requiredChecks',
+  'reviewers', 'reviewMinChars', 'reviewSections', 'reviewKeyword', 'lockMaxAgeMinutes', 'reviewFlow', 'testGroups', 'maxReviewRounds', 'roundClosure', 'riskRegister', 'requiredChecks',
   'externalExecutors', 'externalExclude', 'fullTests', 'ciRunner', 'ciFallback', 'ciOs', 'session', 'parallel',
 ];
 
@@ -39,6 +39,8 @@ export const DEFAULTS = {
   reviewFlow: 'pre-push',
   testGroups: [],
   maxReviewRounds: 3,
+  roundClosure: 'off',
+  riskRegister: 'docs/04-开发/review-risks.md',
   requiredChecks: [],
   externalExecutors: [],
   externalExclude: [],
@@ -104,6 +106,12 @@ export function normalizeConfig(raw) {
   }
   if (!Number.isInteger(eff.maxReviewRounds) || eff.maxReviewRounds < 1) {
     throw new Error(`engineering.config.json 的 modules.review.maxReviewRounds 必须是正整数（当前 ${JSON.stringify(eff.maxReviewRounds)}）`);
+  }
+  if (!['off', 'fix-and-record'].includes(eff.roundClosure)) throw new Error('modules.review.roundClosure 只能是 off 或 fix-and-record');
+  if (eff.roundClosure !== 'off' && eff.reviewFlow !== 'pr') throw new Error('modules.review.roundClosure 开启时要求 reviewFlow 为 pr');
+  const path = eff.riskRegister;
+  if (typeof path !== 'string' || /^(?:\/|\.\/|[a-z]:)|[\\\x00-\x1f]|\.\./i.test(path) || !path.endsWith('.md')) {
+    throw new Error('modules.review.riskRegister 须为以 .md 结尾的仓库相对路径，使用正斜杠，不含 ..');
   }
   checkTypes(eff);
   checkExecution(eff);
@@ -261,6 +269,8 @@ function expand(raw) {
     reviewMinChars: pick(review, 'reviewMinChars', 'modules.review'),
     reviewSections: pick(review, 'reviewSections', 'modules.review'),
     reviewKeyword: pick(review, 'reviewKeyword', 'modules.review'),
+    roundClosure: pick(review, 'roundClosure', 'modules.review'),
+    riskRegister: pick(review, 'riskRegister', 'modules.review'),
     maxReviewRounds: pick(review, 'maxReviewRounds', 'modules.review'),
     externalExecutors: pick(review, 'externalExecutors', 'modules.review'),
     externalExclude: pick(review, 'externalExclude', 'modules.review'),
@@ -286,6 +296,9 @@ export function toProfile(flat, { keepZeroMinChars = false } = {}) {
   if (f.testGroups.length > 0) gate.testGroups = f.testGroups;
   if (f.requiredChecks.length > 0) gate.requiredChecks = f.requiredChecks;
   const review = { reviewers: f.reviewers, reviewSections: f.reviewSections, reviewKeyword: f.reviewKeyword, maxReviewRounds: f.maxReviewRounds };
+  for (const key of ['roundClosure', 'riskRegister']) {
+    if (f[key] !== DEFAULTS[key]) review[key] = f[key];
+  }
   // 显式写了 0 的旧配置（keepZeroMinChars，由调用方按原始文件判断）保留这个 0：回滚时 toFlat 据此继续写出 0，旧版不会回到自己的默认字数
   if (f.reviewMinChars > 0 || (keepZeroMinChars && f.reviewMinChars === 0)) review.reviewMinChars = f.reviewMinChars;
   if (f.externalExecutors.length > 0) review.externalExecutors = f.externalExecutors;
@@ -316,6 +329,10 @@ export function toFlat(profile) {
   const eff = normalizeConfig(profile);
   const out = {};
   for (const k of FLAT_KEYS) out[k] = eff[k];
+  // 收口策略未定制时保留旧扁平结构，重新展开仍会得到相同的默认值。
+  for (const key of ['roundClosure', 'riskRegister']) {
+    if (out[key] === DEFAULTS[key]) delete out[key];
+  }
   // 旧版套件只认字数：默认的 0 不写出去，让旧版用它自己的默认值（回滚后恢复旧行为），显式写了正数的照常保留；
   // 项目显式写了 0（明确不要字数检查）的也保留：旧版同样按 0 不检查，删掉它会让旧版回到自己的默认字数，回滚后检查反而变严
   const explicit = isObject(profile?.modules?.review) ? profile.modules.review.reviewMinChars : undefined;
