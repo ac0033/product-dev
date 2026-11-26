@@ -274,7 +274,8 @@ test('verify：pre-push 流程推送要求全量记录（affected 时提示跑�
 
 /** 登记一次 pre-push 复审。 */
 function prePush(root, verdict, extra = {}) {
-  const data = verdict === 'pass' ? passData() : failData();
+  const over = { kind: extra.kind ?? 'code' };
+  const data = verdict === 'pass' ? passData(over) : failData(over);
   return recordReview({ root, verdict, reviewer: 'general-purpose', reportPath: reviewDataFile(data), summary: 's', ...extra });
 }
 
