@@ -2,7 +2,7 @@
 // 业务含义：闸门要回答三件事——这次改动了哪些文件（范围）、这些文件现在的内容是什么（树哈希）、
 // 测试与复审记录是不是针对这份内容、这个基准提交做的（绑定）。范围只有一个口径（gateScope）：
 // 配置、豁免表和套件脚本永远在范围内。判定依据不由被审分支决定，在 loadConfig 一处得出：基准分支设置（base）取默认主干上的配置，
-// 判定策略字段（POLICY_KEYS：reviewIgnore、reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewSections、reviewKeyword、maxReviewRounds、externalExecutors、externalExclude、fullTests、ciRunner）取基准提交上的配置。
+// 判定策略字段（含复审轮次、收口方式和风险登记路径，见 POLICY_KEYS）取基准提交上的配置。
 // 只读 git 与工作区，写入只发生在 git 目录下的记录目录里，
 // 不污染工作区。测试与推送前复审记录放在各工作树自己的 git 目录（互不覆盖）；全局锁与 PR 审查记录（pr 流程）
 // 放在 git 公共目录：同一仓库同时只跑一个闸门，PR 的复审与合并可以在不同工作树进行。
@@ -17,7 +17,7 @@ export const CONFIG_FILE = 'engineering.config.json';
 /** 豁免表（相对仓库根）。每一条都必须写理由，复审时逐条核对。 */
 export const EXEMPT_FILE = 'scripts/engineering/exempt.json';
 
-import { normalizeConfig } from './config.mjs';
+import { DEFAULTS, normalizeConfig } from './config.mjs';
 
 /** 判断当前脚本是否被直接运行（而不是被测试 import），用于决定是否执行命令行入口。 */
 // 入口判断按真实路径比较：Node 的模块地址是真实路径，而命令行里可能经过目录连接（junction/符号链接），
@@ -61,7 +61,7 @@ export function gitCommonDir(root) {
  * 其余字段（testCommand、testEnv、testGroups、sourceGlobs、testGlobs、commentMode、layout、hygiene 等）仍用工作区的值：它们随功能分支一起变化是正常的（新加语言、改测试命令），而且配置文件
  * 永远在闸门范围内，改了就要过测试与复审，会被复审者看到。base 另由默认主干上的配置决定（mainlineBase）。
  */
-export const POLICY_KEYS = ['reviewIgnore', 'reviewFlow', 'requiredChecks', 'reviewers', 'reviewMinChars', 'reviewSections', 'reviewKeyword', 'maxReviewRounds', 'externalExecutors', 'externalExclude', 'fullTests', 'ciRunner'];
+export const POLICY_KEYS = ['reviewIgnore', 'reviewFlow', 'requiredChecks', 'reviewers', 'reviewMinChars', 'reviewSections', 'reviewKeyword', 'maxReviewRounds', 'roundClosure', 'riskRegister', 'externalExecutors', 'externalExclude', 'fullTests', 'ciRunner'];
 
 /**
  * 读取某个提交上的项目配置并展开。该提交上没有配置文件时返回 null；读不出或不合法时抛错（失败不放行），
@@ -335,8 +335,8 @@ export const DEPENDENCY_FILES = [
 ];
 
 /** 是否算文档（不计入闸门范围）：匹配给定的 reviewIgnore，且不是永远在范围内的文件。 */
-export function isIgnoredDoc(rel, reviewIgnore) {
-  return !matchesAny(rel, ALWAYS_IN_SCOPE) && matchesAny(rel, reviewIgnore);
+export function isIgnoredDoc(rel, reviewIgnore, riskRegister = DEFAULTS.riskRegister) {
+  return rel !== riskRegister && !matchesAny(rel, ALWAYS_IN_SCOPE) && matchesAny(rel, reviewIgnore);
 }
 
 /**
@@ -353,8 +353,8 @@ export function gateScope(root, config) {
   const { rev } = baseRevision(root, config.base);
   const changed = changedSince(root, rev);
   const { reviewIgnore } = config;
-  const scope = changed.filter((f) => !isIgnoredDoc(f, reviewIgnore));
-  const docs = changed.filter((f) => isIgnoredDoc(f, reviewIgnore));
+  const scope = changed.filter((f) => !isIgnoredDoc(f, reviewIgnore, config.riskRegister));
+  const docs = changed.filter((f) => isIgnoredDoc(f, reviewIgnore, config.riskRegister));
   return { baseRev: rev, changed, reviewIgnore, scope, docs };
 }
 
@@ -659,15 +659,35 @@ export function withPrLock(root, pr, fn) {
   } catch (e) {
     if (e.code !== 'EEXIST') throw e;
     if (!stale()) throw occupied();
-    // 失效锁的回收也须互斥，防止另一位回收者删除刚建好的锁。
+    // 失效锁的回收也须互斥，防止另一位回收者删除刚建好的锁。回收者中途退出会留下回收目录：
+    // 它同样记下持有者，持有者已不在、或没写成且超过一分钟（回收本身只要几毫秒）时清掉再取一次，取不到就报占用。
     const reclaim = path.join(parent, 'reclaim');
-    try { fs.mkdirSync(reclaim); }
-    catch (err) { if (err.code === 'EEXIST') throw occupied(); throw err; }
+    const reclaimOwner = path.join(reclaim, 'owner.json');
+    const reclaimStale = () => {
+      const stat = fs.statSync(reclaim, { throwIfNoEntry: false });
+      if (!stat) return false;
+      let text = '';
+      try { text = fs.readFileSync(reclaimOwner, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      let pid = null;
+      try { pid = JSON.parse(text).pid; } catch { pid = null; }
+      if (Number.isInteger(pid)) return ownerGone(text);
+      return Date.now() - stat.mtimeMs > 60000;
+    };
+    const takeReclaim = () => {
+      try { fs.mkdirSync(reclaim); return true; }
+      catch (err) { if (err.code === 'EEXIST') return false; throw err; }
+    };
+    if (!takeReclaim()) {
+      if (!reclaimStale()) throw occupied();
+      fs.rmSync(reclaim, { recursive: true, force: true });
+      if (!takeReclaim()) throw occupied();
+    }
     try {
+      fs.writeFileSync(reclaimOwner, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
       if (stale()) fs.rmSync(lock, { recursive: true });
       try { fs.mkdirSync(lock); }
       catch (err) { if (err.code === 'EEXIST') throw occupied(); throw err; }
-    } finally { fs.rmdirSync(reclaim); }
+    } finally { fs.rmSync(reclaim, { recursive: true, force: true }); }
   }
   const identity = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token: crypto.randomUUID() });
   try {

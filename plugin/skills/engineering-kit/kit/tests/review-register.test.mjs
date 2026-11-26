@@ -1,6 +1,7 @@
 // 复审登记集成测试：真实 git 临时仓库加假 gh，覆盖 S1–S10、H3、H7、A15（登记锁）与合并入口对覆盖的要求。
 // 复审者交回的是 ek-review/1 JSON；拒绝路径一律断言没有写任何记录（PR 的 log.jsonl 与 <kind>.json）。不访问网络。
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -456,6 +457,57 @@ test('H7 覆盖接续：记录带数据指纹、但没写按新规则判定覆�
   const chained = reg(root, data(head2, head1));
   assert.equal(chained.ok, false);
   assert.match(chained.message, /缺少同种审查的完整覆盖/);
+});
+
+test('H7 pre-push 流程：复审给了被审范围（审的是提交），工作区却还有未提交的闸门范围内改动时不能登记通过（dsh 同步复审代码 H1）', () => {
+  const root = prePushRepo();
+  const fork = git(root, ['merge-base', 'main', 'HEAD']).trim();
+  commitAll(root, 'reviewed');
+  const head = git(root, ['rev-parse', 'HEAD']).trim();
+  write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {
+  return [...new Set(items)].sort().reverse();
+}
+`);
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'unreviewed');\n");
+  assert.equal(runGate({ root }).ok, true);
+  const dirty = prePush(root, reviewData({ reviewedCommit: head, reviewedBase: fork }));
+  assert.equal(dirty.ok, false, '未提交的改动没经过复审');
+  assert.match(dirty.message, /未提交/);
+  commitAll(root, 'now committed');
+  assert.equal(runGate({ root }).ok, true);
+  const head2 = git(root, ['rev-parse', 'HEAD']).trim();
+  const clean = prePush(root, reviewData({ reviewedCommit: head2, reviewedBase: fork }));
+  assert.equal(clean.ok, true, clean.message);
+});
+
+test('A15 登记锁：回收失效锁的进程中途退出、留下回收目录时，后来者识别出它已失效并照常取锁（dsh 同步复审代码 M4）', () => {
+  const { root } = prRepo();
+  const dead = spawnSync(process.execPath, ['-e', '']).pid;
+  const lock = path.join(prDir(root), 'lock');
+  const reclaim = path.join(prDir(root), 'reclaim');
+  fs.mkdirSync(lock, { recursive: true });
+  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: dead, startedAt: '2000-01-01T00:00:00.000Z' }));
+  // 回收者写下了自己的信息后退出
+  fs.mkdirSync(reclaim);
+  fs.writeFileSync(path.join(reclaim, 'owner.json'), JSON.stringify({ pid: dead, startedAt: '2000-01-01T00:00:00.000Z' }));
+  assert.equal(withPrLock(root, '7', () => 'ok'), 'ok');
+  assert.equal(fs.existsSync(reclaim), false, '回收目录已清掉');
+  // 回收者连自己的信息都没写成就退出：回收目录超过一分钟才算失效
+  fs.mkdirSync(lock, { recursive: true });
+  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: dead, startedAt: '2000-01-01T00:00:00.000Z' }));
+  fs.mkdirSync(reclaim);
+  assert.throws(() => withPrLock(root, '7', () => 'no'), /占用/, '刚建的回收目录不能当失效');
+  const old = new Date(Date.now() - 5 * 60 * 1000);
+  fs.utimesSync(reclaim, old, old);
+  assert.equal(withPrLock(root, '7', () => 'ok2'), 'ok2');
+  // 回收者还活着：不动它
+  fs.mkdirSync(lock, { recursive: true });
+  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: dead, startedAt: '2000-01-01T00:00:00.000Z' }));
+  fs.mkdirSync(reclaim);
+  fs.writeFileSync(path.join(reclaim, 'owner.json'), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  fs.utimesSync(reclaim, old, old);
+  assert.throws(() => withPrLock(root, '7', () => 'no'), /占用/);
+  assert.ok(fs.existsSync(reclaim));
 });
 
 test('合并入口：代码复审的最新记录与登记历史的最后一条不一致时拒绝合并（上次登记写到一半失败；PR #42 双审 M2/M4）', () => {

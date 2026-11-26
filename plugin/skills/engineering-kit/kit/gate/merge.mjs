@@ -7,12 +7,12 @@
 // 一致性审记录不享受这一条，仍须针对最终提交。改名一律按旧路径删除加新路径新增计（lib.mjs 的 diffNames）。
 // 只改文档的 PR（本地算出的基准提交到最终提交之间的全部文件在 reviewIgnore 之内，本地没有最终提交时按含代码处理，
 // 与闸门同一口径：reviewFlow、reviewIgnore 等判定策略取基准提交上的配置，项目配置、豁免表和 scripts/engineering/** 永远不算文档）
-// 按分档不做审查，只核对 PR 打开与 CI 全过。全部满足才执行
+// 按分档不做审查，只核对 PR 打开与 CI 全过。开启轮次收口时，普通双审未通过则在同一把 PR 锁内重新核对已登记的收口及当前提交。全部满足才执行
 // gh pr merge --match-head-commit（核对之后再有人推送，GitHub 会拒绝合并），默认 squash 并删除远端分支。
 // 任一项不满足就逐条列出原因、以 1 退出、不合并；gh 不存在或调用失败同样报错退出。
 // 用法：node scripts/engineering/gate/merge.mjs <PR> [--method squash|merge|rebase]
 import fs from 'node:fs';
-import { readLog } from './review.mjs';
+import { checkPrClosure, readLog } from './review.mjs';
 import { assertPolicy, defaultGh, diffNames, forkPoint, git, isIgnoredDoc, isMain, loadConfig, prLogFile, prNumber, prRecordFile, readPr, repoRoot, resolveBase, runGh, withPrLock } from './lib.mjs';
 
 /** 允许的合并方式（对应 gh pr merge 的 --squash、--merge、--rebase）。 */
@@ -31,9 +31,9 @@ const REQUIRED = [
  * 两个提交之间是否只改了文档（diffNames 的每个文件都是 isIgnoredDoc；改名按旧路径删除加新路径新增，代码改名进 docs/ 不算只改文档）。
  * 算不出差异（本地没有其中一个提交等）时返回 false。
  */
-function onlyDocsBetween(root, from, to, reviewIgnore) {
+function onlyDocsBetween(root, from, to, config) {
   const r = diffNames(root, [from, to]);
-  return r.ok && r.files.every((f) => isIgnoredDoc(f, reviewIgnore));
+  return r.ok && r.files.every((f) => isIgnoredDoc(f, config.reviewIgnore, config.riskRegister));
 }
 
 /**
@@ -58,7 +58,7 @@ function docsOnly(root, config, head) {
   const mb = forkPoint(root, base, head);
   if (!mb) return { docs: false, why: `本地算不出基准分支 ${base} 与最终提交的共同提交，判断不了是否只改文档${fetchHint}` };
   const r = diffNames(root, [mb, head]);
-  return { docs: r.ok && r.files.length > 0 && r.files.every((f) => isIgnoredDoc(f, config.reviewIgnore)), why: null };
+  return { docs: r.ok && r.files.length > 0 && r.files.every((f) => isIgnoredDoc(f, config.reviewIgnore, config.riskRegister)), why: null };
 }
 
 /** 读取一条 PR 审查记录；不存在或损坏返回 null（视为未登记）。 */
@@ -106,11 +106,23 @@ function mergeLocked(root, no, gh, config, method) {
     else if (!r.accept.includes(rec.verdict)) problems.push(`${r.name}结论是 ${rec.verdict}，不是 ${r.accept.join(' 或 ')}`);
     else if (rec.verdict !== 'defer' && rec.coverage !== 'full') {
       problems.push(`${r.name}记录只覆盖部分差异（被审范围 ${short(rec.reviewedBase)}..${short(rec.headSha)}），需对完整范围重新复审并登记`);
-    } else if (rec.headSha !== st.head && !(r.docsDelta && onlyDocsBetween(root, rec.headSha, st.head, config.reviewIgnore))) {
+    } else if (rec.headSha !== st.head && !(r.docsDelta && onlyDocsBetween(root, rec.headSha, st.head, config))) {
       problems.push(`${r.name}记录已过期：记录针对提交 ${short(rec.headSha)}，PR 当前最终提交是 ${short(st.head)}，需对新提交重新审查并登记`);
     } else {
       if (rec.headSha !== st.head) notes.push(`沿用${r.name}记录：记录针对提交 ${short(rec.headSha)}，到最终提交 ${short(st.head)} 之间只改了文档`);
       if (rec.verdict === 'accept') notes.push(`${r.name}结论为不通过，按用户决定接受风险放行（用户决定：${rec.userDecision}）`);
+    }
+  }
+  if (problems.length && config.roundClosure === 'fix-and-record' && fs.existsSync(prRecordFile(root, no, 'close'))) {
+    const closeRecord = readPrRecord(root, no, 'close');
+    const from = closeRecord?.headSha;
+    const docsSinceClose = typeof from === 'string' && /^[0-9a-f]{40,64}$/.test(from) && from !== st.head
+      && git(root, ['merge-base', '--is-ancestor', from, st.head]).ok && onlyDocsBetween(root, from, st.head, config);
+    const checked = checkPrClosure(root, no, config, st, { closeRecord, docsSinceClose });
+    if (checked.problems.length) problems.push(...checked.problems.map((p) => '收口核对：' + p));
+    else {
+      problems.length = 0;
+      notes.push('按收口放行（第 ' + checked.round + ' 轮只剩中级，已修、未再复审，风险登记 ' + config.riskRegister + ' 共 ' + checked.entries + ' 条）');
     }
   }
   if (problems.length > 0) return { ok: false, problems, notes, head: st.head, ci: st.ci };
