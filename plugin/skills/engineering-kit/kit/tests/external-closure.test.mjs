@@ -134,3 +134,14 @@ test('A8 / A10 stop（发现无法彻底解决）：外部复审在启动执行�
   assert.match(r.message, /--user-decision/);
   assert.equal(fs.existsSync(out), false, '被拒时没有建运行目录');
 });
+
+test('A7 最后一轮的第一份审查登记为不通过后，同一提交上补的另一种外部复审照样带最后一轮要求（PR #43 代码 M2、一致性 M4）', async () => {
+  const { root, head, main } = repo();
+  firstRound(root, main, head, [finding({ id: 'H1', severity: 'high' })]);
+  const next = nextHead(root, 'fix1');
+  reg(root, main, 'code', 'fail', next, [finding({ id: 'M2' })], [{ id: 'H1', status: 'fixed', evidence: '已修并补了测试。' }]);
+  const r = await run(root, next, freshOut(), { kind: 'consistency' });
+  assert.equal(r.ok, true, r.message);
+  assert.equal(requestOf(r.res).review.finalRound, true);
+  assert.ok(requestOf(r.res).context.instructions.includes(FINAL_ROUND_TEXT));
+});

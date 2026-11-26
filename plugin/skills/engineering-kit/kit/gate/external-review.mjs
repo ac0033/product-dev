@@ -850,7 +850,8 @@ export async function runExternalReview(opts) {
     }
   }
   const { request } = buildRequest({ root, baseSha, headSha, kind, round, risk, priorFindings: prior.findings, priorFailSha: prior.sha, model, limits, extraExclude: policy.exclude, contextText: opts.contextText ?? null, priorReport: opts.priorReport ?? null });
-  if (state?.phase === 'final-next' && (!state.finalHead || state.finalHead === headSha)) {
+  // 最后一轮：final-next 阶段还没定提交时的新提交，或已绑定的最后一轮提交上的任何一种审查（第一份已登记为不通过、阶段转为收齐前时也一样）
+  if (state && ((state.phase === 'final-next' && !state.finalHead) || (state.finalHead && state.finalHead === headSha))) {
     request.review.finalRound = true;
     request.context.instructions += '\n' + FINAL_ROUND_TEXT;
   }
@@ -861,6 +862,7 @@ export async function runExternalReview(opts) {
   const runIdentity = fs.lstatSync(runDir);
   const runOwned = () => ownedCopy(runDir, path.dirname(runDir), runIdentity);
   let identity;
+  let published = null;
   try {
     fs.writeFileSync(path.join(runDir, 'request.json'), `${JSON.stringify(request, null, 2)}\n`);
     fs.writeFileSync(path.join(runDir, 'input.sha256'), `${inputHash}  request.json（被审 ${headSha}）\n`);
@@ -919,15 +921,17 @@ export async function runExternalReview(opts) {
       fs.writeFileSync(path.join(runDir, 'review.json'), canonicalJson(reviewData), { flag: 'wx' });
       fs.writeFileSync(path.join(runDir, 'review.sha256'), assessment.dataSha + '\n', { flag: 'wx' });
     }
-    fs.writeFileSync(path.join(runDir, 'assessment.json'), JSON.stringify({ assessment, integrity, copied, meta, provenance: result?.provenance ?? null, usage: result?.usage ?? null }, null, 2) + '\n', { flag: 'wx' });
-    // 给人读的报告最后发布：判定落盘之后，先写完整的暂存文件再改名，写到一半失败不会留下残缺或与判定不符的报告
+    // 产物顺序：数据、报告（先写完整的暂存文件再改名），最后才是判定文件；判定写明可登记时，其余产物都已就位。
+    // 中途失败由下面的 catch 撤下本次发布的报告，并写一份不可登记的判定
     if (report !== null) {
       const staged = `${reportPath}.${crypto.randomUUID()}.tmp`;
       try {
         fs.writeFileSync(staged, report, { flag: 'wx' });
         fs.renameSync(staged, reportPath);
+        published = reportPath;
       } finally { fs.rmSync(staged, { force: true }); }
     }
+    fs.writeFileSync(path.join(runDir, 'assessment.json'), JSON.stringify({ assessment, integrity, copied, meta, provenance: result?.provenance ?? null, usage: result?.usage ?? null }, null, 2) + '\n', { flag: 'wx' });
     const base = { runDir, result, assessment, reportPath: null, registration: null };
     if (!assessment.registrable) {
       return { ...base, ok: false, message: [`外部复审没有产生可登记的报告（运行记录：${runDir}）：`, ...assessment.reasons].join('\n') };
@@ -953,6 +957,7 @@ export async function runExternalReview(opts) {
       const note = removeCopy(copy, runDir, identity);
       if (note) reasons.push(note);
     }
+    if (published) fs.rmSync(published, { force: true });
     const assessment = { registrable: false, verdict: null, reasons, notes: [] };
     const failure = path.join(runDir, 'assessment-' + crypto.randomUUID() + '.tmp');
     fs.writeFileSync(failure, JSON.stringify({ assessment }, null, 2) + '\n', { flag: 'wx' });

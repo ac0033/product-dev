@@ -633,67 +633,46 @@ export function forkPoint(root, baseRef, commit) {
   return r.ok ? r.out.trim() : null;
 }
 
-/** 序列化同一 PR 的同步登记与合并核对，共享工作树使用同一把锁。 */
-export function withPrLock(root, pr, fn) {
-  const parent = path.dirname(prLogFile(root, prNumber(pr)));
-  const lock = path.join(parent, 'lock');
-  const ownerFile = path.join(lock, 'owner.json');
-  fs.mkdirSync(parent, { recursive: true });
-  function owner() {
-    try { return fs.readFileSync(ownerFile, 'utf8'); }
-    catch (e) { if (e.code !== 'ENOENT') throw e; return ''; }
-  }
-  // 失效只认两种：持有者信息完整而进程已不在；持有者信息没写成（建锁后崩溃）且超过十分钟。持有者还活着时不论持锁多久都不回收（慢请求、进程暂停）。
-  function stale() {
-    const stat = fs.statSync(lock, { throwIfNoEntry: false });
-    if (!stat) return false;
-    const text = owner();
+/**
+ * 互斥锁（不等待，被占用就报错）。用 git 引用的比较交换实现：`git update-ref <引用> <新值> <旧值>` 在 git 自己的独占锁文件下核对旧值再改，是原子的。
+ * 引用 refs/engineering-gate/locks/<name> 指向一个记着持有者（pid、开始时间、随机令牌）的对象；引用在仓库的公共目录里，各工作树共用。
+ * 取锁：引用不存在时创建（旧值写空，已存在就失败）；存在而持有者进程已不在时，从判定失效的那个对象比较交换成自己的，期间别人先换掉了就失败。
+ * 所以回收只替换判定失效的那一代，不会删掉后继持有者的锁。持有者还活着、或持有者信息读不出时报占用（读不出的要人确认后手动删）。
+ * 释放：只在引用仍指向自己的对象时删除。持锁多久都不回收活着的持有者（慢请求、进程暂停）。
+ */
+export function withLock(root, name, fn, label = `锁 ${name}`) {
+  const ref = `refs/engineering-gate/locks/${name}`;
+  const run = (args, input) => spawnSync('git', args, { cwd: root, encoding: 'utf8', input });
+  const me = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token: crypto.randomUUID() });
+  const made = run(['hash-object', '-w', '--stdin'], me);
+  if (made.status !== 0) throw new Error(`${label}：写不出持有者信息（git hash-object 失败）：${String(made.stderr).trim()}`);
+  const mine = made.stdout.trim();
+  const holder = (sha) => (sha ? run(['cat-file', '-p', sha]).stdout ?? '' : '');
+  const current = run(['rev-parse', '--verify', '--quiet', ref]).stdout.trim();
+  let expected = '';
+  if (current) {
+    const text = holder(current);
     let pid = null;
     try { pid = JSON.parse(text).pid; } catch { pid = null; }
-    if (Number.isInteger(pid)) return ownerGone(text);
-    return Date.now() - stat.mtimeMs > 600000;
+    if (!Number.isInteger(pid)) throw new Error(`${label}被占用：持有者信息读不出（${ref}）；确认没有进程在用后运行 git update-ref -d ${ref} 删除`);
+    if (!ownerGone(text)) throw new Error(`${label}被占用：${text.trim()}`);
+    expected = current;
   }
-  function occupied() { return new Error(`PR #${pr} 的登记锁被占用：${owner() || lock}`); }
-  try {
-    fs.mkdirSync(lock);
-  } catch (e) {
-    if (e.code !== 'EEXIST') throw e;
-    if (!stale()) throw occupied();
-    // 失效锁的回收也须互斥，防止另一位回收者删除刚建好的锁。回收者中途退出会留下回收目录：
-    // 它同样记下持有者，持有者已不在、或没写成且超过一分钟（回收本身只要几毫秒）时清掉再取一次，取不到就报占用。
-    const reclaim = path.join(parent, 'reclaim');
-    const reclaimOwner = path.join(reclaim, 'owner.json');
-    const reclaimStale = () => {
-      const stat = fs.statSync(reclaim, { throwIfNoEntry: false });
-      if (!stat) return false;
-      let text = '';
-      try { text = fs.readFileSync(reclaimOwner, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-      let pid = null;
-      try { pid = JSON.parse(text).pid; } catch { pid = null; }
-      if (Number.isInteger(pid)) return ownerGone(text);
-      return Date.now() - stat.mtimeMs > 60000;
-    };
-    const takeReclaim = () => {
-      try { fs.mkdirSync(reclaim); return true; }
-      catch (err) { if (err.code === 'EEXIST') return false; throw err; }
-    };
-    if (!takeReclaim()) {
-      if (!reclaimStale()) throw occupied();
-      fs.rmSync(reclaim, { recursive: true, force: true });
-      if (!takeReclaim()) throw occupied();
-    }
-    try {
-      fs.writeFileSync(reclaimOwner, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
-      if (stale()) fs.rmSync(lock, { recursive: true });
-      try { fs.mkdirSync(lock); }
-      catch (err) { if (err.code === 'EEXIST') throw occupied(); throw err; }
-    } finally { fs.rmSync(reclaim, { recursive: true, force: true }); }
+  const swapped = run(['update-ref', ref, mine, expected]);
+  if (swapped.status !== 0) {
+    const now = run(['rev-parse', '--verify', '--quiet', ref]).stdout.trim();
+    throw new Error(`${label}被占用：${holder(now).trim() || String(swapped.stderr).trim()}`);
   }
-  const identity = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token: crypto.randomUUID() });
   try {
-    fs.writeFileSync(ownerFile, identity);
     return fn();
   } finally {
-    if (!owner() || owner() === identity) fs.rmSync(lock, { recursive: true, force: true });
+    run(['update-ref', '-d', ref, mine]);
   }
+}
+
+/** 序列化同一 PR 的同步登记、收口与合并核对（各工作树共用同一把锁）。 */
+export function withPrLock(root, pr, fn) {
+  const no = prNumber(pr);
+  fs.mkdirSync(path.dirname(prLogFile(root, no)), { recursive: true });
+  return withLock(root, `pr-${no}`, fn, `PR #${pr} 的登记锁`);
 }

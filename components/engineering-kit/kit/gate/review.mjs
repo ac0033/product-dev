@@ -48,6 +48,7 @@ import {
   recordDir,
   repoRoot,
   resolveBase,
+  withLock,
   withPrLock,
   treeHash,
   uncommittedInScope,
@@ -421,6 +422,11 @@ export function checkPrClosure(root, no, config, st, priorClose = {}) {
     ...priorClose,
   });
   if (diff && !diff.ok) problems.push('无法读取最新失败提交到最终提交的修复差异');
+  // H7：部分覆盖的复审只能登记不通过，不能借收口放行；收口要求失败那一轮的每种审查都完整覆盖（一致性审的延期照旧）
+  for (const [kind, record] of Object.entries(state.latest?.records ?? {})) {
+    if (record.verdict === 'defer' || record.coverage === 'full') continue;
+    problems.push('第 ' + state.latest.index + ' 轮的' + KINDS[kind] + '只覆盖部分差异（' + (record.coverage ?? '没有覆盖记录') + '）：收口要求该轮每种审查都完整覆盖，先补一份从分叉点起审的复审');
+  }
   problems.push(...evidence.problems);
   return { failHead, round: state.latest?.index, entries: evidence.expected.length, problems };
 }
@@ -466,6 +472,8 @@ export function writeRisks({ root, pr, fixedIn = [] }) {
     const bad = applyFixedIn(entries, fixedIn);
     if (bad) return { ok: false, message: bad };
     const file = registerFile(root, config.riskRegister);
+    // 风险登记是项目级的一份文件：读、改、写整个过程按文件串行，别的 PR 同时写不会丢条目
+    return withLock(root, 'risk-register', () => {
     const original = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
     const parsed = parseRiskRegister(original);
     if (parsed.problems.length) return { ok: false, message: parsed.problems.join('\n') };
@@ -482,6 +490,7 @@ export function writeRisks({ root, pr, fixedIn = [] }) {
       fs.renameSync(tmp, file);
     } finally { fs.rmSync(tmp, { force: true }); }
     return { ok: true, message: '已写入 ' + entries.length + ' 条风险登记到 ' + config.riskRegister + '，提交并推送后运行 review.mjs close' };
+    }, '风险登记的写入锁');
   });
 }
 

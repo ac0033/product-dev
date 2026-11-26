@@ -15,6 +15,8 @@ function summarize(head, index, history, required, previous) {
   }
   const missingKinds = required.filter((kind) => !records[kind]);
   const findings = Object.values(failures).flatMap((entry) => entry.findings ?? []);
+  // 停下信号（无法彻底解决、标为系统性）看这一轮每份有效报告，通过的报告也算；数量比较只数不通过报告里的高、中级
+  const flagged = [...new Set([...Object.values(failures), ...Object.values(records)])].flatMap((entry) => entry.findings ?? []);
   const counts = { high: 0, medium: 0 };
   const systemicWhy = [];
   for (const finding of findings) {
@@ -22,8 +24,8 @@ function summarize(head, index, history, required, previous) {
       counts[finding.severity]++;
       if (finding.prior) systemicWhy.push(finding.id + ' 与上轮 ' + finding.prior + ' 是同一问题');
     }
-    if (finding.systemic) systemicWhy.push(finding.id + ' 被标为系统性问题');
   }
+  for (const finding of flagged) if (finding.systemic) systemicWhy.push(finding.id + ' 被标为系统性问题');
   if (previous) {
     if (previous.counts.high === 0 && counts.high > 0) systemicWhy.push('上轮没有高级问题，本轮出现了高级问题');
     for (const [key, label] of [['high', '高级'], ['medium', '中级']]) {
@@ -31,7 +33,7 @@ function summarize(head, index, history, required, previous) {
     }
   }
   return { head, index, records, failures, missingKinds, collected: !missingKinds.length, counts, high: counts.high > 0,
-    unresolvable: findings.some((f) => f.unresolvable), systemic: systemicWhy.length > 0, systemicWhy };
+    unresolvable: flagged.some((f) => f.unresolvable), systemic: systemicWhy.length > 0, systemicWhy };
 }
 
 function classify({ closure, limit, rounds, latest, finalHead }) {
@@ -64,7 +66,10 @@ export function roundState({ entries, limit, closure, required = ['code', 'consi
   const lastAllowed = rounds[limit - 1];
   let finalHead = null;
   if (lastAllowed?.collected && lastAllowed.high && !lastAllowed.unresolvable && !lastAllowed.systemic) {
-    finalHead = history.slice(firstFail.get(lastAllowed.head) + 1).find((e) => e.headSha !== lastAllowed.head && counted(e))?.headSha ?? null;
+    // 最后一轮从第 N 轮收齐之后算起：收齐前（经用户同意）在别的提交上的登记不占用它
+    const seen = new Set();
+    const collectedAt = history.findIndex((e) => e.headSha === lastAllowed.head && seen.add(e.kind) && required.every((k) => seen.has(k)));
+    finalHead = history.slice(collectedAt + 1).find((e) => e.headSha !== lastAllowed.head && counted(e))?.headSha ?? null;
   }
   const state = { closure, limit, rounds, latest: rounds.at(-1) ?? null, finalHead,
     finalKinds: [...new Set((byHead.get(finalHead) ?? []).filter(counted).map((e) => e.kind))] };
@@ -74,11 +79,13 @@ export function roundState({ entries, limit, closure, required = ['code', 'consi
 
 /** 核对本次登记，放行返回 null，否则返回包含下一步的原因。 */
 export function admitRegistration(state, { verdict, kind, head, userDecision }) {
-  if (['accept', 'defer'].includes(verdict) || hasContent(userDecision)) return null;
+  if (verdict === 'accept' || hasContent(userDecision)) return null;
   const { latest, phase, finalHead } = state;
+  // 收齐前只认该提交上缺的那种审查；一致性审的延期也算登记（A13）
   if (phase === 'collecting' && !(head === latest.head && latest.missingKinds.includes(kind))) {
     return '第 ' + latest.index + ' 轮还没收齐：先在 ' + latest.head.slice(0, 12) + ' 上登记 ' + latest.missingKinds.join('、') + '；收齐后才判定下一步';
   }
+  if (verdict === 'defer') return null;
   if (phase === 'close-only') return '第 ' + latest.index + ' 轮只剩中、低级：修完全部中级，用 review.mjs risks 写进风险登记并提交后，用 review.mjs close 登记，不再加轮';
   if (phase === 'final-next') {
     if (finalHead ? head === finalHead && !state.finalKinds.includes(kind) : head !== latest.head) return null;

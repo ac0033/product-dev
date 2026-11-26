@@ -1,7 +1,7 @@
 // 复审登记集成测试：真实 git 临时仓库加假 gh，覆盖 S1–S10、H3、H7、A15（登记锁）与合并入口对覆盖的要求。
 // 复审者交回的是 ek-review/1 JSON；拒绝路径一律断言没有写任何记录（PR 的 log.jsonl 与 <kind>.json）。不访问网络。
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -10,7 +10,7 @@ import { readRecord, withPrLock } from '../gate/lib.mjs';
 import { mergePr } from '../gate/merge.mjs';
 import { compactFindings, fingerprint } from '../gate/review-data.mjs';
 import { recordReview } from '../gate/review.mjs';
-import { commitAll, failingData, featureRepo, finding, git, read, reviewData, reviewDataFile, SRC_HEADER, write } from './helpers.mjs';
+import { commitAll, failingData, featureRepo, finding, git, read, reviewData, reviewDataFile, SRC_HEADER, tmpDir, write } from './helpers.mjs';
 
 const GREEN = [
   { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
@@ -480,36 +480,6 @@ test('H7 pre-push 流程：复审给了被审范围（审的是提交），工�
   assert.equal(clean.ok, true, clean.message);
 });
 
-test('A15 登记锁：回收失效锁的进程中途退出、留下回收目录时，后来者识别出它已失效并照常取锁（dsh 同步复审代码 M4）', () => {
-  const { root } = prRepo();
-  const dead = spawnSync(process.execPath, ['-e', '']).pid;
-  const lock = path.join(prDir(root), 'lock');
-  const reclaim = path.join(prDir(root), 'reclaim');
-  fs.mkdirSync(lock, { recursive: true });
-  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: dead, startedAt: '2000-01-01T00:00:00.000Z' }));
-  // 回收者写下了自己的信息后退出
-  fs.mkdirSync(reclaim);
-  fs.writeFileSync(path.join(reclaim, 'owner.json'), JSON.stringify({ pid: dead, startedAt: '2000-01-01T00:00:00.000Z' }));
-  assert.equal(withPrLock(root, '7', () => 'ok'), 'ok');
-  assert.equal(fs.existsSync(reclaim), false, '回收目录已清掉');
-  // 回收者连自己的信息都没写成就退出：回收目录超过一分钟才算失效
-  fs.mkdirSync(lock, { recursive: true });
-  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: dead, startedAt: '2000-01-01T00:00:00.000Z' }));
-  fs.mkdirSync(reclaim);
-  assert.throws(() => withPrLock(root, '7', () => 'no'), /占用/, '刚建的回收目录不能当失效');
-  const old = new Date(Date.now() - 5 * 60 * 1000);
-  fs.utimesSync(reclaim, old, old);
-  assert.equal(withPrLock(root, '7', () => 'ok2'), 'ok2');
-  // 回收者还活着：不动它
-  fs.mkdirSync(lock, { recursive: true });
-  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: dead, startedAt: '2000-01-01T00:00:00.000Z' }));
-  fs.mkdirSync(reclaim);
-  fs.writeFileSync(path.join(reclaim, 'owner.json'), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
-  fs.utimesSync(reclaim, old, old);
-  assert.throws(() => withPrLock(root, '7', () => 'no'), /占用/);
-  assert.ok(fs.existsSync(reclaim));
-});
-
 test('合并入口：代码复审的最新记录与登记历史的最后一条不一致时拒绝合并（上次登记写到一半失败；PR #42 双审 M2/M4）', () => {
   const { root, main } = prRepo();
   const head = addCommit(root, 1);
@@ -523,19 +493,6 @@ test('合并入口：代码复审的最新记录与登记历史的最后一条�
   assert.equal(res.ok, false);
   assert.ok(res.problems.some((p) => /不一致/.test(p)), res.problems.join(' / '));
   assert.ok(!gh.calls.some((a) => a[1] === 'merge'));
-});
-
-test('A15 登记锁：持有者进程还活着时，锁目录再旧也不回收；持有者信息没写成且超过十分钟才回收（PR #42 双审 M1/M3）', () => {
-  const { root } = prRepo();
-  const dir = path.join(prDir(root), 'lock');
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ pid: process.pid, startedAt: '2000-01-01T00:00:00.000Z' }));
-  const old = new Date(Date.now() - 60 * 60 * 1000);
-  fs.utimesSync(dir, old, old);
-  assert.throws(() => withPrLock(root, '7', () => 1), /登记锁被占用/);
-  fs.rmSync(path.join(dir, 'owner.json'));
-  fs.utimesSync(dir, old, old);
-  assert.equal(withPrLock(root, '7', () => 42), 42);
 });
 
 test('S2 pre-push 流程：数据不合格或是 Markdown 时拒绝且不写记录；pre-push 不做 S7（高风险 fail 后低风险 pass 放行）', () => {
@@ -552,4 +509,68 @@ test('S2 pre-push 流程：数据不合格或是 Markdown 时拒绝且不写记�
   assert.equal(readRecord(root, 'review.json').risk, 'high');
   const lp = prePush(root, reviewData({ risk: 'low' }));
   assert.equal(lp.ok, true, lp.message);
+});
+
+/** 把锁直接设成某个持有者（git 引用指向记着持有者的对象），模拟别的进程持锁或崩溃后留下的锁。 */
+function setLock(root, name, owner) {
+  const sha = spawnSync('git', ['hash-object', '-w', '--stdin'], { cwd: root, input: owner, encoding: 'utf8' }).stdout.trim();
+  git(root, ['update-ref', `refs/engineering-gate/locks/${name}`, sha]);
+}
+const lockRef = (root, name) => spawnSync('git', ['rev-parse', '--verify', '--quiet', `refs/engineering-gate/locks/${name}`], { cwd: root, encoding: 'utf8' }).stdout.trim();
+const deadPid = () => spawnSync(process.execPath, ['-e', '']).pid;
+
+test('A15 登记锁：持有者进程还活着时不回收；已不在时回收；持有者信息读不出时不回收并提示手动删除；释放后引用删除（PR #42 双审 M1/M3、PR #43 代码 H2）', () => {
+  const { root } = prRepo();
+  setLock(root, 'pr-7', JSON.stringify({ pid: process.pid, startedAt: '2000-01-01T00:00:00.000Z', token: 'live' }));
+  assert.throws(() => withPrLock(root, '7', () => 1), /登记锁被占用/);
+  setLock(root, 'pr-7', JSON.stringify({ pid: deadPid(), startedAt: '2000-01-01T00:00:00.000Z', token: 'dead' }));
+  assert.equal(withPrLock(root, '7', () => 42), 42);
+  assert.equal(lockRef(root, 'pr-7'), '', '释放后引用删除');
+  setLock(root, 'pr-7', 'not json');
+  assert.throws(() => withPrLock(root, '7', () => 1), /登记锁被占用[\s\S]*update-ref -d/);
+});
+
+test('A15 登记锁：多个进程同时取锁（开始时留着一把失效锁要回收）时临界区不重叠（PR #43 代码 H2、一致性 M7）', async () => {
+  const { root } = prRepo();
+  setLock(root, 'pr-7', JSON.stringify({ pid: deadPid(), startedAt: '2000-01-01T00:00:00.000Z', token: 'old' }));
+  const dir = tmpDir('ekit-lock-');
+  const log = path.join(dir, 'log.txt');
+  const worker = path.join(dir, 'worker.mjs');
+  const lib = new URL('../gate/lib.mjs', import.meta.url).href;
+  fs.writeFileSync(worker, [
+    "import fs from 'node:fs';",
+    `import { withPrLock } from ${JSON.stringify(lib)};`,
+    'const [root, log, id] = process.argv.slice(2);',
+    'const until = Date.now() + 3000;',
+    'let held = 0;',
+    'while (Date.now() < until) {',
+    '  try {',
+    '    withPrLock(root, "7", () => {',
+    '      fs.appendFileSync(log, "E " + id + "\\n");',
+    '      const t = Date.now() + 15; while (Date.now() < t) {}',
+    '      fs.appendFileSync(log, "X " + id + "\\n");',
+    '      held++;',
+    '    });',
+    '  } catch (e) { if (!/占用/.test(e.message)) throw e; }',
+    '}',
+    'process.stdout.write(String(held));',
+  ].join('\n'));
+  const runs = await Promise.all(Array.from({ length: 4 }, (_, i) => new Promise((resolve) => {
+    const p = spawn(process.execPath, [worker, root, log, String(i)]);
+    let out = '';
+    let err = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.stderr.on('data', (d) => { err += d; });
+    p.on('close', (code) => resolve({ code, out, err }));
+  })));
+  for (const r of runs) assert.equal(r.code, 0, r.err);
+  const total = runs.reduce((n, r) => n + Number(r.out), 0);
+  assert.ok(total > 0, '至少有一次取到锁');
+  let inside = null;
+  for (const line of fs.readFileSync(log, 'utf8').split('\n').filter(Boolean)) {
+    const [op, id] = line.split(' ');
+    if (op === 'E') { assert.equal(inside, null, `进程 ${id} 进入时 ${inside} 还在临界区里`); inside = id; }
+    else { assert.equal(inside, id); inside = null; }
+  }
+  assert.equal(lockRef(root, 'pr-7'), '', '全部结束后锁已释放');
 });

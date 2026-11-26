@@ -485,9 +485,11 @@ test('H7 收口要求失败那一轮的每种审查都是完整覆盖：代码�
   const c = await closeRound(root, head);
   assertCloseRefused(root, c, before);
   assert.match(msgOf(c), /覆盖/);
-  const m = mergePr({ root, pr: '7', gh: fakeGh(head) });
+  // close 被拒就没有收口记录，合并入口走普通双审核对（代码复审是 fail），同样不放行
+  const gh = fakeGh(head);
+  const m = mergePr({ root, pr: '7', gh });
   assert.equal(m.ok, false, '部分覆盖不能借收口合并');
-  assert.ok(m.problems.some((p) => /覆盖/.test(p)), m.problems.join(' / '));
+  assert.ok(!gh.calls.some((x) => x[1] === 'merge'), '没有执行合并');
 });
 
 test('A12 风险登记的读改写按文件串行：别的 PR 正在写同一份风险登记时，risks 报占用、不写文件（PR #43 代码 H3、一致性 M8）', async () => {
