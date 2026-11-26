@@ -937,18 +937,31 @@ export function registerRun({ root, runDir, pr, summary, gh = defaultGh, userDec
  * Codex 复审时关闭的功能：会调用其他模型的（multi_agent 子代理）、会带入本机私有材料的（memories、goals）、
  * 会运行外部代码的（hooks、apps、plugin_discovery_prefetch）、与复审无关的（image_generation），
  * 以及执行工具的宿主（code_mode_host）：Codex 的只读沙箱只挡写入、能读全盘，被审内容里的提示注入可以让模型去读本机的密钥，
- * 所以复审时不给工具，只依据提示里的 diff 审（codex-cli 0.167 实测：关掉它后所有工具调用失败即关闭）。
+ * 所以复审时不给工具，只依据提示里的 diff 审（codex-cli 0.167、0.171 实测：关掉它后所有工具调用失败即关闭；子代理在 0.171 里另有开关，见 CODEX_CONFIG_OVERRIDES）。
  */
 export const CODEX_DISABLED_FEATURES = ['apps', 'code_mode_host', 'goals', 'hooks', 'image_generation', 'memories', 'multi_agent', 'plugin_discovery_prefetch'];
+
+/**
+ * 关不掉的功能要靠配置收紧（-c 参数，原样传给 Codex）：
+ *   - features.multi_agent_v2.disable_native_tools=true：codex-cli 0.171 里子代理工具（collaboration.spawn_agent 等）改由 multi_agent_v2 提供，
+ *     只 --disable multi_agent 挡不住：模型能 spawn 子代理（会话记录另存一份，留在用户的 Codex 历史里，子代理还可换模型）。
+ *     加上这一项后，会话记录里的工具清单（additional_tools）不再含 collaboration.*（0.171.0-alpha.13 实测）。
+ * 取值写错或这一版不认时，Codex 报参数错误，执行器按“没有输出会话事件”失败，不会悄悄放开。
+ */
+export const CODEX_CONFIG_OVERRIDES = ['-c', 'features.multi_agent_v2.disable_native_tools=true'];
 
 /** 不算工具调用的 Codex 事件条目：回答、推理、错误、待办。其余条目类型一律当作工具执行过（允许清单，新出现的类型也拦下）。 */
 export const CODEX_PASSIVE_ITEMS = ['agent_message', 'reasoning', 'error', 'todo_list'];
 
 /**
- * 已实测过“关掉 code_mode_host 就没有工具”的运行环境：Windows 上的 codex-cli 0.167.0-alpha.3.2。
+ * 已实测过“关掉 code_mode_host 就没有工具”的运行环境：Windows 上的 codex-cli 0.171.0-alpha.13（2026-11-26，按本文件现在的参数跑）。
+ * 实测方式：用本执行器在只含假数据的临时副本里，用提示诱导模型调用 shell、web_search、读写文件、联网、子代理，核对事件流与会话记录、副本与副本外目录的哈希、本地监听的请求；
+ * 结果：没有任何工具执行（shell、web_search、读文件的调用都被 code_mode_host 拒绝）；0.171 里 --disable multi_agent 挡不住子代理，需要 CODEX_CONFIG_OVERRIDES 才关得掉（见该常量）。
+ * 读副本之外的文件、写文件、联网三项模型始终没有真的去调（只能确认工具清单里唯一能做这些事的 exec 被拒绝）。
+ * 之前的 0.167.0-alpha.3.2 是按旧参数（没有 CODEX_CONFIG_OVERRIDES）实测的，没有在现在的参数下复测，所以不再列为已实测。
  * 在其他平台或版本上运行时，报告的局限里自动标注“未实测”，让复审的使用者知道这一点（见 unverifiedNote）。
  */
-export const CODEX_VERIFIED = { platforms: ['win32'], versions: ['0.167.0-alpha.3.2'] };
+export const CODEX_VERIFIED = { platforms: ['win32'], versions: ['0.171.0-alpha.13'] };
 
 /**
  * 会话记录里工具调用被拒绝的输出特征（本机 codex-cli 0.167.0-alpha.3.2 的真实会话记录）：关掉 code_mode_host 后整段输出就是“code-mode host is disabled”，
@@ -1055,7 +1068,7 @@ export const CODEX_OUTPUT_SCHEMA = {
 export function codexArgs(request, { cwd, schemaFile }) {
   const args = ['exec', '--json', '-s', 'read-only', '--skip-git-repo-check', '--ignore-user-config', '--ignore-rules'];
   for (const f of CODEX_DISABLED_FEATURES) args.push('--disable', f);
-  args.push('-c', 'project_doc_max_bytes=0', '-c', 'web_search="disabled"', '-c', 'approval_policy="never"', '-m', request.model.id);
+  args.push('-c', 'project_doc_max_bytes=0', '-c', 'web_search="disabled"', '-c', 'approval_policy="never"', ...CODEX_CONFIG_OVERRIDES, '-m', request.model.id);
   if (request.model.effort) {
     if (!REASONING_EFFORTS.includes(request.model.effort)) throw new Error(`推理强度只能是 ${REASONING_EFFORTS.join('、')}`);
     args.push('-c', `model_reasoning_effort="${request.model.effort}"`);

@@ -13,6 +13,7 @@ import { loadConfig } from '../gate/lib.mjs';
 import {
   assess,
   buildPrompt,
+  CODEX_CONFIG_OVERRIDES,
   CODEX_VERIFIED,
   codexArgs,
   codexExecutor,
@@ -385,7 +386,7 @@ test('Codex 执行器：完整链路可登记；实际模型取 Codex 生效设�
   assert.ok(fs.existsSync(path.join(res.runDir, 'raw', 'codex.rollout.jsonl')));
   const { argv, schema } = JSON.parse(fs.readFileSync(path.join(home, 'argv.json'), 'utf8'));
   assert.deepEqual(argv.slice(0, 4), ['exec', '--json', '-s', 'read-only']);
-  for (const flag of ['--ignore-user-config', '--ignore-rules', 'project_doc_max_bytes=0', 'web_search="disabled"', 'approval_policy="never"', 'model_reasoning_effort="medium"']) assert.ok(argv.includes(flag), flag);
+  for (const flag of ['--ignore-user-config', '--ignore-rules', 'project_doc_max_bytes=0', 'web_search="disabled"', 'approval_policy="never"', 'model_reasoning_effort="medium"', 'features.multi_agent_v2.disable_native_tools=true']) assert.ok(argv.includes(flag), flag);
   for (const feat of ['multi_agent', 'memories', 'hooks', 'apps', 'code_mode_host']) assert.ok(argv.join(' ').includes(`--disable ${feat}`), feat);
   assert.ok(!argv.some((x) => /dangerously|workspace-write|danger-full-access/.test(x)));
   assert.ok(!argv[argv.indexOf('--output-schema') + 1].startsWith(path.join(res.runDir, 'workspace')), '约束文件不在只读副本里');
@@ -764,7 +765,8 @@ test('L-h Codex 解析：会话记录里的工具调用判失败；被拒绝的�
     assert.ok(p.review.limitations.some((l) => l.includes('运行环境未实测') && l.includes(platform) && l.includes(version ?? '版本未知')), `${platform} ${version}`);
   }
   assert.equal(unverifiedNote(CODEX_VERIFIED.versions[0], CODEX_VERIFIED.platforms[0]), null);
-  assert.match(unverifiedNote('9.9.9', 'win32'), /只在 win32 上的 codex-cli 0\.167\.0-alpha\.3\.2 实测过/);
+  assert.match(unverifiedNote('9.9.9', 'win32'), /只在 win32 上的 codex-cli 0\.171\.0-alpha\.13 实测过/);
+  assert.deepEqual(CODEX_CONFIG_OVERRIDES, ['-c', 'features.multi_agent_v2.disable_native_tools=true']);
 });
 
 test('passEnv：本机配置列出的变量名从当前环境放行，其余照样拦下', () => {
