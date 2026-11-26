@@ -139,12 +139,20 @@ function repo({ allow = ['fake'], maxRounds, sections, secrets = false } = {}) {
   return { root, head: git(root, ['rev-parse', 'HEAD']).trim() };
 }
 
+/** PR 7 登记历史里同种审查最后一次不通过的报告副本内容；没有时返回 null。 */
+function lastFailReport(root, kind) {
+  const log = path.join(root, '.git', 'engineering-gate', 'pr', '7', 'log.jsonl');
+  if (!fs.existsSync(log)) return null;
+  const prev = fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)).findLast((r) => r.kind === kind && r.verdict === 'fail');
+  return prev?.report ? fs.readFileSync(prev.report, 'utf8') : null;
+}
+
 /** 跑一次外部复审（假执行器，FAKE_MODE 指定行为）。 */
 async function run(root, head, mode, extra = {}) {
   // 执行器只拿到环境变量允许清单里的变量和本机配置写的 env，所以模式（和假执行器要动手的仓库、钩子目录）经本机配置的 env 传
   const { env, ...rest } = extra;
-  // 修后复核在上一轮有高、中级发现时必须带上一轮报告（PR #42 第 2 轮）；用例没写时给一份占位报告，专门测缺报告的用例显式传 null
-  if (rest.round === 'followup' && !('priorReport' in rest)) rest.priorReport = '上一轮报告（测试占位，已按当前外发策略核对）';
+  // 修后复核在上一轮有高、中级发现时必须带上一轮报告（PR #42 第 2 轮起）；用例没写时附登记历史里上一份不通过记录的报告副本（含指纹和编号），专门测报告的用例显式传
+  if (rest.round === 'followup' && !('priorReport' in rest)) rest.priorReport = lastFailReport(root, rest.kind ?? 'code');
   const local = { ...LOCAL, executors: { fake: { ...LOCAL.executors.fake, env: { FAKE_MODE: mode, ...env } } } };
   return runExternalReview({ root, executor: 'fake', pr: '7', gh: rest.gh ?? fakeGh([head]), localConfig: local, outDir: path.join(tmpDir('ekit-xr-'), 'run'), ...rest });
 }
@@ -1438,7 +1446,14 @@ test('S9 修后复核：上一轮是外部复审者做的，待处置清单也�
   const refused = await attempt(run(root, head2, 'pass', { gh: fakeGh([head2]), round: 'followup', priorReport: null }));
   assert.equal(refused.ok, false, '上一轮有高、中级发现，没带上一轮报告不能组包');
   assert.match(refused.message, /--prior-report/);
-  const res = await run(root, head2, 'pass', { gh: fakeGh([head2]), round: 'followup', priorReport: '上一轮报告：H1、M1 的位置和问题摘要（已按当前外发策略核对）' });
+  // 只有占位文字、或缺上一份数据的指纹、或缺某条编号：都不能组包（PR #42 最后一轮代码 M1、一致性 M2）
+  const sha = readJson(path.join(root, '.git', 'engineering-gate', 'pr', '7', 'code.json')).dataSha;
+  for (const [why, text] of [['占位文字', '上一轮报告（已按当前外发策略核对）'], ['缺指纹', '上一轮 H1：权限校验缺失。M1：去重顺序错。'], ['缺 M1', `指纹：${sha}\nH1：权限校验缺失。`]]) {
+    const bad = await attempt(run(root, head2, 'pass', { gh: fakeGh([head2]), round: 'followup', priorReport: text }));
+    assert.equal(bad.ok, false, `${why}时不能组包`);
+    assert.match(bad.message, /--prior-report/);
+  }
+  const res = await run(root, head2, 'pass', { gh: fakeGh([head2]), round: 'followup', priorReport: `上一轮报告（已按当前外发策略核对）\n指纹：${sha}\nH1：删除前没有校验所有者。\nM1：去重后的顺序不稳定。` });
   assert.equal(res.ok, true, res.message);
   const request = readJson(path.join(res.runDir, 'request.json'));
   assert.deepEqual(request.context.priorFindings.map((p) => p.id), ['H1', 'M1']);
@@ -1453,6 +1468,40 @@ test('H6 只读副本：Windows 上副本文件不设只读（清理时就不必
   const mode = fs.statSync(path.join(dir, 'src', 'auth.ts')).mode;
   if (process.platform === 'win32') assert.ok(mode & 0o200, 'Windows 上副本文件可写');
   else assert.equal(mode & 0o222, 0, '其他平台副本文件只读');
+});
+
+test('H6 清理副本：不改任何文件的权限、不跟随链接；删不掉就停下，报告残留位置（PR #42 最后一轮代码 M2、一致性 M1）', () => {
+  const runDir = tmpDir('ekit-rm-');
+  const copy = path.join(runDir, 'workspace');
+  fs.mkdirSync(path.join(copy, 'src'), { recursive: true });
+  const ro = path.join(copy, 'src', 'ro.ts');
+  fs.writeFileSync(ro, 'x');
+  fs.chmodSync(ro, 0o444);
+  const outside = tmpDir('ekit-outside-');
+  fs.writeFileSync(path.join(outside, 'keep.txt'), 'sentinel');
+  fs.symlinkSync(outside, path.join(copy, 'link'), 'junction');
+  const st = fs.lstatSync(copy);
+  const note = ER.removeCopy(copy, runDir, { dev: st.dev, ino: st.ino });
+  assert.equal(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'sentinel', '链接指向的目录原样保留');
+  if (process.platform === 'win32') {
+    // Windows 上只读文件删不掉：不改权限重试，停下并报告残留
+    assert.match(String(note), /残留/);
+    const left = fs.readdirSync(runDir).map((n) => path.join(runDir, n, 'src', 'ro.ts')).find((p) => fs.existsSync(p));
+    assert.ok(left, '只读文件留在原处');
+    assert.equal(fs.statSync(left).mode & 0o200, 0, '权限没被改动');
+  } else {
+    assert.equal(note, null);
+    assert.equal(fs.existsSync(copy), false);
+  }
+  // 副本目录被换成另一个目录：不清理
+  const copy2 = path.join(runDir, 'workspace2');
+  fs.mkdirSync(copy2);
+  const id2 = fs.lstatSync(copy2);
+  fs.rmdirSync(copy2);
+  fs.mkdirSync(copy2);
+  fs.writeFileSync(path.join(copy2, 'other.txt'), 'other');
+  assert.match(String(ER.removeCopy(copy2, runDir, { dev: id2.dev, ino: id2.ino })), /替换|移走/);
+  assert.equal(fs.readFileSync(path.join(copy2, 'other.txt'), 'utf8'), 'other');
 });
 
 test('报告写明模型选择依据（--model-reason）（PR #42 一致性审 L1）', async () => {
