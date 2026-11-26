@@ -30,7 +30,7 @@ function fakeGh(head) {
 
 /** pr 流程的功能分支仓库，返回 { root, main }：main 是分叉点（基准分支的提交号）。 */
 function prRepo(config = {}) {
-  const root = featureRepo({ reviewFlow: 'pr', ...config });
+  const root = featureRepo({ reviewFlow: 'pr', reviewMinChars: 0, ...config });
   return { root, main: git(root, ['rev-parse', 'main']).trim() };
 }
 
@@ -331,7 +331,7 @@ test('A15 登记锁：持锁期间再登记同一 PR 报“登记锁被占用”
 
 /** pre-push 流程的仓库，改了源码并跑过闸门（有与当前代码一致的通过测试记录）。 */
 function prePushRepo() {
-  const root = featureRepo();
+  const root = featureRepo({ reviewMinChars: 0 });
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
   write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   assert.equal(runGate({ root }).ok, true);
