@@ -2,6 +2,8 @@
 import { createHash } from 'node:crypto';
 
 export const REVIEW_FORMAT = 'ek-review/1';
+/** 覆盖判定规则的版本，写进 PR 登记记录。2：没交给复审者的改动文件（unreviewedFiles）算部分覆盖。覆盖接续只认不低于它的记录。 */
+export const COVERAGE_RULE = 2;
 export const SEVERITY_PREFIX = { high: 'H', medium: 'M', low: 'L', info: 'I' };
 export const SEVERITIES = Object.keys(SEVERITY_PREFIX);
 export const TAGS = ['既有', '修复新增', '原先漏检'];

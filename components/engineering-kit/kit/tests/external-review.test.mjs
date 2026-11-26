@@ -1470,7 +1470,7 @@ test('H6 只读副本：Windows 上副本文件不设只读（清理时就不必
   else assert.equal(mode & 0o222, 0, '其他平台副本文件只读');
 });
 
-test('H6 清理副本：不改任何文件的权限、不跟随链接；删不掉就停下，报告残留位置（PR #42 最后一轮代码 M2、一致性 M1）', () => {
+test('H6 清理副本：先改名到随机名下再核对身份、逐项删除，不调用会按路径改权限重试的 rmSync，不跟随链接；副本目录被换掉时不清理（PR #42 最后一轮代码 M2、一致性 M1）', () => {
   const runDir = tmpDir('ekit-rm-');
   const copy = path.join(runDir, 'workspace');
   fs.mkdirSync(path.join(copy, 'src'), { recursive: true });
@@ -1483,16 +1483,10 @@ test('H6 清理副本：不改任何文件的权限、不跟随链接；删不�
   const st = fs.lstatSync(copy);
   const note = ER.removeCopy(copy, runDir, { dev: st.dev, ino: st.ino });
   assert.equal(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'sentinel', '链接指向的目录原样保留');
-  if (process.platform === 'win32') {
-    // Windows 上只读文件删不掉：不改权限重试，停下并报告残留
-    assert.match(String(note), /残留/);
-    const left = fs.readdirSync(runDir).map((n) => path.join(runDir, n, 'src', 'ro.ts')).find((p) => fs.existsSync(p));
-    assert.ok(left, '只读文件留在原处');
-    assert.equal(fs.statSync(left).mode & 0o200, 0, '权限没被改动');
-  } else {
-    assert.equal(note, null);
-    assert.equal(fs.existsSync(copy), false);
-  }
+  // 只读文件也删掉：Windows 上 unlink 在它自己打开的句柄上清只读属性再删（不跟随重解析点），不按路径另改权限
+  assert.equal(note, null, String(note));
+  assert.equal(fs.existsSync(copy), false);
+  assert.deepEqual(fs.readdirSync(runDir).filter((n) => n.startsWith('.removing-')), [], '没有残留');
   // 副本目录被换成另一个目录：不清理
   const copy2 = path.join(runDir, 'workspace2');
   fs.mkdirSync(copy2);

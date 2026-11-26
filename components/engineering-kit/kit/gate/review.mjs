@@ -52,7 +52,7 @@ import {
   writeRecord,
 } from './lib.mjs';
 
-import { MAX_REVIEW_BYTES, admissionProblems, canonicalJson, compactFindings, coverageOf, fingerprint, renderReport, validateReviewData } from './review-data.mjs';
+import { COVERAGE_RULE, MAX_REVIEW_BYTES, admissionProblems, canonicalJson, compactFindings, coverageOf, fingerprint, renderReport, validateReviewData } from './review-data.mjs';
 
 /** 审查种类及中文名。 */
 const KINDS = { code: '代码复审', consistency: '一致性审' };
@@ -322,8 +322,8 @@ function registerLocked({ root, config, verdict, reviewer, data, evidenceChecked
   if (data) {
     const { reviewedBase, reviewedCommit } = data;
     const unavailable = [reviewedCommit, reviewedBase].filter((rev) => !git(root, ['cat-file', '-e', `${rev}^{commit}`]).ok);
-    // 只接续带结构化数据副本的登记（0.9.0 起）：更早的记录在旧规则下判的覆盖，可能漏算没交给复审者的改动文件，无法证明完整
-    const coveredCommits = prior.filter((r) => r.kind === kind && ['pass', 'fail', 'accept'].includes(r.verdict) && r.coverage === 'full' && r.dataSha).map((r) => r.headSha);
+    // 只接续带结构化数据副本、且写明按当前覆盖规则判定的登记：更早的记录在旧规则下判的覆盖，可能漏算没交给复审者的改动文件，无法证明完整
+    const coveredCommits = prior.filter((r) => r.kind === kind && ['pass', 'fail', 'accept'].includes(r.verdict) && r.coverage === 'full' && r.dataSha && r.coverageRule >= COVERAGE_RULE).map((r) => r.headSha);
     coverage = coverageOf({ reviewedBase, reviewedCommit, coveredCommits, unreviewedFiles: data.unreviewedFiles ?? [],
       forkPoint: forkPoint(root, resolveBase(root, config.base), reviewedCommit),
       baseIsAncestor: git(root, ['merge-base', '--is-ancestor', reviewedBase, reviewedCommit]).ok,
@@ -340,7 +340,7 @@ function registerLocked({ root, config, verdict, reviewer, data, evidenceChecked
   const file = prRecordFile(root, no, kind);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const record = { pr: no, kind, verdict, reviewer: reviewer ?? null, headSha: st.head, summary, reason: reason ?? null, userDecision: userDecision ?? null, report: null, at: new Date().toISOString() };
-  if (coverage) record.coverage = coverage.full ? 'full' : 'partial';
+  if (coverage) Object.assign(record, { coverage: coverage.full ? 'full' : 'partial', coverageRule: COVERAGE_RULE });
   saveCopies(path.dirname(file), record, data, evidenceChecked, config.reviewKeyword);
   // 先追加历史（轮次按它计数），再写最新记录（merge.mjs 读它）
   fs.appendFileSync(logFile, `${JSON.stringify(record)}\n`);

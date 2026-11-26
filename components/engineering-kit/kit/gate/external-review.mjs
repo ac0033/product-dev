@@ -420,14 +420,36 @@ export function changedParts(before, after) {
   return Object.entries(STATE_PARTS).filter(([k]) => before.parts[k] !== after.parts[k]).map(([, name]) => name);
 }
 
-/** 删除只读副本。不改任何文件的权限（Windows 上副本本来就不设只读，见 materialize）；rmSync 删除链接本身、不跟随。 */
-function removeCopy(dir, runDir, identity) {
+/**
+ * 删除副本。先把它改名到运行目录里一个随机名下、再核对身份，之后逐项删除：不改任何文件的权限（rmSync 在 Windows 上遇到 EPERM 会按路径改权限重试，所以不用它），
+ * 链接只删链接本身，每个目录删之前再核对一次身份；删不掉或身份对不上就停下，返回残留位置。
+ * 局限：Node 没有按目录句柄删除的接口，能写运行目录的同一用户进程仍可能在两次核对之间替换；运行目录只对当前用户可写（0700），随机名事先不可知。
+ */
+export function removeCopy(dir, runDir, identity) {
   if (!ownedCopy(dir, runDir, identity)) return '副本路径已被替换或移走，未清理';
+  const trash = path.join(runDir, `.removing-${crypto.randomBytes(8).toString('hex')}`);
+  try { fs.renameSync(dir, trash); } catch (e) { return `未能清理只读副本：${e.message}`; }
+  if (!ownedCopy(trash, runDir, identity)) return `副本在清理时被替换，已停止清理，残留在 ${trash}`;
+  const same = (p, id) => {
+    const st = fs.lstatSync(p);
+    if (!st.isDirectory() || st.isSymbolicLink() || st.dev !== id.dev || st.ino !== id.ino) throw new Error(`目录 ${p} 在清理时被替换`);
+  };
+  const remove = (d, id) => {
+    same(d, id);
+    for (const name of fs.readdirSync(d)) {
+      const p = path.join(d, name);
+      const st = fs.lstatSync(p);
+      if (st.isDirectory() && !st.isSymbolicLink()) remove(p, st);
+      else fs.unlinkSync(p);
+    }
+    same(d, id);
+    fs.rmdirSync(d);
+  };
   try {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    remove(trash, identity);
     return null;
   } catch (e) {
-    return `未能清理只读副本：${e.message}`;
+    return `未能清理只读副本（不改权限、不重试），残留在 ${trash}：${e.message}`;
   }
 }
 
@@ -814,8 +836,13 @@ export async function runExternalReview(opts) {
   const baseSha = opts.base ? gitOk(root, ['rev-parse', '--verify', `${opts.base}^{commit}`], '解析 --base').trim() : (fork ?? policy.baseRev);
 
   const prior = config.reviewFlow === 'pr' && round === 'followup' ? followupFindings(root, pr, kind, headSha) : { findings: [], sha: null };
-  if (prior.findings.length && !opts.priorReport) {
-    throw new Error(`修后复核的上一轮有高、中级发现（${prior.findings.map((f) => f.id).join('、')}）：待处置清单只外发编号和级别，须用 --prior-report 附上一轮报告（发送前按当前外发策略核对），复审者据它逐条处置`);
+  if (prior.findings.length) {
+    // 待处置清单只外发编号和级别，复审者核对靠调用者附的上一轮报告：它须是上一份不通过数据对应的那份（带指纹），每条待处置编号都在
+    const text = opts.priorReport ?? '';
+    const missing = [prior.sha, ...prior.findings.map((f) => f.id)].filter((token) => !new RegExp(`(^|[^0-9A-Za-z])${token.replace(/[^0-9A-Za-z]/g, '\\$&')}($|[^0-9A-Za-z])`).test(text));
+    if (missing.length) {
+      throw new Error(`修后复核的上一轮有高、中级发现（${prior.findings.map((f) => f.id).join('、')}）：待处置清单只外发编号和级别，须用 --prior-report 附上一份不通过登记的报告（登记记录的 report 文件；发送前按当前外发策略核对，保留“指纹”一行，每条编号写可核对的问题摘要），${opts.priorReport ? `现在缺少：${missing.join('、')}` : '现在没有附'}。某条连摘要都不能外发的，这一种审查本轮改由能看到原材料的复审者做`);
+    }
   }
   const { request } = buildRequest({ root, baseSha, headSha, kind, round, risk, priorFindings: prior.findings, priorFailSha: prior.sha, model, limits, extraExclude: policy.exclude, contextText: opts.contextText ?? null, priorReport: opts.priorReport ?? null });
   const requestText = JSON.stringify(request);

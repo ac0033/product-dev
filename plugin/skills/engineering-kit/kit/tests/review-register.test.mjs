@@ -403,9 +403,11 @@ test('H7 pre-push 流程：被审范围的终点不是当前 HEAD 时不能登�
   const stale = prePush(root, reviewData({ reviewedCommit: mid, reviewedBase: fork }));
   assert.equal(stale.ok, false, '审的是较早的提交，HEAD 上的后续改动没审');
   assert.match(stale.message, /HEAD/);
-  const half = prePush(root, reviewData({ reviewedCommit: head, reviewedBase: null }));
-  assert.equal(half.ok, false);
-  assert.match(half.message, /同时给出/);
+  for (const range of [{ reviewedCommit: head, reviewedBase: null }, { reviewedCommit: null, reviewedBase: fork }]) {
+    const half = prePush(root, reviewData(range));
+    assert.equal(half.ok, false, JSON.stringify(range));
+    assert.match(half.message, /同时给出/);
+  }
   const hidden = prePush(root, reviewData({ unreviewedFiles: ['src/dedup.ts'] }));
   assert.equal(hidden.ok, false);
   assert.match(hidden.message, /没有交给复审者/);
@@ -439,6 +441,21 @@ test('H7 覆盖接续：登记历史里没有结构化数据副本的旧版“�
   assert.equal(chained.ok, false, '旧记录的完整覆盖无法证明，不能接续');
   assert.match(chained.message, /缺少同种审查的完整覆盖/);
   assert.equal(reg(root, data(head2, main)).ok, true, '从分叉点补审可以');
+});
+
+test('H7 覆盖接续：记录带数据指纹、但没写按新规则判定覆盖（coverageRule）的，同样不作接续依据；新登记都写上（PR #42 最后一轮代码 M3）', () => {
+  const { root, main } = prRepo();
+  const head1 = addCommit(root, 1);
+  const first = reg(root, data(head1, main));
+  assert.equal(first.ok, true);
+  assert.ok(first.record.coverageRule >= 2, '新登记写明覆盖规则版本');
+  const log = path.join(prDir(root), 'log.jsonl');
+  const stripped = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).map(({ coverageRule, ...r }) => r);
+  fs.writeFileSync(log, stripped.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const head2 = addCommit(root, 2);
+  const chained = reg(root, data(head2, head1));
+  assert.equal(chained.ok, false);
+  assert.match(chained.message, /缺少同种审查的完整覆盖/);
 });
 
 test('合并入口：代码复审的最新记录与登记历史的最后一条不一致时拒绝合并（上次登记写到一半失败；PR #42 双审 M2/M4）', () => {
