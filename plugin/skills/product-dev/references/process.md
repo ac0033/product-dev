@@ -31,7 +31,6 @@
 | `layout.sourceGlobs`、`testGlobs` | 源文件和测试文件的匹配规则。Python 项目把 `sourceGlobs` 改成 `**/*.py` |
 | `rules.reviewIgnore` | 只放真正的纯说明文件。套件 0.7.0 起的默认值是 `docs/**/*.md`、`README.md`、`CHANGELOG.md`；规则（AGENTS.md、CLAUDE.md）、技能正文、提示词、可执行原型会改变行为，不放进来。配置里没写这个字段的按当前默认值。更早安装的项目还留着旧默认值（`**/*.md`、`docs/**`）时，闸门不要求为这些文件复审，合并入口还会把只改它们的 PR 当成只改文档放行：按同步时的升级提示收窄。它是判定策略字段：闸门按基准提交上的版本判定，分支里的修改合入主干后才生效；项目配置、豁免表和 `scripts/engineering/**` 永远在闸门范围内 |
 | `modules.review.reviewers` | 确认名单里有 `product-dev:code-reviewer`，否则用它做的复审登记不了。套件 0.5.0 起新装的项目默认已有；更早安装的项目同步时不改项目配置，要手动加（见 [review.md](review.md) 第 1 节）；名单按基准提交上的配置判定，在功能分支里加要合入主干后才生效 |
-| `modules.review.roundClosure`、`riskRegister` | 可选的复审收口（套件 0.9.0 起，只用于 `pr` 流程）：`roundClosure` 默认 `off`，设为 `fix-and-record` 后，两份意见收齐、到 `maxReviewRounds` 轮仍不通过时，按 review.md 第 8 节“收口”的判定表办（“无法彻底解决”时停下，有高级时多开一轮最后的复核，只剩中、低级时修完、写风险登记再 `close`）；`riskRegister` 是风险登记文件的位置（默认 `docs/04-开发/review-risks.md`）。做法见 [review.md](review.md) 第 8 节“收口”；两项都是判定策略字段，合入主干后才生效 |
 | `modules.gate.requiredChecks` | `pr` 流程的必需检查名，为空时每一项检查都算必需；CI 有按条件跳过的检查时列出必需的那几项。写检查名，不是 PR 页面上显示的“工作流名 / job 名 (事件)”。写法、判定口径、查名字的命令和改名顺序见 [套件流程文档](../../engineering-kit/references/process.md) 第 4 节“套件闸门的两种流程”；它是判定策略字段，合入主干后才生效 |
 | `modules.gate.reviewFlow` | 默认 `pre-push`；有 GitHub 远程、已登录的 `gh` 且 PR 上有 CI 检查的项目可以改成 `pr`（建议项，由用户决定或按授权采用推荐）；闸门按基准提交上的配置判定，改动合入主干后才生效 |
 

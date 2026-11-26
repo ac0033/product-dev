@@ -18,4 +18,4 @@
 
 记录目录：`docs/adr/`（决策记录）、`docs/acceptance/`（验收证据包）、`docs/release/`（发布记录）。
 
-模板：[_templates](_templates/)（adr、feature-contract、plan、acceptance-pack、review-risks）。
+模板：[_templates](_templates/)（adr、feature-contract、plan、acceptance-pack）。

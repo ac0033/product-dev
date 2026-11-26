@@ -8,11 +8,10 @@
 // 只改文档的 PR（本地算出的基准提交到最终提交之间的全部文件在 reviewIgnore 之内，本地没有最终提交时按含代码处理，
 // 与闸门同一口径：reviewFlow、reviewIgnore 等判定策略取基准提交上的配置，项目配置、豁免表和 scripts/engineering/** 永远不算文档）
 // 按分档不做审查，只核对 PR 打开与 CI 全过。全部满足才执行
-// 开启轮次收口时，收口记录可代两项审查；在最终提交上重新核对风险登记后才能放行。
 // gh pr merge --match-head-commit（核对之后再有人推送，GitHub 会拒绝合并），默认 squash 并删除远端分支。
 // 任一项不满足就逐条列出原因、以 1 退出、不合并；gh 不存在或调用失败同样报错退出。
 // 用法：node scripts/engineering/gate/merge.mjs <PR> [--method squash|merge|rebase]
-import { closeClearance, docsOnlyPr, recordClears, REQUIRED } from './clearance.mjs';
+import { docsOnlyPr, recordClears, REQUIRED } from './clearance.mjs';
 import { assertPolicy, defaultGh, isMain, loadConfig, prNumber, readPr, repoRoot, runGh } from './lib.mjs';
 
 /** 允许的合并方式（对应 gh pr merge 的 --squash、--merge、--rebase）。 */
@@ -40,20 +39,10 @@ export function mergePr({ root, pr, method = 'squash', gh = defaultGh }) {
   for (const p of st.ciProblems) problems.push(`${p}（最终提交 ${short(st.head)}）`);
   const scope = docsOnlyPr(root, config, st.head);
   if (scope.why) notes.push(scope.why);
-  if (!scope.docs) {
-    // 两条放行路径：有效的收口记录，或普通双审。收口记录失效（例如之后改坏了风险登记）时不挡住普通双审，两条都不满足才拒绝
-    const closed = closeClearance(root, no, st.head, config);
-    const normal = { problems: [], notes: [] };
-    if (!closed || closed.problems.length) {
-      for (const r of REQUIRED) {
-        const result = recordClears(root, no, st.head, config, r);
-        normal.problems.push(...result.problems);
-        normal.notes.push(...result.notes);
-      }
-    }
-    if (closed && !closed.problems.length) notes.push(...closed.notes);
-    else if (!normal.problems.length) notes.push(...normal.notes, ...(closed ? [`收口记录不再有效（${closed.problems.join('；')}），按普通双审放行`] : []));
-    else problems.push(...normal.problems, ...(closed ? closed.problems.map((p) => `收口：${p}`) : []));
+  for (const r of scope.docs ? [] : REQUIRED) {
+    const result = recordClears(root, no, st.head, config, r);
+    problems.push(...result.problems);
+    notes.push(...result.notes);
   }
   if (problems.length > 0) return { ok: false, problems, notes, head: st.head, ci: st.ci };
   runGh(gh, ['pr', 'merge', no, `--${method}`, '--match-head-commit', st.head, '--delete-branch'], root);

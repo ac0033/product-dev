@@ -8,8 +8,8 @@
       "version": "0.9.0",
       "license": "MIT",
       "changes": "头部去掉 disable-model-invocation，加 user-invocable: false",
-      "fileCount": 68,
-      "sha256": "69e74f5f7eb158faa3a74d47fa90b17c0d7c116476b1778c908e961db9a7e7f4"
+      "fileCount": 64,
+      "sha256": "eb37467333789eca27ec5b949e897e6289b760766915d32a814123750ad6da2d"
     },
     {
       "id": "product-design-orchestrator",

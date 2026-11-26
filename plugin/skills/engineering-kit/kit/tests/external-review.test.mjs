@@ -1054,8 +1054,8 @@ test('trackingFingerprint：按 git 生效的配置视图核对当前分支的�
   git(root, ['config', '--worktree', 'branch.track.merge', 'refs/heads/main']);
   assert.notEqual(trackingFingerprint(root), mid.parts.tracking, '覆盖 merge 也算');
 });
-// ---------- 复审规则（契约 A 块）：A2、A4、A5、A7 外部复审的新字段与新参数 ----------
-// 约定（见交回说明）：run 的选项名为 risk、finalRound（命令行 --risk、--final-round）；reviewInstructions 第三个参数为 { risk, finalRound }；
+// ---------- 复审规则（契约 A 块）：A2、A4、A5 外部复审的新字段与新参数 ----------
+// 约定：run 的选项名为 risk（命令行 --risk）；reviewInstructions 第三个参数为 { risk }；
 // 发现表七栏的表头与 report.mjs 的 FINDING_COLUMNS 一致；渲染时单元格单行化并转义竖线，parseFindings 读回时还原竖线。
 
 /** 报告解析模块（新增）：动态导入，模块缺失时只让用到它的用例失败，不拖垮本文件已有的用例。 */
@@ -1199,28 +1199,7 @@ test('A5 run --risk：写入 request.review.risk，默认 low；high 时任务�
   await assert.rejects(run(root, head, 'pass', { risk: 'HIGH' }), /--risk/);
 });
 
-test('A7 提示词：finalRound 时写明“这是最后一轮”，务必全面彻底、逐条列清理由和彻底解决办法、无法彻底解决的写法', () => {
-  const text = reviewInstructions('code', 'followup', { finalRound: true });
-  assert.match(text, /最后一轮/);
-  assert.match(text, /全面彻底/);
-  assert.match(text, /无法彻底解决/);
-  assert.doesNotMatch(reviewInstructions('code', 'followup', {}), /最后一轮/);
-  assert.doesNotMatch(reviewInstructions('code', 'first', { risk: 'high' }), /最后一轮/);
-});
-
-test('A7 run --final-round：只能与 followup 同用，写入 request.review.finalRound；任务书含“最后一轮”', async () => {
-  const { root, head } = repo();
-  await assert.rejects(run(root, head, 'pass', { finalRound: true }), /--final-round/, '默认首轮不能带');
-  await assert.rejects(run(root, head, 'pass', { round: 'first', finalRound: true }), /--final-round/);
-  const dflt = await run(root, head, 'pass');
-  assert.ok(!seenOf(dflt).req.review.finalRound);
-  const fin = await run(root, head, 'pass', { round: 'followup', finalRound: true });
-  assert.equal(fin.ok, true, fin.message);
-  assert.equal(seenOf(fin).req.review.finalRound, true);
-  assert.match(seenOf(fin).req.context.instructions, /最后一轮/);
-});
-
-// ---------- 首轮复审的修复（PR #40）：外部结果的必填项、修后处置、报告指纹、命令行参数 ----------
+// ---------- 首轮复审的修复（PR #40）：外部结果的必填项、报告指纹、命令行参数 ----------
 
 test('外部结果：高、中级发现缺 file、title 或 detail（位置、问题、触发条件）时结构不合格；低级不要求', () => {
   const base = { version: 1, execution: { status: 'completed' }, provenance: { executor: 'x', actualModel: 'm' } };
@@ -1232,28 +1211,6 @@ test('外部结果：高、中级发现缺 file、title 或 detail（位置、�
     assert.ok(missing.some((p) => p.includes(field)), `${field}：${missing.join('；')}`);
   }
   assert.deepEqual(check({ severity: 'low', title: '命名', detail: 'x' }), [], '低级不要求位置');
-  const badDisp = validateResult({ ...base, review: { verdict: 'pass', findings: [], limitations: [], report: NARRATIVE, dispositions: [{ id: 'H1', status: 'done', evidence: 'x' }] } });
-  assert.ok(badDisp.some((p) => p.includes('dispositions')), badDisp.join('；'));
-});
-
-test('修后复核：上一轮报告里有高、中级发现时，dispositions 要逐条交代，缺一条不可登记；齐全时报告里有“上一轮处置”一节', () => {
-  const prior = '## 发现\n\n| 编号 | 级别 | 位置 | 问题 | 触发条件或例子 | 理由 | 建议改法 |\n|---|---|---|---|---|---|---|\n| H1 | 高 | src/a.ts:3 | 越权 | 任何人可删 | 影响他人数据 | 校验所有者 |\n| M1 | 中 | src/a.ts:9 | 漏边界 | 空数组 | 主路径外出错 | 补判断 |\n| L1 | 低 | src/a.ts | 命名 | - | - | - |\n';
-  const request = { review: { kind: 'code', round: 'followup' }, model: { id: 'm', source: 'request', chosenBy: 'user', reason: null }, context: { priorReport: prior }, target: { baseSha: 'b'.repeat(40), headSha: 'a'.repeat(40), files: ['src/a.ts'], excludedFiles: [] } };
-  const integrity = { copyUnchanged: true, repoUnchanged: true, headUnchanged: true, exitCode: 0 };
-  const result = (dispositions) => ({ version: 1, execution: { status: 'completed' }, review: { verdict: 'pass', findings: [], limitations: [], report: NARRATIVE, dispositions }, provenance: { executor: 'x', actualModel: 'm' } });
-  const partial = assess({ result: result([{ id: 'H1', status: 'fixed', evidence: '已加所有者校验' }]), request, integrity });
-  assert.equal(partial.registrable, false);
-  assert.ok(partial.reasons.some((r) => r.includes('M1')), partial.reasons.join('\n'));
-  assert.ok(!partial.reasons.some((r) => r.includes('L1')), '低级不要求交代');
-  const full = result([{ id: 'H1', status: 'fixed', evidence: '已加所有者校验' }, { id: 'M1', status: 'fixed', evidence: '补了空数组判断与测试' }]);
-  const a = assess({ result: full, request, integrity });
-  assert.equal(a.registrable, true, a.reasons.join('\n'));
-  const text = renderReport({ request, result: full, assessment: a, meta: { reviewer: 'external:x', inputHash: '0'.repeat(64), durationMs: 1000, usageLine: '无' } });
-  assert.match(text, /## 上一轮处置/);
-  assert.match(text, /\| M1 \| 已修好 \| 补了空数组判断与测试 \|/);
-  assert.equal(reportVerdict(text).verdict, 'pass');
-  // 首轮（或没给上一轮报告）不要求
-  assert.equal(assess({ result: result([]), request: { ...request, review: { kind: 'code', round: 'first' } }, integrity }).registrable, true);
 });
 
 test('报告指纹：运行目录里的 report.md 生成后被改过，补登拒绝；缺 report.sha256 的旧运行目录要求重跑', async () => {
@@ -1274,20 +1231,42 @@ test('报告指纹：运行目录里的 report.md 生成后被改过，补登拒
   assert.match(old.message, /report\.sha256/);
 });
 
-test('命令行：--risk、--final-round 经真实参数分发生效（非法值、首轮带 --final-round、--risk high 缺 --context 都报错；register 不接受这两个参数）', () => {
+test('命令行：--risk 经真实参数分发生效（非法值、--risk high 缺 --context 都报错；register 不接受它）', () => {
   const { root } = repo();
   const cli = fileURLToPath(new URL('../gate/external-review.mjs', import.meta.url));
   const cases = [
     [['run', '--executor', 'fake', '--risk', 'mid'], /--risk 只能是 low 或 high/],
-    [['run', '--executor', 'fake', '--final-round'], /--final-round 只能与 --round followup 同用/],
-    [['run', '--executor', 'fake', '--round', 'first', '--final-round'], /--final-round 只能与 --round followup 同用/],
     [['run', '--executor', 'fake', '--risk', 'high'], /--risk high 须用 --context/],
     [['register', '--run-dir', 'x', '--risk', 'high'], /只用于 run/],
-    [['register', '--run-dir', 'x', '--final-round'], /只用于 run/],
   ];
   for (const [args, why] of cases) {
     const r = spawnSync(process.execPath, [cli, ...args], { cwd: root, encoding: 'utf8' });
     assert.equal(r.status, 1, args.join(' '));
     assert.match(r.stderr, why, args.join(' '));
   }
+});
+
+test('外部报告：发现节名随 reviewSections；作者用 --context 给了材料时，作者的验证一节如实写“读到了、没核对”', () => {
+  const request = { review: { kind: 'code', round: 'first' }, model: { id: 'm', source: 'request', chosenBy: 'user', reason: null }, context: { project: '相关测试：tests/a.test.ts（单元）' }, target: { baseSha: 'b'.repeat(40), headSha: 'a'.repeat(40), files: ['src/a.ts'], excludedFiles: [] } };
+  const result = { execution: { status: 'completed' }, review: { verdict: 'fail', findings: [{ severity: 'medium', title: '漏边界', file: 'src/a.ts', line: 3, detail: '空数组', reason: '边界出错', fix: '补判断' }], limitations: [], report: NARRATIVE }, provenance: { executor: 'x', actualModel: 'm' } };
+  const meta = { reviewer: 'external:x', inputHash: '0'.repeat(64), durationMs: 1000, usageLine: '无' };
+  const text = renderReport({ request, result, assessment: { verdict: 'fail', notes: [] }, meta, section: '审查发现' });
+  assert.match(text, /^## 审查发现$/m);
+  assert.deepEqual(missingSections(text, ['范围', '审查发现', '作者的验证']), []);
+  assert.match(text, /读到了作者在上下文里提供的材料/);
+  const bare = renderReport({ request: { ...request, context: { project: null } }, result, assessment: { verdict: 'fail', notes: [] }, meta });
+  assert.match(bare, /^## 发现$/m);
+  assert.match(bare, /没有看到作者的验证证据/);
+});
+
+test('补登用核对过指纹的那份正文登记：文件在核对之后被换掉也不影响登记内容', async () => {
+  const { root, head } = repo();
+  const res = await run(root, head, 'fail');
+  assert.equal(res.ok, true, res.message);
+  const original = fs.readFileSync(res.reportPath, 'utf8');
+  const swapped = path.join(tmpDir('ekit-xr-'), 'swapped.md');
+  fs.writeFileSync(swapped, original.replace('| 高级 |', '| 低级 |'));
+  const r = registerReport({ root, headSha: head, kind: 'code', verdict: 'fail', reviewer: 'external:fake', reportPath: swapped, reportText: original, summary: 's', pr: '7', gh: fakeGh([head]) });
+  assert.equal(r.ok, true, r.message);
+  assert.deepEqual(r.record.findings.highIds, ['H1'], '按核对过的正文登记');
 });

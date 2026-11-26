@@ -174,3 +174,13 @@ test('发现节的节名可配置：findingsSection 取 reviewSections 里含“
   assert.equal(parseFindings(renamed, { section: '审查发现' }).parsed, 1);
   assert.match(findingProblems(renamed).join('\n'), /“发现”一节里找不到可解析的表头/);
 });
+
+test('看得见的内容才算：行内代码里的 <!-- 不开注释；注释里的三个反引号不开围栏', () => {
+  const twoTables = `## 发现\n\n${HEAD7}\n${row('M1', '中', 'a.ts', '用 \`<!--\` 开头的模板', '输入含注释', '理由', '改法')}\n\n下面是另一张表。\n\n${HEAD7}\n${ok('H1', '高')}\n\n## 结论\n不通过。\n`;
+  const f = parseFindings(twoTables);
+  assert.deepEqual(f.mediumIds, ['M1']);
+  assert.deepEqual(f.highIds, ['H1'], '第二张表的高级发现不能丢');
+  assert.deepEqual(findingProblems(twoTables), []);
+  const fenceInComment = `## 发现\n\n<!--\n\`\`\`\n-->\n${HEAD7}\n${ok('H1', '高')}\n\n## 结论\n不通过。\n`;
+  assert.deepEqual(parseFindings(fenceInComment).highIds, ['H1'], '注释后面的可见表照常');
+});

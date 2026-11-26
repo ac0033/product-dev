@@ -176,40 +176,69 @@ function cells(line) {
   return out;
 }
 
-/** 去掉一行里 HTML 注释（<!-- … -->，可跨行）的部分；state.comment 记录上一行结束时是否还在注释里。 */
-function visiblePart(text, state) {
-  let visible = '';
-  let rest = text;
-  while (rest) {
-    if (state.comment) {
-      const end = rest.indexOf('-->');
-      if (end < 0) return visible;
-      state.comment = false;
-      rest = rest.slice(end + 3);
-    } else {
-      const start = rest.indexOf('<!--');
-      if (start < 0) return visible + rest;
-      visible += rest.slice(0, start);
-      state.comment = true;
-      rest = rest.slice(start + 4);
+/**
+ * 读者在渲染后的 Markdown 里看得见的各行：代码围栏里的行、HTML 注释（<!-- … -->，可跨行）里的部分都换成空。
+ * 围栏、注释、行内代码一起逐字扫描，互相尊重范围：注释里的三个反引号不开围栏；行内代码（反引号包住的一段）里的 <!-- 不开注释，
+ * 照原样留在可见文字里。围栏的认法与 markFences 相同（开头行三个以上反引号或波浪线，闭合用同一种符号、个数不少于开头）。
+ */
+function visibleLines(text) {
+  const out = [];
+  let fence = null;
+  let comment = false;
+  for (const raw of String(text).split(/\r?\n/)) {
+    if (fence) {
+      const close = /^\s*(`{3,}|~{3,})\s*$/.exec(raw);
+      if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
+      out.push('');
+      continue;
     }
+    if (!comment) {
+      const start = /^\s*(`{3,}|~{3,})(.*)$/.exec(raw);
+      if (start && !(start[1][0] === '`' && start[2].includes('`'))) {
+        fence = { ch: start[1][0], len: start[1].length };
+        out.push('');
+        continue;
+      }
+    }
+    let shown = '';
+    let i = 0;
+    while (i < raw.length) {
+      if (comment) {
+        const end = raw.indexOf('-->', i);
+        if (end < 0) break;
+        comment = false;
+        i = end + 3;
+      } else if (raw[i] === '`') {
+        // 行内代码：同样长度的一串反引号闭合；找不到闭合的反引号只是普通字符
+        let j = i;
+        while (raw[j] === '`') j++;
+        const close = raw.indexOf(raw.slice(i, j), j);
+        const stop = close < 0 ? j : close + (j - i);
+        shown += raw.slice(i, stop);
+        i = stop;
+      } else if (raw.startsWith('<!--', i)) {
+        comment = true;
+        i += 4;
+      } else {
+        shown += raw[i];
+        i++;
+      }
+    }
+    out.push(shown);
   }
-  return visible;
+  return out;
 }
 
 /**
  * 只取发现节（含下级标题）的表；围栏、其他节和同一行写法之后的新节都隔断表格。section 是发现节的节名（默认“发现”，
- * 项目在 reviewSections 里改了节名时由调用方传入）。HTML 注释在 Markdown 里看不见，注释里的表不当证据（发现表和风险登记都一样）。
+ * 项目在 reviewSections 里改了节名时由调用方传入）。只看读者看得见的内容（visibleLines）：注释、围栏里的表不当证据。
  */
 function tableLines(text, findingsOnly, section = '发现') {
   const name = escapeRe(section);
   const headingRe = new RegExp(`^${name}(?:[\\s（(:：]|$)`);
   const inlineRe = new RegExp(`^\\s*(?:[-+*>]\\s*)*${name}\\s*[:：]`);
-  const state = { comment: false };
   let depth = 0;
-  return markFences(text).lines.map((line) => {
-    if (line.fenced) return '';
-    const shown = visiblePart(line.text, state);
+  return visibleLines(text).map((shown) => {
     if (!findingsOnly) return shown;
     const heading = /^\s{0,3}(#{1,6})\s+(.*)$/.exec(shown);
     if (heading) {

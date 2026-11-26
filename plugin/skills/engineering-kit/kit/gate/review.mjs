@@ -2,7 +2,7 @@
 // 以 external: 开头的登记名只接受 external-review.mjs 的调用（recordReview 的 viaExternalReview 参数，命令行没有对应的参数），手动 review.mjs 登记一律拒绝；
 //   外部复审的 accept 与超过轮次上限后的 --user-decision 登记也走 external-review.mjs：register（--accept、--user-decision）核对运行目录后才调用 recordReview，
 //   run --register 也接受 --user-decision（复审跑完直接登记；--accept 只用于 register）；
-// 判定策略（复审流程、必需检查名、复审者名单、必需的节、最少字数、结论关键词、复审轮次上限、收口策略和风险登记路径）取基准提交上的配置，被审分支改了不算数（lib.mjs 的 loadConfig）。
+// 判定策略（复审流程、必需检查名、复审者名单、必需的节、最少字数、结论关键词、复审轮次上限）取基准提交上的配置，被审分支改了不算数（lib.mjs 的 loadConfig）。
 // 报告要有实质内容：必需的几节（modules.review.reviewSections，默认范围、发现、作者的验证，见 missingSections）齐全且各有内容，
 // 并且有一处明确的结论（写法见 reportVerdict）：登记 pass 要求结论是通过，登记 fail 要求结论是不通过，
 // 找不到明确结论、前后矛盾或与登记不符时拒绝。fail、accept 还须有发现表，中高级每条写理由与建议改法。常规登记如下：
@@ -11,7 +11,7 @@
 //   accept        用户接受风险：报告结论是不通过，但用户已知情并决定接受其中的问题、不再修改；须带 --user-decision 写明用户的决定及出处。
 // 复审轮次：一轮＝同一 PR（pr 流程）或同一分支（pre-push 流程）上登记过 fail 的一份被审内容：pr 流程是一个最终提交，
 //   pre-push 流程是一份工作区内容（树哈希加文档内容哈希，见 ROUND_KEYS）；同一份内容上两种 kind 都 fail 只算一轮。
-//   PR 收口开启时按 rounds.mjs 判定是否最后一轮、收口或停止；收口默认关闭。关闭时，已有 maxReviewRounds（默认 3）份不同内容登记过 fail 后，再登记 pass 或 fail 须向用户说明后带 --user-decision；
+//   已有 maxReviewRounds（默认 3）份不同内容登记过 fail 后，再登记 pass 或 fail 须向用户说明后带 --user-decision；
 //   唯一例外是在已计入的内容上首次登记另一种 kind（见 roundBlock）。accept 与 defer 不计轮次、不受拦截。每次登记成功的输出末尾给出轮次统计。
 // 按项目的复审流程（modules.gate.reviewFlow）分两种：
 //   pre-push：推送前复审，绑定当前代码树哈希和基准提交（基线）；登记 pass、fail、accept 前必须已有与当前代码、当前基线一致的通过测试记录
@@ -27,7 +27,6 @@
 //       node scripts/engineering/gate/review.mjs defer --kind consistency --reason "<理由>"
 //       node scripts/engineering/gate/review.mjs accept --kind code|consistency --reviewer <名> --report <报告文件> --user-decision "<用户的决定及出处>"
 //       pr 流程的同样命令加 --pr <编号>，且必须带 --kind。
-//       收口开启时：review.mjs close --pr <编号> --report <最新一轮任一份 fail 报告> --summary "<修复摘要>"。
 // 报告文件放在仓库之外（例如系统临时目录），它不属于被审代码。
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -36,7 +35,6 @@ import {
   assertPolicy,
   defaultGh,
   gateScope,
-  git,
   headInfo,
   isMain,
   loadConfig,
@@ -53,8 +51,7 @@ import {
   writeRecord,
 } from './lib.mjs';
 import { fenceHint, findingProblems, findingsSection, missingSections, parseFindings, reportVerdict, seriousIssues } from './report.mjs';
-import { failKeys, lastFailRound, ROUND_KEYS, roundBlock, roundLine, roundState, trendWarnings } from './rounds.mjs';
-import { checkRegisterAt, closeEvidence } from './clearance.mjs';
+import { failKeys, ROUND_KEYS, roundBlock, roundLine } from './rounds.mjs';
 
 /** 旧入口保留报告检查接口，已有调用方可继续使用。 */
 export { markFences, missingSections, reportVerdict } from './report.mjs';
@@ -83,12 +80,13 @@ export function branchDirName(branch) {
  * 报告与复审者检查（pass、fail、accept 共用）。expect 是报告应有的结论（accept 要求报告结论为不通过），label 是登记的结论名。
  * 返回 { ok, message } 或 { ok: true, text }。
  */
-function checkReport(config, expect, reviewer, reportPath, label = expect) {
+function checkReport(config, expect, reviewer, reportPath, label = expect, reportText = null) {
   if (!config.reviewers.includes(reviewer)) {
     return { ok: false, message: `复审者 ${reviewer} 不在允许名单（${config.reviewers.join('、')}）内；复审必须由独立复审者（宿主子代理、外部执行器，或宿主没有子代理时用户另开的全新会话，后者登记名用 general-purpose）完成，名单变更合入主干后才生效` };
   }
-  if (!reportPath || !fs.existsSync(reportPath)) return { ok: false, message: '找不到复审报告文件' };
-  const text = fs.readFileSync(reportPath, 'utf8');
+  // reportText 是外部复审补登时已经核对过指纹的正文：直接用它，不再读一次文件（两次读取之间文件可能被换掉）
+  if (typeof reportText !== 'string' && (!reportPath || !fs.existsSync(reportPath))) return { ok: false, message: '找不到复审报告文件' };
+  const text = typeof reportText === 'string' ? reportText : fs.readFileSync(reportPath, 'utf8');
   if (config.reviewMinChars > 0 && text.trim().length < config.reviewMinChars) {
     return { ok: false, message: `复审报告不少于 ${config.reviewMinChars} 字（当前 ${text.trim().length} 字）` };
   }
@@ -112,15 +110,19 @@ function checkReport(config, expect, reviewer, reportPath, label = expect) {
     return { ok: false, message: `报告结论写的是“${said}”，不能记录为 ${label}（${how}）` };
   }
   if (expect === 'fail') {
-    const problems = findingProblems(text, { section: findingsSection(config.reviewSections) });
+    const section = findingsSection(config.reviewSections);
+    const problems = findingProblems(text, { section });
     if (problems.length) return { ok: false, message: '复审报告发现表不合格：\n' + problems.join('\n') };
+    // 与外部复审同一规则：只有低级或提示时结论是通过，不通过的报告至少要有一条高、中级发现（否则会白占一轮）
+    const f = parseFindings(text, { section });
+    if (f.high + f.medium === 0) return { ok: false, message: `报告结论是不通过，但发现表里没有高、中级问题：只有低级或提示时结论应为通过，不能记录为 ${label}` };
   }
   return { ok: true, text };
 }
 
 const sha256 = (text) => crypto.createHash('sha256').update(text).digest('hex');
 
-/** 为本次记录计算内容轮次、报告指纹和发现统计；延期没有报告，不能作为收口依据。 */
+/** 为本次记录计算内容轮次、报告指纹和发现统计；延期没有报告，这几项为空。 */
 function reportFields(prior, keyOf, key, text, section) {
   const counted = failKeys(prior, keyOf);
   const at = counted.indexOf(key);
@@ -149,14 +151,13 @@ function argProblem({ verdict, kind, reason, userDecision }) {
  * 登记复审结论。返回 { ok, message, record? }；不通过的登记也会写入（verdict=fail），核对时只认 pass 与 accept（一致性审另认 defer）。
  * pr 流程下 gh 不存在或调用失败时抛错（不放行）；gh 可注入，测试用假的实现。
  */
-export function recordReview({ root, verdict, reviewer, reportPath, summary = '', pr, kind, reason, userDecision, gh = defaultGh, viaExternalReview = false }) {
+export function recordReview({ root, verdict, reviewer, reportPath, reportText, summary = '', pr, kind, reason, userDecision, gh = defaultGh, viaExternalReview = false }) {
   if (typeof reviewer === 'string' && reviewer.startsWith(EXTERNAL_REVIEWER_PREFIX) && viaExternalReview !== true) {
     return { ok: false, message: `复审者名 ${reviewer} 以 ${EXTERNAL_REVIEWER_PREFIX} 开头，只能由 external-review.mjs 登记（它启动执行器、核对副本与最终提交、按发现判定结论后才登记），手动 review.mjs 不接受这类名字；外部复审判不通过、用户决定接受风险，或已审满轮次上限、用户同意继续的，用 external-review.mjs register --run-dir <运行目录> --user-decision "<用户的决定及出处>"（接受不通过的结论、不再修改的另加 --accept）；宿主没有子代理而由用户另开全新会话复审的，登记名用 general-purpose` };
   }
   const config = loadConfig(root);
   assertPolicy(config); // reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewSections、reviewKeyword、maxReviewRounds 取基准提交上的配置，取不到时不按工作区的值登记
-  if (verdict === 'close') return recordClose({ root, config, pr, reportPath, summary, kind, reviewer, gh });
-  if (config.reviewFlow === 'pr') return recordPrReview({ root, config, verdict, reviewer, reportPath, summary, pr, kind, reason, userDecision, gh });
+  if (config.reviewFlow === 'pr') return recordPrReview({ root, config, verdict, reviewer, reportPath, reportText: viaExternalReview === true ? reportText ?? null : null, summary, pr, kind, reason, userDecision, gh });
   if (pr !== undefined) {
     return { ok: false, message: '本项目的复审流程是 pre-push，不接受 --pr；要启用 PR 双审，在主干上把 modules.gate.reviewFlow 改为 pr（闸门按基准提交上的配置判定）' };
   }
@@ -165,7 +166,7 @@ export function recordReview({ root, verdict, reviewer, reportPath, summary = ''
   if (bad) return { ok: false, message: bad };
   let text = null;
   if (verdict !== 'defer') {
-    const checked = checkReport(config, verdict === 'accept' ? 'fail' : verdict, reviewer, reportPath, verdict);
+    const checked = checkReport(config, verdict === 'accept' ? 'fail' : verdict, reviewer, reportPath, verdict, viaExternalReview === true ? reportText ?? null : null);
     if (!checked.ok) return checked;
     text = checked.text;
   }
@@ -225,7 +226,7 @@ export function recordReview({ root, verdict, reviewer, reportPath, summary = ''
 }
 
 /** pr 流程的登记：校验参数与报告，核对轮次，读取 PR（须打开、CI 全过），把结论绑定到 PR 的最终提交。 */
-function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, pr, kind, reason, userDecision, gh }) {
+function recordPrReview({ root, config, verdict, reviewer, reportPath, reportText = null, summary, pr, kind, reason, userDecision, gh }) {
   if (!VERDICTS.includes(verdict)) return { ok: false, message: '结论只能是 pass、fail、defer 或 accept' };
   if (pr === undefined || !KINDS[kind]) return { ok: false, message: '本项目的复审流程是 pr：须带 --pr <编号> 与 --kind code|consistency' };
   const no = prNumber(pr);
@@ -233,7 +234,7 @@ function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, 
   if (bad) return { ok: false, message: bad };
   let text = null;
   if (verdict !== 'defer') {
-    const checked = checkReport(config, verdict === 'accept' ? 'fail' : verdict, reviewer, reportPath, verdict);
+    const checked = checkReport(config, verdict === 'accept' ? 'fail' : verdict, reviewer, reportPath, verdict, reportText);
     if (!checked.ok) return checked;
     text = checked.text;
   }
@@ -246,7 +247,7 @@ function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, 
   if (st.ciProblems.length > 0) return { ok: false, message: `CI 未在最终提交 ${st.head.slice(0, 12)} 上全部通过，不能登记：\n  ${st.ciProblems.join('\n  ')}` };
   // 轮次按提交计，要先知道这次登记对应 PR 的哪个最终提交
   const keys = ROUND_KEYS.pr;
-  const blocked = roundBlock(prior, verdict, { limit: config.maxReviewRounds, userDecision, scope: scopeName, cur: { key: st.head, kind }, keyOf: keys.of, closure: config.roundClosure });
+  const blocked = roundBlock(prior, verdict, { limit: config.maxReviewRounds, userDecision, scope: scopeName, cur: { key: st.head, kind }, keyOf: keys.of });
   if (blocked) return { ok: false, message: blocked };
 
   const file = prRecordFile(root, no, kind);
@@ -258,7 +259,7 @@ function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, 
   }
   const record = {
     ...reportFields(prior, keys.of, st.head, text, findingsSection(config.reviewSections)), pr: no, kind, verdict, reviewer: reviewer ?? null,
-    headSha: st.head, summary, reason: reason ?? null, userDecision: userDecision ?? (config.roundClosure === 'off' ? null : undefined),
+    headSha: st.head, summary, reason: reason ?? null, userDecision: userDecision ?? null,
     report: copy, at: new Date().toISOString(),
   };
   // 先追加历史（轮次按它计数），再写最新记录（merge.mjs 读它）
@@ -267,56 +268,7 @@ function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, 
   if (verdict === 'accept') lines.push(`用户决定接受风险：${userDecision}`);
   const entries = [...prior, record];
   lines.push(roundLine(entries, verdict, config.maxReviewRounds, scopeName, st.head, keys));
-  if (config.roundClosure === 'fix-and-record' && verdict === 'fail') {
-    const { phase } = roundState(entries, { keyOf: keys.of, limit: config.maxReviewRounds, closure: config.roundClosure });
-    if (phase === 'final-next') lines.push('下一轮是最后一轮，修后复核用 --final-round');
-    if (phase === 'close-only') lines.push('修复中级问题并写入风险登记后，运行 review.mjs close');
-    if (phase === 'stop') lines.push('停下向用户汇报，建议单开对话专项处理');
-    const warnings = trendWarnings(entries, keys.of);
-    if (warnings.length) lines.push(...warnings, '请先停下向用户汇报，建议专项处理');
-  }
   return { ok: true, message: lines.join('\n'), record };
-}
-
-
-/** 登记 PR 收口：从日志重建最新轮次，核对报告正文、修复提交和该提交里的风险登记后才写记录。 */
-function recordClose({ root, config, pr, reportPath, summary, kind, reviewer, gh }) {
-  if (config.reviewFlow !== 'pr' || config.roundClosure !== 'fix-and-record') {
-    return { ok: false, message: '本项目未开启 PR 轮次收口（roundClosure: fix-and-record）' };
-  }
-  if (pr === undefined) return { ok: false, message: '收口须带 --pr <编号>' };
-  const no = prNumber(pr);
-  const problems = [];
-  if (kind !== undefined || reviewer !== undefined) problems.push('close 不带 --kind 或 --reviewer');
-  if (!summary.trim()) problems.push('收口须用 --summary 写明修复摘要');
-  const st = readPr(root, no, gh, config.requiredChecks);
-  if (st.state !== 'OPEN') problems.push('PR #' + no + ' 不是打开状态（' + st.state + '）');
-  if (st.ciProblems.length) problems.push('最终提交 CI 未全部通过：' + st.ciProblems.join('、'));
-  const prior = readLog(prLogFile(root, no));
-  const keyOf = ROUND_KEYS.pr.of;
-  const { phase, counted } = roundState(prior, { keyOf, limit: config.maxReviewRounds, closure: config.roundClosure });
-  const { failHead, latest, mediumIds, mediumIssues } = lastFailRound(prior, keyOf);
-  if (phase !== 'close-only') problems.push('当前轮次不满足收口条件（已审 ' + counted + ' 轮，阶段 ' + phase + '）');
-  if (latest.some((e) => e.findings?.high)) problems.push('最新一轮仍有高级问题');
-  if (phase === 'stop') problems.push('停下向用户汇报，建议单开对话专项处理');
-  const reportSha = reportPath && fs.existsSync(reportPath) && fs.statSync(reportPath).isFile()
-    ? sha256(fs.readFileSync(reportPath, 'utf8')) : null;
-  if (!reportSha || !latest.some((e) => e.reportSha === reportSha)) problems.push('--report 须与最新一轮已登记的 fail 报告正文一致');
-  if (failHead === st.head) problems.push('最终提交与最新一轮被审提交相同，没有新修复提交');
-  else if (failHead && !git(root, ['merge-base', '--is-ancestor', failHead, st.head]).ok) {
-    problems.push('无法确认最新一轮被审提交是最终提交的祖先，本地缺提交时请先 git fetch');
-  }
-  const record = {
-    pr: no, kind: 'close', verdict: 'close', reviewer: null, headSha: st.head, failHead, closedRound: counted,
-    riskRegister: config.riskRegister, registerRows: mediumIssues.length, mediumIds, mediumIssues, summary, at: new Date().toISOString(),
-  };
-  problems.push(...checkRegisterAt(root, st.head, config.riskRegister, record));
-  // 两份意见在最新一轮内容上都已登记；修复有风险登记之外的改动、问题所在的文件改过（与合并入口共用同一判定）
-  const evidence = failHead && failHead !== st.head ? closeEvidence(root, prior, record, config.riskRegister) : { problems: [], notes: [] };
-  problems.push(...evidence.problems);
-  if (problems.length) return { ok: false, message: problems.join('\n') };
-  savePrRecord(root, record);
-  return { ok: true, message: ['已登记 PR #' + no + ' 第 ' + counted + ' 轮收口（已修、未再复审）', ...evidence.notes].join('\n'), record };
 }
 
 /** 先写 PR 日志再更新最新记录，日志写入失败时不能出现可放行的新记录。 */

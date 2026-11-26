@@ -1,5 +1,5 @@
-// 复审规则文档检查（契约 A1、A2、A5、A10 与收口、风险登记模板）：读 plugin/ 下的 review.md 与套件模板，
-// 确认任务书、报告格式、收敛检查、收口用法写进了文档，且报告模板的表头与代码里的栏目常量一致。
+// 复审规则文档检查（契约 A1、A2、A5、A10）：读 plugin/ 下的 review.md，
+// 确认任务书、报告格式、收敛检查写进了文档，且报告模板的表头与代码里的栏目常量一致。
 // 业务含义：规则只写在文档里、代码里另一套，改一边忘另一边就会让复审者按旧格式出报告被闸门拒绝；这里把两边对上。
 // 运行：在仓库根目录 node --test evals/review-rules.test.mjs
 import assert from 'node:assert/strict';
@@ -67,36 +67,9 @@ test('A5 任务书：中高风险的复审要做测试缺口检查（功能是�
   assert.match(tasks, /边界/);
 });
 
-test('A7 修后复核任务书：最后一轮写明“这是最后一轮”，逐条列清理由和彻底解决办法', () => {
-  const tasks = section(REVIEW, /^## 2\. 任务书/);
-  assert.match(tasks, /最后一轮/);
-  assert.match(tasks, /彻底解决/);
-});
-
 test('A10 第 8 节收敛检查：同类问题反复出现、级别升高或数量增加时先停下向用户汇报，建议专项处理', () => {
   const s8 = section(REVIEW, /^## 8\./);
   const conv = section(s8, /^###.*收敛/);
   assert.match(conv, /先停下向用户汇报/);
   assert.match(conv, /专项/);
-});
-
-test('A6 收口一节：写明 review.mjs close 的用法、风险登记与 --report、--summary', () => {
-  const s8 = section(REVIEW, /^## 8\./);
-  const closure = section(s8, /^###.*收口/);
-  assert.match(closure, /review\.mjs close/);
-  assert.match(closure, /--pr/);
-  assert.match(closure, /--report/);
-  assert.match(closure, /--summary/);
-  assert.match(closure, /风险登记/);
-  assert.match(closure, /已修、未再复审/);
-});
-
-test('A6 风险登记模板存在，表头是十栏且与 risks.mjs 的 REGISTER_COLUMNS 一致', async () => {
-  const rel = 'components/engineering-kit/kit/templates/docs/templates/review-risks.md';
-  assert.ok(fs.existsSync(path.join(ROOT, rel)), `缺少模板 ${rel}`);
-  const { REGISTER_COLUMNS } = await import(`../${GATE}/risks.mjs`);
-  assert.deepEqual(REGISTER_COLUMNS, ['编号', 'PR', '提交', '轮次', '级别', '位置', '问题', '理由', '推荐措施', '状态']);
-  const line = headerLine(read(rel), ['编号', 'PR', '推荐措施', '状态']);
-  assert.ok(line, '模板里有风险登记表头');
-  assert.deepEqual(cells(line), REGISTER_COLUMNS);
 });

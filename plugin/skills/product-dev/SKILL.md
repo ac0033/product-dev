@@ -115,7 +115,7 @@ description: 产品开发的唯一入口。用户提出产品或开发相关的�
 | 合并与收工 | 经合并入口合并，删除分支和工作树，清理临时文件 | 汇报“完成”前确认已清理（R8、R10）；经验提炼分清用户提出和 agent 总结 | `pr` 流程用 `node scripts/engineering/gate/merge.mjs <PR>`，`pre-push` 流程走项目约定的入口；收工步骤见 [套件流程文档](../engineering-kit/references/process.md) 第 7 节；之后跑 `node scripts/engineering/gate/hygiene.mjs` | 合并提交；分支与工作树已删；巡检无新增问题 |
 | 验收与发布 | 预发验证、用户验收、灰度上线各留证据 | 实现、CI、验收、上线四种状态不能互相替代（R5）；生产发布和回滚单独授权（R2） | 按 [套件流程文档](../engineering-kit/references/process.md) 第 5 节；验收证据用 `docs/_templates/acceptance-pack.md`（[模板原件](../engineering-kit/kit/templates/docs/templates/acceptance-pack.md)） | `docs/acceptance/`、`docs/release/` 下的记录 |
 
-- 复审不通过时不逐条来回改：两份意见收齐、核实后集中修一次，提交后闸门用 `--affected`，再交原复审者只复核修复；`pre-push` 流程在推送前复核和登记，`pr` 流程推送后复核（复审可以与 CI 并行开始；CI 全部通过后才登记、合并），两种次序见 [review.md](references/review.md) 第 8 节的“收齐再改”。一轮怎样计、满上限后怎样办（含开启收口后的 `close` 与最后一轮）、争议和中途追加的需求怎样处理，都在 [review.md](references/review.md) 第 8 节。同类问题反复出现、级别升高或数量增加，或最后一轮仍有高级、复审者写明“无法彻底解决”的，先停下向用户汇报，建议单开对话专项处理。
+- 复审不通过时不逐条来回改：两份意见收齐、核实后集中修一次，提交后闸门用 `--affected`，再交原复审者只复核修复；`pre-push` 流程在推送前复核和登记，`pr` 流程推送后复核（复审可以与 CI 并行开始；CI 全部通过后才登记、合并），两种次序见 [review.md](references/review.md) 第 8 节的“收齐再改”。一轮怎样计、满上限后怎样办、争议和中途追加的需求怎样处理，都在 [review.md](references/review.md) 第 8 节。同类问题反复出现、级别升高或数量增加的，先停下向用户汇报，建议单开对话专项处理。
 - 开发中出现意外的失败（测试、构建、运行时），先停下新功能，按 [debugging.md](references/debugging.md) 处理。
 - 远程仓库与合并入口：项目没有远程仓库时，“PR 与 CI”做不了。建远程仓库是外部动作，先得到用户批准；没有批准时，“PR 与 CI”和要靠它才能做的步骤都不做，在汇报里逐项写明未执行，不把本地检查当成 CI。`pre-push` 流程下套件不提供合并入口：项目 AGENTS.md 写了合并入口的按它办，没写的由用户合并或由用户指定入口，不自行合并。
 - 用户没要求发布时，做到合并与收工为止，并写明验收和上线尚未进行。
