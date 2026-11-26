@@ -626,3 +626,48 @@ export function prLogFile(root, pr) {
 export function prRecordFile(root, pr, kind) {
   return path.join(gitCommonDir(root), 'engineering-gate', 'pr', pr, `${kind}.json`);
 }
+
+/** 计算主干与被审提交的共同基准，无法解析时由覆盖判定保守处理。 */
+export function forkPoint(root, baseRef, commit) {
+  const r = git(root, ['merge-base', baseRef, commit]);
+  return r.ok ? r.out.trim() : null;
+}
+
+/** 序列化同一 PR 的同步登记与合并核对，共享工作树使用同一把锁。 */
+export function withPrLock(root, pr, fn) {
+  const parent = path.dirname(prLogFile(root, prNumber(pr)));
+  const lock = path.join(parent, 'lock');
+  const ownerFile = path.join(lock, 'owner.json');
+  fs.mkdirSync(parent, { recursive: true });
+  function owner() {
+    try { return fs.readFileSync(ownerFile, 'utf8'); }
+    catch (e) { if (e.code !== 'ENOENT') throw e; return ''; }
+  }
+  function stale() {
+    const stat = fs.statSync(lock, { throwIfNoEntry: false });
+    return stat && (Date.now() - stat.mtimeMs > 600000 || ownerGone(owner()));
+  }
+  function occupied() { return new Error(`PR #${pr} 的登记锁被占用：${owner() || lock}`); }
+  try {
+    fs.mkdirSync(lock);
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    if (!stale()) throw occupied();
+    // 失效锁的回收也须互斥，防止另一位回收者删除刚建好的锁。
+    const reclaim = path.join(parent, 'reclaim');
+    try { fs.mkdirSync(reclaim); }
+    catch (err) { if (err.code === 'EEXIST') throw occupied(); throw err; }
+    try {
+      if (stale()) fs.rmSync(lock, { recursive: true });
+      try { fs.mkdirSync(lock); }
+      catch (err) { if (err.code === 'EEXIST') throw occupied(); throw err; }
+    } finally { fs.rmdirSync(reclaim); }
+  }
+  const identity = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token: crypto.randomUUID() });
+  try {
+    fs.writeFileSync(ownerFile, identity);
+    return fn();
+  } finally {
+    if (!owner() || owner() === identity) fs.rmSync(lock, { recursive: true, force: true });
+  }
+}
