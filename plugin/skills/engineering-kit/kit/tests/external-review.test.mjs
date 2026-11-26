@@ -1259,14 +1259,15 @@ test('命令行：--risk 经真实参数分发生效（非法值、--risk high �
   }
 });
 
-test('外部报告：发现节名随 reviewSections；作者用 --context 给了材料时，作者的验证一节如实写“读到了、没核对”', () => {
+test('外部报告：发现节名随 reviewSections；作者用 --context 给了材料时，作者的验证一节如实写“收到了、没核对”', () => {
   const request = { review: { kind: 'code', round: 'first' }, model: { id: 'm', source: 'request', chosenBy: 'user', reason: null }, context: { project: '相关测试：tests/a.test.ts（单元）' }, target: { baseSha: 'b'.repeat(40), headSha: 'a'.repeat(40), files: ['src/a.ts'], excludedFiles: [] } };
   const result = { execution: { status: 'completed' }, review: { verdict: 'fail', findings: [{ severity: 'medium', title: '漏边界', file: 'src/a.ts', line: 3, detail: '空数组', reason: '边界出错', fix: '补判断' }], limitations: [], report: NARRATIVE }, provenance: { executor: 'x', actualModel: 'm' } };
   const meta = { reviewer: 'external:x', inputHash: '0'.repeat(64), durationMs: 1000, usageLine: '无' };
   const text = renderReport({ request, result, assessment: { verdict: 'fail', notes: [] }, meta, section: '审查发现' });
   assert.match(text, /^## 审查发现$/m);
   assert.deepEqual(missingSections(text, ['范围', '审查发现', '作者的验证']), []);
-  assert.match(text, /读到了作者在上下文里提供的材料/);
+  assert.match(text, /收到了作者用 --context 提供的项目上下文/);
+  assert.match(text, /由主对话核对/, "不声称看过测试材料");
   const bare = renderReport({ request: { ...request, context: { project: null } }, result, assessment: { verdict: 'fail', notes: [] }, meta });
   assert.match(bare, /^## 发现$/m);
   assert.match(bare, /没有看到作者的验证证据/);
@@ -1303,4 +1304,24 @@ test('命令行成功路径：真实参数分发后，执行器收到 --risk hig
   assert.match(seen.req.context.project, /tests\/auth\.test\.ts/);
   assert.match(seen.req.context.instructions, /功能是否都有测试/);
   assert.ok(fs.existsSync(path.join(path.dirname(reportPath), 'report.sha256')));
+});
+
+test('外部报告：模型写的 <!-- 等字面文字写成 &lt;，报告照常渲染、计数一致，且不含 HTML 注释', () => {
+  const request = { review: { kind: 'code', round: 'first' }, model: { id: 'm', source: 'request', chosenBy: 'user', reason: null }, context: { project: null }, target: { baseSha: 'b'.repeat(40), headSha: 'a'.repeat(40), files: ['src/a.ts'], excludedFiles: [] } };
+  const result = { execution: { status: 'completed' }, review: { verdict: 'fail', findings: [{ severity: 'high', title: '模板里 <!-- 未转义', file: 'src/a.ts', line: 3, detail: '输入 <!-- x --> 时页面被截断', reason: '主路径出错', fix: '转义 < 再输出' }], limitations: ['看不到 <!-- 后的内容'], report: `${NARRATIVE} 另见 <!-- 注释。` }, provenance: { executor: 'x', actualModel: 'm' } };
+  const text = renderReport({ request, result, assessment: { verdict: 'fail', notes: [] }, meta: { reviewer: 'external:x', inputHash: '0'.repeat(64), durationMs: 1000, usageLine: '无' } });
+  assert.ok(!text.includes('<!--'), '渲染结果里没有 HTML 注释');
+  assert.match(text, /&lt;!-- x --> 时页面被截断/);
+  assert.equal(reportVerdict(text).verdict, 'fail');
+});
+
+test('外发前核对：--context、--prior-report 里像密钥的内容拒绝外发；reviewSections 里外部报告写不出的节在运行前报错', async () => {
+  const { root, head } = repo();
+  await assert.rejects(run(root, head, 'pass', { contextText: '日志：-----BEGIN OPENSSH PRIVATE KEY-----\nabc' }), /--context 的内容里像有密钥/);
+  await assert.rejects(run(root, head, 'pass', { round: 'followup', priorReport: `token ghp_${'a'.repeat(36)}` }), /--prior-report 的内容里像有密钥/);
+  const custom = featureRepo({ reviewFlow: 'pr', reviewers: ['external:fake'], externalExecutors: ['fake'], reviewSections: ['范围', '发现', '作者的验证', '测试覆盖证据'] });
+  write(custom, 'src/auth.ts', '// 权限模块：删除记录前校验所有者。\nexport function canDelete() {\n  return true;\n}\n');
+  commitAll(custom, 'feat');
+  const h = git(custom, ['rev-parse', 'HEAD']).trim();
+  await assert.rejects(run(custom, h, 'pass'), /写不出项目要求的：测试覆盖证据/);
 });

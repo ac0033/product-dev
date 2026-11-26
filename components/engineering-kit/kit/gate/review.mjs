@@ -50,7 +50,7 @@ import {
   uncommittedInScope,
   writeRecord,
 } from './lib.mjs';
-import { fenceHint, findingProblems, findingsSection, missingSections, parseFindings, reportVerdict, seriousIssues } from './report.mjs';
+import { fenceHint, findingProblems, findingsSection, hiddenProblems, missingSections, parseFindings, reportVerdict } from './report.mjs';
 import { failKeys, ROUND_KEYS, roundBlock, roundLine } from './rounds.mjs';
 
 /** 旧入口保留报告检查接口，已有调用方可继续使用。 */
@@ -87,6 +87,9 @@ function checkReport(config, expect, reviewer, reportPath, label = expect, repor
   // reportText 是外部复审补登时已经核对过指纹的正文：直接用它，不再读一次文件（两次读取之间文件可能被换掉）
   if (typeof reportText !== 'string' && (!reportPath || !fs.existsSync(reportPath))) return { ok: false, message: '找不到复审报告文件' };
   const text = typeof reportText === 'string' ? reportText : fs.readFileSync(reportPath, 'utf8');
+  // 读者看不见的内容（HTML 注释）可能冒充节、结论或藏起发现：有注释就拒绝，不去猜它的范围
+  const hidden = hiddenProblems(text);
+  if (hidden.length > 0) return { ok: false, message: '复审报告里有读者看不见的内容，不能登记：\n' + hidden.join('\n') };
   if (config.reviewMinChars > 0 && text.trim().length < config.reviewMinChars) {
     return { ok: false, message: `复审报告不少于 ${config.reviewMinChars} 字（当前 ${text.trim().length} 字）` };
   }
@@ -109,28 +112,27 @@ function checkReport(config, expect, reviewer, reportPath, label = expect, repor
     const said = found.verdict === 'pass' ? '通过' : '不通过';
     return { ok: false, message: `报告结论写的是“${said}”，不能记录为 ${label}（${how}）` };
   }
-  if (expect === 'fail') {
-    const section = findingsSection(config.reviewSections);
-    const problems = findingProblems(text, { section });
-    if (problems.length) return { ok: false, message: '复审报告发现表不合格：\n' + problems.join('\n') };
-    // 与外部复审同一规则：只有低级或提示时结论是通过，不通过的报告至少要有一条高、中级发现（否则会白占一轮）
-    const f = parseFindings(text, { section });
-    if (f.high + f.medium === 0) return { ok: false, message: `报告结论是不通过，但发现表里没有高、中级问题：只有低级或提示时结论应为通过，不能记录为 ${label}` };
-  }
+  // 发现节严格读取（看不懂的写法一律拒绝）。fail、accept 要有发现表且至少一条高、中级；pass 可以写“无”，写了表就要合格，且不能有高、中级。
+  // 结论与发现必须一致：手工登记与外部复审同一规则，只有低级或提示时结论是通过
+  const scope = { section: findingsSection(config.reviewSections), sections: config.reviewSections };
+  const problems = findingProblems(text, { ...scope, requireTable: expect === 'fail' });
+  if (problems.length) return { ok: false, message: '复审报告发现表不合格：\n' + problems.join('\n') };
+  const f = parseFindings(text, scope);
+  if (expect === 'fail' && f.high + f.medium === 0) return { ok: false, message: `报告结论是不通过，但发现表里没有高、中级问题：只有低级或提示时结论应为通过，不能记录为 ${label}` };
+  if (expect === 'pass' && f.high + f.medium > 0) return { ok: false, message: `报告结论是通过，但发现表里有 ${f.high + f.medium} 个高、中级问题：有高、中级问题时结论应为不通过` };
   return { ok: true, text };
 }
 
 const sha256 = (text) => crypto.createHash('sha256').update(text).digest('hex');
 
 /** 为本次记录计算内容轮次、报告指纹和发现统计；延期没有报告，这几项为空。 */
-function reportFields(prior, keyOf, key, text, section) {
+function reportFields(prior, keyOf, key, text, config) {
   const counted = failKeys(prior, keyOf);
   const at = counted.indexOf(key);
   const round = at < 0 ? counted.length + 1 : at + 1;
   if (text === null) return { round, reportSha: null, findings: null };
-  const { rows, ...findings } = parseFindings(text, { section });
-  // issues：高、中级发现的编号、位置、问题，供风险登记逐条对应与收敛提示比较
-  return { round, reportSha: sha256(text), findings: rows.length ? findings : null, issues: rows.length ? seriousIssues(rows) : null };
+  const { rows, ...findings } = parseFindings(text, { section: findingsSection(config.reviewSections), sections: config.reviewSections });
+  return { round, reportSha: sha256(text), findings: rows.length ? findings : null };
 }
 
 /** 两种流程共用的参数校验：结论种类、defer 与 accept 的必填项。返回拒绝信息或 null。 */
@@ -207,7 +209,7 @@ export function recordReview({ root, verdict, reviewer, reportPath, reportText, 
     fs.writeFileSync(copy, text);
   }
   const record = {
-    ...reportFields(prior, keys.of, key, text, findingsSection(config.reviewSections)),
+    ...reportFields(prior, keys.of, key, text, config),
     kind: k, verdict, reviewer: reviewer ?? null, treeHash: hash, base: baseRev, branch, headSha, docHash, docFiles: docs.length, docsOnly, uncommitted,
     summary, reason: reason ?? null, userDecision: userDecision ?? null, report: copy, at,
   };
@@ -258,7 +260,7 @@ function recordPrReview({ root, config, verdict, reviewer, reportPath, reportTex
     fs.writeFileSync(copy, text);
   }
   const record = {
-    ...reportFields(prior, keys.of, st.head, text, findingsSection(config.reviewSections)), pr: no, kind, verdict, reviewer: reviewer ?? null,
+    ...reportFields(prior, keys.of, st.head, text, config), pr: no, kind, verdict, reviewer: reviewer ?? null,
     headSha: st.head, summary, reason: reason ?? null, userDecision: userDecision ?? null,
     report: copy, at: new Date().toISOString(),
   };

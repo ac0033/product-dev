@@ -12,6 +12,7 @@ import {
   findingGaps,
   findingProblems,
   findingsSection,
+  hiddenProblems,
   markFences,
   missingSections,
   parseFindings,
@@ -151,21 +152,6 @@ test('高、中级行还要写位置、问题、触发条件；低级不要求',
   assert.match(findingProblems(doc(row('M1', '中', '', '问题', '', '理由', '改法'))).join('\n'), /M1.*缺.*位置.*触发条件或例子/);
 });
 
-test('HTML 注释里的表看不见，不当证据：全部藏在注释里的发现表算没有表；可见的表照常', () => {
-  const hidden = `## 发现\n\n<!--\n${HEAD7}\n${ok('M1', '中')}\n-->\n\n## 结论\n不通过。\n`;
-  assert.equal(parseFindings(hidden).parsed, 0);
-  assert.match(findingProblems(hidden).join('\n'), /找不到可解析的表头/);
-  const inline = `## 发现\n\n${HEAD7}\n${ok('M1', '中')}\n<!-- ${ok('H9', '高')} -->\n\n## 结论\n不通过。\n`;
-  assert.equal(parseFindings(inline).parsed, 1, '同一行里注释掉的部分不算');
-  assert.deepEqual(parseFindings(inline).highIds, []);
-});
-
-test('发现节里附带的取证表（没有编号、级别两栏）不当成不合格的发现表', () => {
-  const text = doc(ok('M1', '中')).replace('## 作者的验证', '| 位置 | 证据 |\n|---|---|\n| src/dedup.ts | 复现输出 |\n\n## 作者的验证');
-  assert.deepEqual(findingProblems(text), []);
-  assert.equal(parseFindings(text).parsed, 1);
-});
-
 test('发现节的节名可配置：findingsSection 取 reviewSections 里含“发现”的节名；找不到表时提示写明节名', () => {
   assert.equal(findingsSection(['范围', '发现', '作者的验证']), '发现');
   assert.equal(findingsSection(['范围', '审查发现', '作者的验证']), '审查发现');
@@ -175,12 +161,43 @@ test('发现节的节名可配置：findingsSection 取 reviewSections 里含“
   assert.match(findingProblems(renamed).join('\n'), /“发现”一节里找不到可解析的表头/);
 });
 
-test('看得见的内容才算：行内代码里的 <!-- 不开注释；注释里的三个反引号不开围栏', () => {
-  const twoTables = `## 发现\n\n${HEAD7}\n${row('M1', '中', 'a.ts', '用 \`<!--\` 开头的模板', '输入含注释', '理由', '改法')}\n\n下面是另一张表。\n\n${HEAD7}\n${ok('H1', '高')}\n\n## 结论\n不通过。\n`;
-  const f = parseFindings(twoTables);
+// ---------- 严格格式（PR #40 第三轮复审后，用户决定：看不懂的写法一律拒绝，不去猜） ----------
+
+test('HTML 注释：围栏之外出现 <!-- 就报出行号（行内代码里的也算）；围栏里的不算', () => {
+  assert.deepEqual(hiddenProblems(doc(ok('M1', '中'))), []);
+  const comment = `## 发现\n\n<!--\n${HEAD7}\n${ok('H1', '高')}\n-->\n\n## 结论\n不通过。\n`;
+  assert.match(hiddenProblems(comment).join('\n'), /第 3 行有 HTML 注释/);
+  assert.equal(hiddenProblems('结论：通过 `<!--` 写法').length, 1, '行内代码里的也拒绝，要提到这个符号请用文字描述');
+  assert.equal(hiddenProblems('## 作者的验证\n\n```html\n<!-- 测试输出里的注释 -->\n```\n').length, 0, '围栏里的测试输出不算');
+});
+
+test('发现节严格读取：含竖线却不是合格表格行的行、缩进四格的表、节里的代码块、附带的其他表，都报出行号', () => {
+  const noPipes = doc(ok('M1', '中')).replace(ok('M1', '中'), `${ok('M1', '中')}\n H1 | 高 | b.ts | p | t | r | f `);
+  assert.match(findingProblems(noPipes).join('\n'), /像表格行但不合格式/, '少了首尾竖线的行不能悄悄丢掉');
+  const indented = `## 发现\n\n${HEAD7.split('\n').map((l) => '    ' + l).join('\n')}\n    ${ok('H1', '高')}\n\n## 结论\n不通过。\n`;
+  const p = findingProblems(indented).join('\n');
+  assert.match(p, /像表格行但不合格式/, '缩进四格是代码块，不当表');
+  assert.equal(parseFindings(indented).parsed, 0);
+  const fenced = `## 发现\n\n${HEAD7}\n${ok('M1', '中')}\n\n\`\`\`\n${ok('H1', '高')}\n\`\`\`\n\n## 结论\n不通过。\n`;
+  assert.match(findingProblems(fenced).join('\n'), /有代码块/);
+  const aux = doc(ok('M1', '中')).replace('## 作者的验证', '| 位置 | 证据 |\n|---|---|\n| src/dedup.ts | 复现输出 |\n\n## 作者的验证');
+  assert.match(findingProblems(aux).join('\n'), /表头缺/, '发现节只放七栏发现表');
+  assert.deepEqual(findingProblems(doc(ok('M1', '中'), ok('L1', '低'))), [], '合格的表没有问题');
+});
+
+test('pass 用的宽松读法：发现写“无”没有问题；写了表就要合格（requireTable 为假时不要求有表）', () => {
+  const none = '## 范围\nx\n\n## 发现\n无高、中级问题。\n\n## 结论\n通过。\n';
+  assert.deepEqual(findingProblems(none, { requireTable: false }), []);
+  assert.ok(findingProblems(none).length > 0, 'fail 与 accept 要有表');
+  const broken = none.replace('无高、中级问题。', `${HEAD7}\n| L1 | 低 | a.ts | 命名 |`);
+  assert.match(findingProblems(broken, { requireTable: false }).join('\n'), /列数与表头不符/);
+});
+
+test('同一行写法的发现节遇到项目配置的其他节名就结束，后面那一节里的表不算发现表；节名不分大小写', () => {
+  const inline = `范围：读了 dedup。\n发现：见下表。\n${HEAD7}\n${ok('M1', '中')}\n验证摘要：贴了输出\n${HEAD7}\n${ok('H1', '高')}\n结论：不通过。\n`;
+  const f = parseFindings(inline, { sections: ['范围', '发现', '验证摘要'] });
   assert.deepEqual(f.mediumIds, ['M1']);
-  assert.deepEqual(f.highIds, ['H1'], '第二张表的高级发现不能丢');
-  assert.deepEqual(findingProblems(twoTables), []);
-  const fenceInComment = `## 发现\n\n<!--\n\`\`\`\n-->\n${HEAD7}\n${ok('H1', '高')}\n\n## 结论\n不通过。\n`;
-  assert.deepEqual(parseFindings(fenceInComment).highIds, ['H1'], '注释后面的可见表照常');
+  assert.deepEqual(f.highIds, [], '验证摘要一节里的表不归发现节');
+  const upper = doc(ok('M1', '中')).replace('## 发现', '## API 发现');
+  assert.equal(parseFindings(upper, { section: 'api 发现' }).parsed, 1);
 });

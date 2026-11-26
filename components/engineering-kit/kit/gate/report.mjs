@@ -159,10 +159,11 @@ export function hasContent(value) {
   return !/^(?:无|暂无|待补|-|—|\/|n\/a|tbd)?$/i.test(plain(value ?? ''));
 }
 
-/** 读取有边界的 Markdown 表格行，还原转义的竖线和反斜杠。 */
+/** 读取一行表格：至多缩进三个空格、以竖线开头和结尾（缩进四格以上是代码块，不是表）；还原转义的竖线和反斜杠。不是表格行返回 null。 */
 function cells(line) {
+  if (!/^ {0,3}\|/.test(line)) return null;
   const s = line.trim();
-  if (!s.startsWith('|') || !s.endsWith('|')) return null;
+  if (s.length < 2 || !s.endsWith('|')) return null;
   const out = [];
   let cell = '';
   for (let i = 1; i < s.length - 1; i++) {
@@ -177,149 +178,123 @@ function cells(line) {
 }
 
 /**
- * 读者在渲染后的 Markdown 里看得见的各行：代码围栏里的行、HTML 注释（<!-- … -->，可跨行）里的部分都换成空。
- * 围栏、注释、行内代码一起逐字扫描，互相尊重范围：注释里的三个反引号不开围栏；行内代码（反引号包住的一段）里的 <!-- 不开注释，
- * 照原样留在可见文字里。围栏的认法与 markFences 相同（开头行三个以上反引号或波浪线，闭合用同一种符号、个数不少于开头）。
+ * 报告里的 HTML 注释（代码围栏之外出现 <!--）：注释在渲染后看不见，读者看到的报告和闸门读到的会不一样，所以一律拒绝登记，不去猜注释的范围。
+ * 返回问题清单（没有时为空）。要在报告里提到这个符号时用文字描述，外部报告渲染时会把 < 写成 &lt;。
  */
-function visibleLines(text) {
+export function hiddenProblems(text) {
+  return markFences(text).lines.flatMap((line, i) => (!line.fenced && line.text.includes('<!--')
+    ? [`第 ${i + 1} 行有 HTML 注释（<!--）：注释在渲染后看不见，报告里不能有；要提到这个符号请用文字描述`] : []));
+}
+
+/**
+ * 发现节（含下级标题）里的各行，返回 [{ no, text, fenced }]（no 从 1 数）。节的认法：标题行（井号加空格，可带编号）的文字以节名开头，
+ * 或同一行写“节名：内容”（这一行本身算节内的文字）；节名不分大小写。同一行写法遇到 sections 里别的节名（或范围、作者的验证、结论、处置）就结束，
+ * 标题写法遇到同级或更高级的标题结束。围栏里的行不当标题，原样标出 fenced，由调用方拒绝。
+ */
+function findingsLines(text, section, sections = []) {
+  const name = escapeRe(section);
+  const headingRe = new RegExp(`^${name}(?:[\\s（(:：]|$)`, 'i');
+  const inlineRe = new RegExp(`^\\s*(?:[-+*>]\\s*)*${name}\\s*[:：]`, 'i');
+  const others = [...new Set([...sections, '范围', '作者的验证', '结论', '处置'])].filter((n) => n.toLowerCase() !== section.toLowerCase());
+  const otherInline = new RegExp(`^\\s*(?:[-+*>]\\s*)*(?:${others.map(escapeRe).join('|')})\\s*[:：]`, 'i');
+  let depth = 0;
   const out = [];
-  let fence = null;
-  let comment = false;
-  for (const raw of String(text).split(/\r?\n/)) {
-    if (fence) {
-      const close = /^\s*(`{3,}|~{3,})\s*$/.exec(raw);
-      if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
-      out.push('');
-      continue;
+  markFences(text).lines.forEach((line, i) => {
+    if (!line.fenced) {
+      const heading = /^\s{0,3}(#{1,6})\s+(.*)$/.exec(line.text);
+      if (heading) {
+        const title = plain(heading[2]).replace(/^(?:\d+[.、)）]?\s*|[一二三四五六七八九十]+[、.]\s*)/, '');
+        if (headingRe.test(title)) {
+          depth = heading[1].length;
+          return;
+        }
+        if (heading[1].length <= depth) depth = 0;
+      } else if (inlineRe.test(plain(line.text))) depth = 7;
+      else if (depth === 7 && otherInline.test(plain(line.text))) depth = 0;
     }
-    if (!comment) {
-      const start = /^\s*(`{3,}|~{3,})(.*)$/.exec(raw);
-      if (start && !(start[1][0] === '`' && start[2].includes('`'))) {
-        fence = { ch: start[1][0], len: start[1].length };
-        out.push('');
-        continue;
-      }
-    }
-    let shown = '';
-    let i = 0;
-    while (i < raw.length) {
-      if (comment) {
-        const end = raw.indexOf('-->', i);
-        if (end < 0) break;
-        comment = false;
-        i = end + 3;
-      } else if (raw[i] === '`') {
-        // 行内代码：同样长度的一串反引号闭合；找不到闭合的反引号只是普通字符
-        let j = i;
-        while (raw[j] === '`') j++;
-        const close = raw.indexOf(raw.slice(i, j), j);
-        const stop = close < 0 ? j : close + (j - i);
-        shown += raw.slice(i, stop);
-        i = stop;
-      } else if (raw.startsWith('<!--', i)) {
-        comment = true;
-        i += 4;
-      } else {
-        shown += raw[i];
-        i++;
-      }
-    }
-    out.push(shown);
-  }
+    if (depth) out.push({ no: i + 1, text: line.text, fenced: line.fenced });
+  });
   return out;
 }
 
 /**
- * 只取发现节（含下级标题）的表；围栏、其他节和同一行写法之后的新节都隔断表格。section 是发现节的节名（默认“发现”，
- * 项目在 reviewSections 里改了节名时由调用方传入）。只看读者看得见的内容（visibleLines）：注释、围栏里的表不当证据。
+ * 严格读取发现节：节里只许有下级标题、空行、文字说明和七栏发现表（表头、分隔行、表格行）。
+ * 拒绝看不懂的写法，不去猜：节里有代码块；有含竖线、却不是合格表格行的行（缩进四格、少了首尾竖线、表头之外的零散行）；
+ * 表头缺栏、列数不符；编号或级别认不出；高、中级行缺位置、问题、触发条件、理由或建议改法。requireTable 为真时（fail、accept）还要求至少一行。
+ * 返回 { findings, problems }，findings 是 { parsed, high, medium, low, info, unresolvable, highIds, mediumIds, rows }。
  */
-function tableLines(text, findingsOnly, section = '发现') {
-  const name = escapeRe(section);
-  const headingRe = new RegExp(`^${name}(?:[\\s（(:：]|$)`);
-  const inlineRe = new RegExp(`^\\s*(?:[-+*>]\\s*)*${name}\\s*[:：]`);
-  let depth = 0;
-  return visibleLines(text).map((shown) => {
-    if (!findingsOnly) return shown;
-    const heading = /^\s{0,3}(#{1,6})\s+(.*)$/.exec(shown);
-    if (heading) {
-      const title = plain(heading[2]).replace(/^(?:\d+[.、)）]?\s*|[一二三四五六七八九十]+[、.]\s*)/, '');
-      if (headingRe.test(title)) depth = heading[1].length;
-      else if (heading[1].length <= depth) depth = 0;
-    } else if (inlineRe.test(plain(shown))) depth = 7;
-    else if (depth === 7 && /^\s*(?:范围|作者的验证|结论|处置)\s*[:：]/.test(plain(shown))) depth = 0;
-    return depth ? shown : '';
-  });
-}
-
-/** 按必需栏名读取有分隔行的表，返回原始列值与格式问题，供发现表和风险登记共用。 */
-export function readTables(text, columns, { findingsOnly = false, aliases = {}, section } = {}) {
-  const lines = tableLines(text, findingsOnly, section);
-  const rows = [];
+function inspectFindings(text, { section = '发现', sections = [], requireTable = true } = {}) {
+  const lines = findingsLines(text, section, sections);
+  const findings = { parsed: 0, high: 0, medium: 0, low: 0, info: 0, unresolvable: 0, highIds: [], mediumIds: [], rows: [] };
   const problems = [];
+  const fenced = lines.find((l) => l.fenced);
+  if (fenced) problems.push(`第 ${fenced.no} 行起有代码块：“${section}”一节只放七栏发现表和文字说明，取证（测试输出等）放到作者的验证一节`);
+  const plainLines = lines.filter((l) => !l.fenced);
+  const used = new Set();
   let tables = 0;
-  for (let i = 0; i + 1 < lines.length; i++) {
-    const header = cells(lines[i])?.map((v) => Object.hasOwn(aliases, plain(v)) ? aliases[plain(v)] : plain(v));
-    const separator = header && cells(lines[i + 1]);
-    // 头两栏（发现表的编号、级别，风险登记的编号、PR）都在才算候选表：同一节里附带的取证表不当成不合格的发现表
-    if (!header || !columns.slice(0, 2).every((c) => header.includes(c)) || !separator?.every((v) => /^:?-{3,}:?$/.test(v))) continue;
+  for (let i = 0; i + 1 < plainLines.length; i++) {
+    const header = cells(plainLines[i].text)?.map((v) => (plain(v) === '推荐措施' ? '建议改法' : plain(v)));
+    const separator = header && cells(plainLines[i + 1].text);
+    if (!header || !separator?.every((v) => /^:?-{3,}:?$/.test(v))) continue;
     tables++;
-    const missing = columns.filter((v) => !header.includes(v));
-    if (missing.length) problems.push('表头缺：' + missing.join('、'));
-    if (header.length !== separator.length || new Set(header).size !== header.length) problems.push('表头列数不符或栏名重复');
+    used.add(i).add(i + 1);
+    const missing = FINDING_COLUMNS.filter((v) => !header.includes(v));
+    if (missing.length) problems.push(`第 ${plainLines[i].no} 行的表头缺：${missing.join('、')}（发现一节只放七栏发现表）`);
+    if (header.length !== separator.length || new Set(header).size !== header.length) problems.push(`第 ${plainLines[i].no} 行的表头列数不符或栏名重复`);
     i++;
     let values;
-    while (i + 1 < lines.length && (values = cells(lines[i + 1]))) {
+    let rowNo = 0;
+    while (i + 1 < plainLines.length && (values = cells(plainLines[i + 1].text))) {
       i++;
-      if (values.length !== header.length) problems.push('表格行列数与表头不符：' + values[0]);
-      if (!missing.length) rows.push(Object.fromEntries(header.map((name, j) => [name, values[j] ?? ''])));
+      used.add(i);
+      rowNo++;
+      const at = `表格第 ${rowNo} 行（报告第 ${plainLines[i].no} 行）`;
+      if (values.length !== header.length) {
+        problems.push(`${at}列数与表头不符`);
+        continue;
+      }
+      if (missing.length) continue;
+      const fields = Object.fromEntries(header.map((name, j) => [name, values[j] ?? '']));
+      const rawId = fields.编号.trim();
+      const mark = /\s+(既有|修复新增|原先漏检|重复出现)$/.exec(rawId);
+      const id = mark ? rawId.slice(0, mark.index) : rawId;
+      const severity = severityOf(fields.级别);
+      if (!id || !severity) {
+        problems.push(`${at}编号或级别不可识别：${rawId} ${fields.级别}`);
+        continue;
+      }
+      const row = { id, mark: mark?.[1] ?? null, severity, location: fields.位置, problem: fields.问题, trigger: fields.触发条件或例子, reason: fields.理由, fix: fields.建议改法 };
+      findings.rows.push(row);
+      findings.parsed++;
+      findings[severity]++;
+      if (severity === 'high') findings.highIds.push(id);
+      if (severity === 'medium') findings.mediumIds.push(id);
+      if (plain(row.fix).startsWith(UNRESOLVABLE)) findings.unresolvable++;
+      const gaps = findingGaps(row);
+      if (gaps.length) problems.push(`表格第 ${rowNo} 行（${id}）缺：${gaps.join('、')}（报告第 ${plainLines[i].no} 行）`);
     }
   }
-  if (!tables) problems.push('找不到可解析的表头：' + columns.join('、'));
-  return { rows, problems };
-}
-
-/** 解析报告发现表，保留逐行诊断，同时生成登记与轮次判定需要的计数。section 是发现节的节名。 */
-function inspectFindings(text, section) {
-  const table = readTables(text, FINDING_COLUMNS, { findingsOnly: true, aliases: { 推荐措施: '建议改法' }, section });
-  const findings = { parsed: 0, high: 0, medium: 0, low: 0, info: 0, unresolvable: 0, highIds: [], mediumIds: [], rows: [] };
-  const problems = [...table.problems];
-  for (const [index, fields] of table.rows.entries()) {
-    const rawId = fields.编号.trim();
-    const mark = /\s+(既有|修复新增|原先漏检|重复出现)$/.exec(rawId);
-    const id = mark ? rawId.slice(0, mark.index) : rawId;
-    const severity = severityOf(fields.级别);
-    if (!id || !severity) {
-      problems.push('第 ' + (index + 1) + ' 行编号或级别不可识别：' + rawId + ' ' + fields.级别);
-      continue;
+  plainLines.forEach((l, i) => {
+    if (!used.has(i) && l.text.includes('|')) {
+      problems.push(`第 ${l.no} 行像表格行但不合格式（表格行至多缩进三个空格、以竖线开头和结尾，并且紧接在表头和分隔行之下）`);
     }
-    const row = { id, mark: mark?.[1] ?? null, severity, location: fields.位置, problem: fields.问题, trigger: fields.触发条件或例子, reason: fields.理由, fix: fields.建议改法 };
-    findings.rows.push(row);
-    findings.parsed++;
-    findings[severity]++;
-    if (severity === 'high') findings.highIds.push(id);
-    if (severity === 'medium') findings.mediumIds.push(id);
-    if (plain(row.fix).startsWith(UNRESOLVABLE)) findings.unresolvable++;
-    const gaps = findingGaps(row);
-    if (gaps.length) problems.push('第 ' + (index + 1) + ' 行（' + id + '）缺：' + gaps.join('、'));
-  }
-  if (!findings.parsed) problems.push('发现表至少要有一行可识别的发现');
+  });
+  if (requireTable && !tables) problems.push(`“${section}”一节里找不到可解析的表头：${FINDING_COLUMNS.join('、')}`);
+  else if (requireTable && !findings.parsed) problems.push('发现表至少要有一行可识别的发现');
   return { findings, problems };
 }
 
-/** 从报告正文返回逐行发现及其统计，用于登记、渲染自检和轮次核对。section 是发现节的节名（默认“发现”）。 */
-export function parseFindings(text, { section } = {}) {
-  return inspectFindings(text, section).findings;
+/**
+ * 从报告正文返回发现表的统计（{ parsed, high, medium, low, info, unresolvable, highIds, mediumIds, rows }），用于登记记录和渲染自检。
+ * section 是发现节的节名（默认“发现”），sections 是项目配置的全部节名（用来判断同一行写法的发现节在哪里结束）。
+ */
+export function parseFindings(text, { section = '发现', sections = [] } = {}) {
+  return inspectFindings(text, { section, sections, requireTable: false }).findings;
 }
 
 /** 项目配置的报告节里发现节叫什么：取 reviewSections 里第一个含“发现”的节名，没有时为“发现”。 */
 export function findingsSection(reviewSections = []) {
   return reviewSections.find((s) => s.includes('发现')) ?? '发现';
-}
-
-/** 登记记录里保留的高、中级发现（编号、标记、级别、位置、问题）：风险登记按它逐条对应，收敛提示按它比较。 */
-export function seriousIssues(rows) {
-  return rows.filter((r) => r.severity === 'high' || r.severity === 'medium')
-    .map(({ id, mark, severity, location, problem }) => ({ id, mark, severity, location, problem }));
 }
 
 /** 给出一条中高级发现缺少的必填栏名（位置、问题、触发条件、理由、建议改法都要写）；低级与提示行没有此要求。 */
@@ -334,7 +309,10 @@ export function findingGaps(row) {
   return gaps;
 }
 
-/** 从报告正文列出拒绝 fail 或 accept 登记的全部发现表问题。section 是发现节的节名（默认“发现”），找不到表时提示里写明节名。 */
-export function findingProblems(text, { section = '发现' } = {}) {
-  return inspectFindings(text, section).problems.map((p) => (p.startsWith('找不到可解析的表头') ? `“${section}”一节里${p}` : p));
+/**
+ * 列出发现节的全部格式问题（严格读取，见 inspectFindings）。requireTable 默认为真（fail、accept 要有发现表）；
+ * 登记 pass 时传 false：发现可以写“无”，但写了表就要合格。
+ */
+export function findingProblems(text, { section = '发现', sections = [], requireTable = true } = {}) {
+  return inspectFindings(text, { section, sections, requireTable }).problems;
 }

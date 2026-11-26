@@ -55,7 +55,7 @@ function commit(e, tag, also) {
   return e.st.head;
 }
 
-/** 登记一份审查；报告文件路径挂在返回值的 path 上，供 close 的 --report 复用。 */
+/** 登记一份审查；报告文件路径挂在返回值的 path 上。 */
 function reg(e, kind, verdict, text, extra = {}) {
   const reportPath = extra.reportPath ?? reportFile(text);
   const res = recordReview({ root: e.root, verdict, pr: '7', kind, gh: e.gh, reviewer: 'general-purpose', reportPath, summary: 's', ...extra });
@@ -143,4 +143,38 @@ test('只有低级或提示的报告不能登记为 fail 或 accept（与外部�
     assert.equal(r.ok, false, verdict);
     assert.match(r.message, /没有高、中级问题/, verdict);
   }
+});
+
+test('报告里有 HTML 注释（读者看不见）时任何结论都不登记：注释里的结论、必需节、发现都不算', () => {
+  const e = env();
+  commit(e, 'r1');
+  const hiddenVerdict = '## 范围\n读了 dedup 函数、调用方和测试。\n\n## 发现\n无高、中级问题。\n\n## 作者的验证\n核对了测试输出。\n\n<!--\n## 结论\n通过。\n-->\n';
+  const r = reg(e, 'code', 'pass', hiddenVerdict);
+  assert.equal(r.ok, false);
+  assert.match(r.message, /HTML 注释/);
+  const hiddenRow = failText([fr('M1', '中')]).replace('## 作者的验证', '<!-- | H1 | 高 | src/a.ts | 越权 | x | y | z | -->\n\n## 作者的验证');
+  const f = reg(e, 'code', 'fail', hiddenRow);
+  assert.equal(f.ok, false);
+  assert.match(f.message, /HTML 注释/);
+});
+
+test('结论与发现要一致：pass 报告的发现表里有高、中级问题时拒绝；只有低级时 pass 照常', () => {
+  const e = env();
+  commit(e, 'r1');
+  const passWithMedium = failText([fr('M1', '中')]).replace('不通过。H1 未修复。', '通过。');
+  const r = reg(e, 'code', 'pass', passWithMedium);
+  assert.equal(r.ok, false);
+  assert.match(r.message, /结论是通过，但发现表里有 1 个高、中级问题/);
+  const passWithLow = failText([fr('L1', '低', { reason: '', fix: '' })]).replace('不通过。H1 未修复。', '通过。只有一条命名建议。');
+  const ok = reg(e, 'code', 'pass', passWithLow);
+  assert.equal(ok.ok, true, ok.message);
+});
+
+test('发现表格式看不懂就拒绝登记：少了首尾竖线的发现行不能被悄悄丢掉', () => {
+  const e = env();
+  commit(e, 'r1');
+  const text = failText([fr('M1', '中')]).replace(fr('M1', '中'), `${fr('M1', '中')}\n H1 | 高 | src/a.ts | 越权 | x | y | z `);
+  const r = reg(e, 'code', 'fail', text);
+  assert.equal(r.ok, false);
+  assert.match(r.message, /像表格行但不合格式/);
 });
