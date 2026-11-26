@@ -956,9 +956,10 @@ export const CODEX_CONFIG_OVERRIDES = ['-c', 'features.multi_agent_v2.disable_na
 export const CODEX_PASSIVE_ITEMS = ['agent_message', 'reasoning', 'error', 'todo_list'];
 
 /**
- * 已实测过“关掉 code_mode_host 就没有工具”的运行环境：Windows 上的 codex-cli 0.171.0-alpha.13（2026-11-26，按本文件现在的参数跑）。
+ * 已实测过“关掉 code_mode_host 就没有工具”的运行环境：Windows 上的 codex-cli 0.171.0-alpha.13（2026-11-26）。
  * 实测方式：用本执行器在只含假数据的临时副本里，用提示诱导模型调用 shell、web_search、读写文件、联网、子代理，核对事件流与会话记录、副本与副本外目录的哈希、本地监听的请求；
- * 结果：没有任何工具执行（shell、web_search、读文件的调用都被 code_mode_host 拒绝）；0.171 里 --disable multi_agent 挡不住子代理，需要 CODEX_CONFIG_OVERRIDES 才关得掉（见该常量）。
+ * 结果：没有任何工具执行。shell、web_search、读仓库内文件的调用被 code_mode_host 拒绝，这些是在加 CODEX_CONFIG_OVERRIDES 之前的参数下观测的（两套参数只差子代理配置）；
+ * 加配置后的最终参数下只复跑了 shell（被拒）、子代理（不可用）和工具清单；0.171 里 --disable multi_agent 挡不住子代理，需要 CODEX_CONFIG_OVERRIDES 才关得掉（见该常量）。
  * 读副本之外的文件、写文件、联网三项模型始终没有真的去调（只能确认工具清单里唯一能做这些事的 exec 被拒绝）。
  * 之前的 0.167.0-alpha.3.2 是按旧参数（没有 CODEX_CONFIG_OVERRIDES）实测的，没有在现在的参数下复测，所以不再列为已实测。
  * 在其他平台或版本上运行时，报告的局限里自动标注“未实测”，让复审的使用者知道这一点（见 unverifiedNote）。

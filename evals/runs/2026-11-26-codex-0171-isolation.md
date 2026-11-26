@@ -28,7 +28,7 @@
 
 - 0.171 里子代理工具改由 `multi_agent_v2` 提供，`--disable multi_agent`（已 deprecated）关不掉。子代理继承只读沙箱和关闭的宿主，没有命令执行；但它的会话记录是另一个文件，执行器只移走父会话的记录，子代理那份会留在用户的 Codex 历史里，子代理还可换模型。
 - 试过的开关（只看工具清单，不依赖模型配合）：`--disable multi_agent_v2`、`multi_agent_version="v1"`/`"off"`、`agents.max_depth=0`、`features.multi_agent_v2=false`、`.enabled=false`、`multi_agent_v2_in_code_mode=false`、`max_concurrent_threads_per_session=1` 都不改变清单（`=0` 被 Codex 拒绝）；`features.multi_agent_v2.disable_direct_message=true` 只去掉 `send_message`、`followup_task`。
-- **`-c features.multi_agent_v2.disable_native_tools=true` 让清单里不再有任何 `collaboration.*`**（清单里剩下的是被关闭的 `exec`，以及 `wait`、`request_user_input(_async)`、`send_message_to_user_async`、`clock.sleep`：它们不碰文件系统与网络，四轮探测里模型没有调用过；若被调用，`scanCodexTools` 会因没有对应的拒绝输出而判作废，但调用本身不会被事前拦下）。 执行器加上它（`CODEX_CONFIG_OVERRIDES`）后，用同一个第四轮提示复跑：模型自己报告“没有可直接调用的 spawn_agent”，没有子代理，也没有额外的会话记录；shell 和 web_search 的探测照旧被拒。
+- **`-c features.multi_agent_v2.disable_native_tools=true` 让清单里不再有任何 `collaboration.*`**（清单里剩下的是被关闭的 `exec`，以及 `wait`、`request_user_input(_async)`、`send_message_to_user_async`、`clock.sleep`：它们不碰文件系统与网络，四轮探测里模型没有调用过；若被调用，`scanCodexTools` 会因没有对应的拒绝输出而判作废，但调用本身不会被事前拦下）。 执行器加上它（`CODEX_CONFIG_OVERRIDES`）后，用同一个第四轮提示复跑：模型自己报告“没有可直接调用的 spawn_agent”，没有子代理，也没有额外的会话记录；再复跑 shell 探测，照旧被拒；web_search 复跑时模型这次没有去调（没有调用条目）。其余各项（读仓库内文件、web_search 被拒）是加这一配置之前的参数下观测的，两套参数只差子代理配置。
 
 ## 结论
 
