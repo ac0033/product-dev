@@ -408,7 +408,7 @@ test('Codex 参数：关子代理工具的配置是完整的 -c 参数对，每�
   const argv = codexArgs({ model: { id: 'm' } }, { cwd: '.', schemaFile: 's.json' });
   const at = argv.indexOf(CODEX_CONFIG_OVERRIDES[1]);
   assert.deepEqual(argv.slice(at - 1, at + 1), CODEX_CONFIG_OVERRIDES);
-  argv.forEach((a, i) => { if (a === '-c') assert.match(argv[i + 1], /^[a-z_.]+=\S+$/, `-c 后面要跟 键=值：${argv[i + 1]}`); });
+  argv.forEach((a, i) => { if (a === '-c') assert.match(argv[i + 1], /^[a-z0-9_.]+=\S+$/, `-c 后面要跟 键=值：${argv[i + 1]}`); });
   assert.equal(argv[argv.length - 1], '-');
 });
 
