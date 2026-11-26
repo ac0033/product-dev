@@ -937,7 +937,7 @@ export function registerRun({ root, runDir, pr, summary, gh = defaultGh, userDec
  * Codex 复审时关闭的功能：会调用其他模型的（multi_agent 子代理）、会带入本机私有材料的（memories、goals）、
  * 会运行外部代码的（hooks、apps、plugin_discovery_prefetch）、与复审无关的（image_generation），
  * 以及执行工具的宿主（code_mode_host）：Codex 的只读沙箱只挡写入、能读全盘，被审内容里的提示注入可以让模型去读本机的密钥，
- * 所以复审时不给工具，只依据提示里的 diff 审（codex-cli 0.167、0.171 实测：关掉它后执行类工具 exec 的所有调用失败即关闭；子代理在 0.171 里另有开关，见 CODEX_CONFIG_OVERRIDES）。
+ * 所以复审时不给工具，只依据提示里的 diff 审（codex-cli 0.167、0.171 实测：关掉它后，模型实际去调的 exec（shell、web_search、读仓库内文件）都失败即关闭；子代理在 0.171 里另有开关，见 CODEX_CONFIG_OVERRIDES）。
  */
 export const CODEX_DISABLED_FEATURES = ['apps', 'code_mode_host', 'goals', 'hooks', 'image_generation', 'memories', 'multi_agent', 'plugin_discovery_prefetch'];
 
@@ -947,7 +947,8 @@ export const CODEX_DISABLED_FEATURES = ['apps', 'code_mode_host', 'goals', 'hook
  *     只 --disable multi_agent 挡不住：模型能 spawn 子代理（会话记录另存一份，留在用户的 Codex 历史里，子代理还可换模型）。
  *     加上这一项后，会话记录里的工具清单（additional_tools）不再含 collaboration.*（0.171.0-alpha.13 实测）；清单里剩下 exec（被 code_mode_host 的关闭拒绝）和
  *     wait、request_user_input、send_message_to_user_async、sleep（不碰文件系统与网络，模型没有调用过；一旦调用，scanCodexTools 判作废）。
- * 取值写错或这一版不认时，Codex 报参数错误，执行器按“没有输出会话事件”失败，不会悄悄放开。
+ * 不能指望“不认的配置一定报错”：0.171 里试过的多个无效配置键没有报错也没有改变工具清单。开关是否生效以会话记录里的工具清单为准（升级 Codex 后应先复测），
+ * 万一漏了，子代理一旦被调用，scanCodexTools 事后判作废（事后，不能事前拦下）。
  */
 export const CODEX_CONFIG_OVERRIDES = ['-c', 'features.multi_agent_v2.disable_native_tools=true'];
 
