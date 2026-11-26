@@ -42,7 +42,12 @@ export function roundBlock(prior, verdict, { limit, userDecision, scope, cur, ke
   if (counted.includes(cur.key) && !sameKindDone) return null;
   if (closure === 'fix-and-record') {
     const { phase } = roundState(prior, { keyOf, limit, closure });
-    if (phase === 'final-next' && !counted.includes(cur.key)) return null;
+    if (phase === 'final-next' && !counted.includes(cur.key)) {
+      // 自动开放的最后一轮只有一份内容：第一次在新内容上登记就定下它，之后只放行这份内容上另一种审查的首次登记
+      const target = finalTarget(prior, keyOf);
+      if (target === null || (target === cur.key && !sameKindDone)) return null;
+      return `最后一轮已用在提交 ${String(target).slice(0, 12)} 上，不能再换内容自动开放；停下向用户汇报，建议单开对话专项处理；继续复审须带 --user-decision`;
+    }
     if (phase === 'close-only') return '已到收口轮次，修完中级问题并写入风险登记后，用 review.mjs close 登记收口；继续复审须带 --user-decision';
     if (phase === 'stop') return '停下向用户汇报，建议单开对话专项处理；继续复审须带 --user-decision';
   }
@@ -80,13 +85,49 @@ function failRounds(entries, keyOf) {
   return [...groups.values()];
 }
 
-/** 从 fail 历史取出最新一轮被审提交及其全部中级编号，保留双审的同名编号。 */
+/**
+ * 从 fail 历史取出最新一轮被审提交及其全部中级发现，保留双审的同名编号。mediumIssues 每项是
+ * { id, kind, location, problem }（来自登记时记下的 issues；旧记录没有 issues 时只有编号）。
+ */
 export function lastFailRound(entries, keyOf) {
   const keys = failKeys(entries, keyOf);
   const failHead = keys.at(-1);
   const latest = entries.filter((e, i) => e.verdict === 'fail' && keyOf(e, i) === failHead);
   const mediumIds = latest.flatMap((e) => e.findings?.mediumIds ?? []);
-  return { failHead, latest, mediumIds };
+  const mediumIssues = latest.flatMap((e) => (Array.isArray(e.issues)
+    ? e.issues.filter((x) => x.severity === 'medium').map(({ id, location, problem }) => ({ id, kind: e.kind, location, problem }))
+    : (e.findings?.mediumIds ?? []).map((id) => ({ id, kind: e.kind, location: null, problem: null }))));
+  return { failHead, latest, mediumIds, mediumIssues };
+}
+
+/** 最终提交上必须有处置的审查种类：代码复审（pass、fail、accept）和一致性审（另认 defer）。 */
+const ROUND_KINDS = [
+  { kind: 'code', name: '代码复审', verdicts: ['pass', 'fail', 'accept'] },
+  { kind: 'consistency', name: '一致性审', verdicts: ['pass', 'fail', 'accept', 'defer'] },
+];
+
+/**
+ * 最新一轮被审提交上还缺哪种审查的处置（返回中文名列表，收齐时为空）。收口要求两份意见都已在这份内容上登记：
+ * “只剩中、低级”必须是两种审查都交回之后的判断，不能是“到目前只收到中、低级”。
+ */
+export function roundMissing(entries, keyOf, failHead) {
+  return ROUND_KINDS.filter((k) => !entries.some((e, i) => e.kind === k.kind && keyOf(e, i) === failHead && k.verdicts.includes(e.verdict)))
+    .map((k) => k.name);
+}
+
+/**
+ * 自动开放的最后一轮落在哪份内容上：第 N 轮之后第一次在别的内容上登记 pass 或 fail 的那份内容；还没用掉时为 null。
+ * 第 N 轮的内容本身不算（同一内容上补登另一种审查走并行例外）。
+ */
+export function finalTarget(entries, keyOf) {
+  const lastKey = failKeys(entries, keyOf).at(-1);
+  const start = entries.findIndex((e, i) => e.verdict === 'fail' && keyOf(e, i) === lastKey);
+  if (start < 0) return null;
+  for (let i = start + 1; i < entries.length; i++) {
+    const e = entries[i];
+    if ((e.verdict === 'pass' || e.verdict === 'fail') && keyOf(e, i) !== lastKey) return keyOf(e, i);
+  }
+  return null;
 }
 
 /** 任一份报告无法解析或明确写了无法彻底解决，都不能走自动收口。 */
@@ -116,27 +157,44 @@ export function roundState(entries, { keyOf, limit, closure }) {
   return { phase, counted };
 }
 
-/** 比较最近两轮中高风险编号、最高级别和总数，返回需要向用户汇报的收敛提示。 */
+const KIND_CN = { code: '代码复审', consistency: '一致性审' };
+
+/**
+ * 比较最近两轮，返回需要向用户汇报的收敛提示。报告里的编号是每份报告自己排的，不是跨轮的问题身份，所以：
+ *   重复出现——复审者在编号后标了“重复出现”的直接报；同一种审查两轮用了相同编号的只提示“需核实是否同一问题”，不同审查的同号不比；
+ *   级别升高——同一种审查同一编号由中级变高级（需核实），或上一轮没有高级、这一轮有；
+ *   数量增加——高级、中级分别比较（上一轮没有高级时，高级的出现已算级别升高）。
+ */
 export function trendWarnings(entries, keyOf) {
   const pair = failRounds(entries, keyOf).slice(-2);
   if (pair.length !== 2 || pair.some((group) => group.some((e) => !e.findings?.parsed))) return [];
+  const label = (key) => {
+    const [kind, id] = key.split(':');
+    return `${id}（${KIND_CN[kind] ?? kind}）`;
+  };
   const [previous, current] = pair.map((group) => {
     const ids = new Set();
     const highIds = new Set();
-    let total = 0;
-    for (const { findings } of group) {
-      for (const id of [...findings.highIds, ...findings.mediumIds]) ids.add(id);
-      for (const id of findings.highIds) highIds.add(id);
-      total += findings.high + findings.medium;
+    const marked = new Set();
+    let high = 0;
+    let medium = 0;
+    for (const { kind, findings, issues } of group) {
+      for (const id of [...findings.highIds, ...findings.mediumIds]) ids.add(`${kind}:${id}`);
+      for (const id of findings.highIds) highIds.add(`${kind}:${id}`);
+      for (const x of Array.isArray(issues) ? issues : []) if (x.mark === '重复出现') marked.add(`${kind}:${x.id}`);
+      high += findings.high;
+      medium += findings.medium;
     }
-    return { ids, highIds, total };
+    return { ids, highIds, marked, high, medium };
   });
   const warnings = [];
-  const repeated = [...current.ids].filter((id) => previous.ids.has(id));
-  if (repeated.length) warnings.push('同一问题在两轮重复出现：' + repeated.join('、'));
-  const raised = [...current.highIds].filter((id) => previous.ids.has(id) && !previous.highIds.has(id));
-  if (raised.length) warnings.push('以下问题从中级升至高级：' + raised.join('、'));
-  else if (current.highIds.size && !previous.highIds.size) warnings.push('发现的最高级别升至高级');
-  if (current.total > previous.total) warnings.push('中高级发现数量增加：' + previous.total + ' → ' + current.total);
+  if (current.marked.size) warnings.push('复审者标明两轮重复出现的问题：' + [...current.marked].map(label).join('、'));
+  const sameId = [...current.ids].filter((k) => previous.ids.has(k) && !current.marked.has(k));
+  if (sameId.length) warnings.push('同一种审查两轮里出现相同编号（需核实是否同一问题）：' + sameId.map(label).join('、'));
+  const raised = [...current.highIds].filter((k) => previous.ids.has(k) && !previous.highIds.has(k));
+  if (raised.length) warnings.push('同一编号由中级升至高级（需核实）：' + raised.map(label).join('、'));
+  else if (current.high && !previous.high) warnings.push('发现的最高级别升至高级');
+  if (previous.high && current.high > previous.high) warnings.push('高级发现数量增加：' + previous.high + ' → ' + current.high);
+  if (current.medium > previous.medium) warnings.push('中级发现数量增加：' + previous.medium + ' → ' + current.medium);
   return warnings;
 }

@@ -1,6 +1,6 @@
 // 合并前的审查核对：判断文档差异和每份登记能否放行。
 import fs from 'node:fs';
-import { lastFailRound, ROUND_KEYS, roundState } from './rounds.mjs';
+import { lastFailRound, ROUND_KEYS, roundMissing, roundState } from './rounds.mjs';
 import { registerProblems } from './risks.mjs';
 import { diffNames, git, isIgnoredDoc, prLogFile, prRecordFile, readLog, resolveBase } from './lib.mjs';
 
@@ -82,7 +82,45 @@ export function freshness(root, reviewed, head, reviewIgnore, docsDelta) {
 export function checkRegisterAt(root, head, riskRegister, record) {
   const result = git(root, ['show', head + ':' + riskRegister]);
   if (!result.ok) return ['最终提交缺少风险登记或无法读取：' + riskRegister + '（本地缺提交时请先 git fetch）'];
-  return registerProblems(result.out, { pr: record.pr, failHead: record.failHead, round: record.closedRound, mediumIds: record.mediumIds });
+  return registerProblems(result.out, { pr: record.pr, failHead: record.failHead, round: record.closedRound, mediumIds: record.mediumIds, mediumIssues: record.mediumIssues });
+}
+
+/** 发现表“位置”一栏里的文件路径（去掉反引号、行号和“起”“等”这类后缀）；写的不是路径时为 null。 */
+function locationPath(location) {
+  const first = String(location ?? '').replace(/`/g, '').trim().split(/[\s，,；;、]+/)[0] ?? '';
+  const file = first.replace(/[:：#]\d.*$/, '').replace(/:L?\d+(?:[-–]\d+)?$/, '');
+  return /[\\/.]/.test(file) && !/^https?:/i.test(file) ? file.replace(/\\/g, '/') : null;
+}
+
+/**
+ * 收口时“已修”的可核对证据：被判不通过的提交到最终提交之间要有风险登记之外的改动，
+ * 并且每条中级发现的“位置”写的是当时存在的文件时，这个文件要在改动里。写的不是文件的（跨文件、整体）不机械核对，
+ * 放进 notes 由主对话核对。只改风险登记、或问题所在的文件根本没动，都不能当成修过。返回 { problems, notes }。
+ */
+export function fixEvidence(root, failHead, head, mediumIssues, riskRegister) {
+  const problems = [];
+  const notes = [];
+  const diff = diffNames(root, [failHead, head]);
+  if (!diff.ok) return { problems: ['算不出被审提交到最终提交之间改了哪些文件（本地缺提交时请先 git fetch）'], notes };
+  const changed = new Set(diff.files);
+  if (![...changed].some((f) => f !== riskRegister)) problems.push('被审提交之后只改了风险登记，没有修复改动');
+  for (const issue of mediumIssues ?? []) {
+    const file = locationPath(issue.location);
+    if (!file || !git(root, ['cat-file', '-e', `${failHead}:${file}`]).ok) {
+      if (issue.location !== null) notes.push(`中级 ${issue.id} 的位置“${issue.location}”不是被审提交里的文件，修复情况需主对话核对`);
+      continue;
+    }
+    if (!changed.has(file)) problems.push(`中级 ${issue.id} 所在的文件 ${file} 在修复提交里没有改动，不能登记为已修`);
+  }
+  return { problems, notes };
+}
+
+/** 收口前提里与提交历史有关的部分（登记 close 与合并入口共用）：两种审查在最新一轮内容上都已登记，修复有改动证据。 */
+export function closeEvidence(root, history, record, riskRegister) {
+  const missing = roundMissing(history, ROUND_KEYS.pr.of, record.failHead);
+  const problems = missing.length ? [`最新一轮被审提交 ${String(record.failHead).slice(0, 12)} 上还没有${missing.join('、')}的登记：两份意见收齐后才能收口`] : [];
+  const fix = fixEvidence(root, record.failHead, record.headSha, record.mediumIssues, riskRegister);
+  return { problems: [...problems, ...fix.problems], notes: fix.notes };
 }
 
 /** 收口开关开启时核对已登记的修复提交及其之后的文档改动，过期记录交回普通双审。 */
@@ -102,7 +140,10 @@ export function closeClearance(root, no, head, config) {
   const state = roundState(history, { keyOf, limit: config.maxReviewRounds, closure: config.roundClosure });
   const latest = lastFailRound(history, keyOf);
   if (state.phase !== 'close-only' || state.counted !== rec.closedRound || latest.failHead !== rec.failHead ||
-      JSON.stringify(latest.mediumIds) !== JSON.stringify(rec.mediumIds)) return null;
-  const problems = checkRegisterAt(root, head, config.riskRegister, rec);
-  return { problems, notes: problems.length ? [] : ['按收口放行（已修、未再复审）'] };
+      JSON.stringify(latest.mediumIds) !== JSON.stringify(rec.mediumIds) ||
+      JSON.stringify(latest.mediumIssues) !== JSON.stringify(rec.mediumIssues ?? latest.mediumIssues)) return null;
+  // 在最终提交上重新核对：风险登记、两份意见收齐、修复改动证据（收口之后只改文档的提交也要满足）
+  const evidence = closeEvidence(root, history, { ...rec, headSha: head }, config.riskRegister);
+  const problems = [...checkRegisterAt(root, head, config.riskRegister, rec), ...evidence.problems];
+  return { problems, notes: problems.length ? [] : ['按收口放行（已修、未再复审）', ...evidence.notes] };
 }

@@ -52,9 +52,9 @@ import {
   uncommittedInScope,
   writeRecord,
 } from './lib.mjs';
-import { fenceHint, findingProblems, missingSections, parseFindings, reportVerdict } from './report.mjs';
+import { fenceHint, findingProblems, findingsSection, missingSections, parseFindings, reportVerdict, seriousIssues } from './report.mjs';
 import { failKeys, lastFailRound, ROUND_KEYS, roundBlock, roundLine, roundState, trendWarnings } from './rounds.mjs';
-import { checkRegisterAt, REQUIRED } from './clearance.mjs';
+import { checkRegisterAt, closeEvidence } from './clearance.mjs';
 
 /** 旧入口保留报告检查接口，已有调用方可继续使用。 */
 export { markFences, missingSections, reportVerdict } from './report.mjs';
@@ -112,7 +112,7 @@ function checkReport(config, expect, reviewer, reportPath, label = expect) {
     return { ok: false, message: `报告结论写的是“${said}”，不能记录为 ${label}（${how}）` };
   }
   if (expect === 'fail') {
-    const problems = findingProblems(text);
+    const problems = findingProblems(text, { section: findingsSection(config.reviewSections) });
     if (problems.length) return { ok: false, message: '复审报告发现表不合格：\n' + problems.join('\n') };
   }
   return { ok: true, text };
@@ -121,13 +121,14 @@ function checkReport(config, expect, reviewer, reportPath, label = expect) {
 const sha256 = (text) => crypto.createHash('sha256').update(text).digest('hex');
 
 /** 为本次记录计算内容轮次、报告指纹和发现统计；延期没有报告，不能作为收口依据。 */
-function reportFields(prior, keyOf, key, text) {
+function reportFields(prior, keyOf, key, text, section) {
   const counted = failKeys(prior, keyOf);
   const at = counted.indexOf(key);
   const round = at < 0 ? counted.length + 1 : at + 1;
   if (text === null) return { round, reportSha: null, findings: null };
-  const { rows, ...findings } = parseFindings(text);
-  return { round, reportSha: sha256(text), findings: rows.length ? findings : null };
+  const { rows, ...findings } = parseFindings(text, { section });
+  // issues：高、中级发现的编号、位置、问题，供风险登记逐条对应与收敛提示比较
+  return { round, reportSha: sha256(text), findings: rows.length ? findings : null, issues: rows.length ? seriousIssues(rows) : null };
 }
 
 /** 两种流程共用的参数校验：结论种类、defer 与 accept 的必填项。返回拒绝信息或 null。 */
@@ -205,7 +206,7 @@ export function recordReview({ root, verdict, reviewer, reportPath, summary = ''
     fs.writeFileSync(copy, text);
   }
   const record = {
-    ...reportFields(prior, keys.of, key, text),
+    ...reportFields(prior, keys.of, key, text, findingsSection(config.reviewSections)),
     kind: k, verdict, reviewer: reviewer ?? null, treeHash: hash, base: baseRev, branch, headSha, docHash, docFiles: docs.length, docsOnly, uncommitted,
     summary, reason: reason ?? null, userDecision: userDecision ?? null, report: copy, at,
   };
@@ -256,7 +257,7 @@ function recordPrReview({ root, config, verdict, reviewer, reportPath, summary, 
     fs.writeFileSync(copy, text);
   }
   const record = {
-    ...reportFields(prior, keys.of, st.head, text), pr: no, kind, verdict, reviewer: reviewer ?? null,
+    ...reportFields(prior, keys.of, st.head, text, findingsSection(config.reviewSections)), pr: no, kind, verdict, reviewer: reviewer ?? null,
     headSha: st.head, summary, reason: reason ?? null, userDecision: userDecision ?? (config.roundClosure === 'off' ? null : undefined),
     report: copy, at: new Date().toISOString(),
   };
@@ -294,7 +295,7 @@ function recordClose({ root, config, pr, reportPath, summary, kind, reviewer, gh
   const prior = readLog(prLogFile(root, no));
   const keyOf = ROUND_KEYS.pr.of;
   const { phase, counted } = roundState(prior, { keyOf, limit: config.maxReviewRounds, closure: config.roundClosure });
-  const { failHead, latest, mediumIds } = lastFailRound(prior, keyOf);
+  const { failHead, latest, mediumIds, mediumIssues } = lastFailRound(prior, keyOf);
   if (phase !== 'close-only') problems.push('当前轮次不满足收口条件（已审 ' + counted + ' 轮，阶段 ' + phase + '）');
   if (latest.some((e) => e.findings?.high)) problems.push('最新一轮仍有高级问题');
   if (phase === 'stop') problems.push('停下向用户汇报，建议单开对话专项处理');
@@ -305,17 +306,17 @@ function recordClose({ root, config, pr, reportPath, summary, kind, reviewer, gh
   else if (failHead && !git(root, ['merge-base', '--is-ancestor', failHead, st.head]).ok) {
     problems.push('无法确认最新一轮被审提交是最终提交的祖先，本地缺提交时请先 git fetch');
   }
-  for (const required of REQUIRED) {
-    if (!prior.some((e) => e.kind === required.kind && VERDICTS.includes(e.verdict))) problems.push('缺少' + required.name + '的登记历史');
-  }
   const record = {
     pr: no, kind: 'close', verdict: 'close', reviewer: null, headSha: st.head, failHead, closedRound: counted,
-    riskRegister: config.riskRegister, registerRows: mediumIds.length, mediumIds, summary, at: new Date().toISOString(),
+    riskRegister: config.riskRegister, registerRows: mediumIssues.length, mediumIds, mediumIssues, summary, at: new Date().toISOString(),
   };
   problems.push(...checkRegisterAt(root, st.head, config.riskRegister, record));
+  // 两份意见在最新一轮内容上都已登记；修复有风险登记之外的改动、问题所在的文件改过（与合并入口共用同一判定）
+  const evidence = failHead && failHead !== st.head ? closeEvidence(root, prior, record, config.riskRegister) : { problems: [], notes: [] };
+  problems.push(...evidence.problems);
   if (problems.length) return { ok: false, message: problems.join('\n') };
   savePrRecord(root, record);
-  return { ok: true, message: '已登记 PR #' + no + ' 第 ' + counted + ' 轮收口（已修、未再复审）', record };
+  return { ok: true, message: ['已登记 PR #' + no + ' 第 ' + counted + ' 轮收口（已修、未再复审）', ...evidence.notes].join('\n'), record };
 }
 
 /** 先写 PR 日志再更新最新记录，日志写入失败时不能出现可放行的新记录。 */

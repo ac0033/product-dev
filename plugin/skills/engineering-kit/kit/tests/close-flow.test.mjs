@@ -447,3 +447,117 @@ test('A12 前提不满足时逐条列出，不在第一条就停：一次同时�
   assert.match(msg, /打开/);
   assert.match(msg, /CI/);
 });
+
+// ---------- 首轮复审的修复（PR #40）：收口前提与最后一轮 ----------
+
+test('收口前提：最新一轮另一种审查还没登记时不能 close；补登之后可以（迟到的第二份意见）', () => {
+  const e = env();
+  round(e, 'r1', [fr('H1', '高')]);
+  const head2 = commit(e, 'r2');
+  const code = reg(e, 'code', 'fail', failText([fr('M1', '中')]));
+  assert.equal(code.ok, true, code.message);
+  finish(e, [regRow('M1', head2, 2)]);
+  const msg = refused(e, code.path);
+  assert.match(msg, /一致性审/);
+  assert.match(msg, /收齐/);
+  // 一致性审补登在第 2 轮的内容上（并行例外放行），之后 close 成功
+  const fixHead = e.st.head;
+  e.st.head = head2;
+  assert.equal(reg(e, 'consistency', 'pass', PASS_TEXT).ok, true);
+  e.st.head = fixHead;
+  assert.equal(close(e, code.path).ok, true);
+});
+
+test('收口前提：修复要有改动证据——只改风险登记、或中级问题所在的文件没改，都不能 close', () => {
+  const a = ready();
+  write(a.e.root, RISK, regFile(a.rows));
+  commitAll(a.e.root, 'only-register');
+  a.e.st.head = git(a.e.root, ['rev-parse', 'HEAD']).trim();
+  assert.match(refused(a.e, a.r2.code.path), /只改了风险登记/);
+  // 改了别的文件，但问题所在的 src/dedup.ts 没动
+  const b = ready();
+  write(b.e.root, RISK, regFile(b.rows));
+  write(b.e.root, 'src/other.ts', `${SRC_HEADER}export const other = 1;\n`);
+  commitAll(b.e.root, 'unrelated');
+  b.e.st.head = git(b.e.root, ['rev-parse', 'HEAD']).trim();
+  assert.match(refused(b.e, b.r2.code.path), /src\/dedup\.ts.*没有改动/);
+});
+
+test('收口前提：最终提交不是最新一轮被审提交的后代时拒绝', () => {
+  const e = env();
+  const r1 = round(e, 'r1', [fr('H1', '高')]);
+  const r2 = round(e, 'r2', [fr('M1', '中')]);
+  git(e.root, ['checkout', '-q', r1.head]);
+  finish(e, [regRow('M1', r2.head, 2)]);
+  assert.match(refused(e, r2.code.path), /祖先/);
+});
+
+test('风险登记逐条对应：两份报告用了同一编号、指的是不同问题时，抄两遍同一行不算；各写自己的位置和问题才放行', () => {
+  const e = env();
+  round(e, 'r1', [fr('H1', '高')]);
+  const r2 = round(e, 'r2', [fr('M1', '中')], [fr('M1', '中', { problem: '文档里的默认值与代码不一致' })]);
+  finish(e, [regRow('M1', r2.head, 2), regRow('M1', r2.head, 2)]);
+  assert.match(refused(e, r2.code.path), /M1.*位置、问题须照报告填写/);
+  const other = regRow('M1', r2.head, 2).replace('去重丢顺序', '文档里的默认值与代码不一致');
+  finish(e, [regRow('M1', r2.head, 2), other], 'fix2');
+  const res = close(e, r2.code.path);
+  assert.equal(res.ok, true, res.message);
+});
+
+test('最后一轮只开放一份内容：第 N+1 轮双审通过后，换到别的提交再登记要 --user-decision', () => {
+  const e = env();
+  round(e, 'r1', [fr('H1', '高')]);
+  round(e, 'r2', [fr('H2', '高')]);
+  commit(e, 'r3');
+  assert.equal(reg(e, 'code', 'pass', PASS_TEXT).ok, true, '最后一轮第一份');
+  assert.equal(reg(e, 'consistency', 'pass', PASS_TEXT).ok, true, '同一内容上的另一种审查照常');
+  commit(e, 'r4');
+  for (const verdict of ['pass', 'fail']) {
+    const r = reg(e, 'code', verdict, verdict === 'pass' ? PASS_TEXT : failText([fr('M1', '中')]));
+    assert.equal(r.ok, false, verdict);
+    assert.match(r.message, /最后一轮已用在提交/);
+    assert.match(r.message, /--user-decision/);
+  }
+  assert.equal(reg(e, 'code', 'pass', PASS_TEXT, { userDecision: '用户同意再审（对话 2026-11-26）' }).ok, true);
+});
+
+test('合并入口：收口后只改文档且风险登记仍有效时沿用收口；改坏风险登记时拒绝，之后对最终提交重新双审通过可按普通双审放行', () => {
+  const e = env();
+  const { r2 } = twoRounds(e);
+  finish(e, [regRow('M1', r2.head, 2), regRow('M2', r2.head, 2)]);
+  assert.equal(close(e, r2.code.path).ok, true);
+  // 只改文档（README），风险登记不变：沿用收口
+  write(e.root, 'docs/notes.md', '# 说明\n\n状态：active\n\n补一句说明。\n');
+  commitAll(e.root, 'docs');
+  e.st.head = git(e.root, ['rev-parse', 'HEAD']).trim();
+  const kept = mergePr({ root: e.root, pr: '7', gh: e.gh });
+  assert.equal(kept.ok, true, JSON.stringify(kept.problems));
+  assert.match(kept.notes.join('\n'), /收口/);
+  // 另一个环境：改坏风险登记（删掉 M2 一行）
+  const b = env();
+  const { r2: s2 } = twoRounds(b);
+  finish(b, [regRow('M1', s2.head, 2), regRow('M2', s2.head, 2)]);
+  assert.equal(close(b, s2.code.path).ok, true);
+  write(b.root, RISK, regFile([regRow('M1', s2.head, 2)]));
+  commitAll(b.root, 'break-register');
+  b.st.head = git(b.root, ['rev-parse', 'HEAD']).trim();
+  const broken = mergePr({ root: b.root, pr: '7', gh: b.gh });
+  assert.equal(broken.ok, false);
+  assert.match(broken.problems.join('\n'), /收口：.*M2/);
+  // 用户决定对最终提交重新双审，两项都通过：普通双审接管，旧收口不再挡路
+  const ud = { userDecision: '用户决定重新复审最终提交（对话 2026-11-26）' };
+  assert.equal(reg(b, 'code', 'pass', PASS_TEXT, ud).ok, true);
+  assert.equal(reg(b, 'consistency', 'pass', PASS_TEXT, ud).ok, true);
+  const normal = mergePr({ root: b.root, pr: '7', gh: b.gh });
+  assert.equal(normal.ok, true, JSON.stringify(normal.problems));
+  assert.match(normal.notes.join('\n'), /收口记录不再有效/);
+});
+
+test('发现节改了名（reviewSections 里叫“审查发现”）时，发现表在那一节里照样认，fail 能登记', () => {
+  const e = env({ reviewSections: ['范围', '审查发现', '作者的验证'] });
+  commit(e, 'r1');
+  const text = failText([fr('M1', '中')]).replace('## 发现', '## 审查发现');
+  const r = reg(e, 'code', 'fail', text);
+  assert.equal(r.ok, true, r.message);
+  assert.deepEqual(r.record.findings.mediumIds, ['M1']);
+});

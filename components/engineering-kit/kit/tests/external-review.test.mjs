@@ -321,12 +321,15 @@ test('结果结构核对与判定：发现为空、退出码 0 不单独算通�
   const good = { ...result, review: { ...result.review, report: NARRATIVE } };
   assert.equal(assess({ result: good, request, integrity: ok }).verdict, 'pass');
   assert.equal(assess({ result: good, request, integrity: { ...ok, repoUnchanged: false } }).registrable, false);
-  // 执行器判不通过却一条发现也没列：写不出发现表，登记会被拒，所以在判定这一步就不可登记，不让渲染抛错
+  // 执行器判不通过，却没有高、中级发现（一条都没有，或只有低级）：与人工报告“只有低级时写通过”的规则不符，判为不可登记，
+  // 不计入轮次，也不留到渲染发现表时抛错
   const bare = assess({ result: { ...good, review: { ...good.review, verdict: 'fail' } }, request, integrity: ok });
   assert.equal(bare.registrable, false);
-  assert.ok(bare.reasons.some((r) => r.includes('没有列出任何发现')), bare.reasons.join('\n'));
+  assert.ok(bare.reasons.some((r) => r.includes('没有列出高、中级问题')), bare.reasons.join('\n'));
   const lowOnly = { ...good, review: { ...good.review, verdict: 'fail', findings: [{ severity: 'low', title: '命名', detail: 'x' }] } };
-  assert.equal(assess({ result: lowOnly, request, integrity: ok }).verdict, 'fail', '只有低级发现时照常按执行器结论记为不通过');
+  const low = assess({ result: lowOnly, request, integrity: ok });
+  assert.equal(low.registrable, false, '只有低级发现时判不通过，结论与发现不符');
+  assert.ok(low.reasons.some((r) => r.includes('结论与发现不符')), low.reasons.join('\n'));
 });
 
 test('renderReport 自检：只有一处结论，且与判定一致', () => {
@@ -1186,9 +1189,12 @@ test('A5 run --risk：写入 request.review.risk，默认 low；high 时任务�
   const dflt = await run(root, head, 'pass');
   assert.equal(seenOf(dflt).req.review.risk, 'low');
   assert.doesNotMatch(seenOf(dflt).req.context.instructions, /功能是否都有测试/);
-  const high = await run(root, head, 'pass', { risk: 'high' });
+  // 中高风险要带上下文（相关测试清单、层级、验证摘要），否则测试缺口检查没有证据可看
+  await assert.rejects(run(root, head, 'pass', { risk: 'high' }), /--context/);
+  const high = await run(root, head, 'pass', { risk: 'high', contextText: '相关测试：tests/auth.test.ts（单元）；验证：本机相关测试通过' });
   assert.equal(seenOf(high).req.review.risk, 'high');
   assert.match(seenOf(high).req.context.instructions, /功能是否都有测试/);
+  assert.match(seenOf(high).req.context.instructions, /limitations/, '看不到的测试写进局限，不当作缺失');
   await assert.rejects(run(root, head, 'pass', { risk: 'mid' }), /--risk/);
   await assert.rejects(run(root, head, 'pass', { risk: 'HIGH' }), /--risk/);
 });
@@ -1212,4 +1218,76 @@ test('A7 run --final-round：只能与 followup 同用，写入 request.review.f
   assert.equal(fin.ok, true, fin.message);
   assert.equal(seenOf(fin).req.review.finalRound, true);
   assert.match(seenOf(fin).req.context.instructions, /最后一轮/);
+});
+
+// ---------- 首轮复审的修复（PR #40）：外部结果的必填项、修后处置、报告指纹、命令行参数 ----------
+
+test('外部结果：高、中级发现缺 file、title 或 detail（位置、问题、触发条件）时结构不合格；低级不要求', () => {
+  const base = { version: 1, execution: { status: 'completed' }, provenance: { executor: 'x', actualModel: 'm' } };
+  const ok = { severity: 'medium', title: '越权', file: 'src/a.ts', detail: '任何登录用户都能删', reason: '影响他人数据', fix: '校验所有者' };
+  const check = (f) => validateResult({ ...base, review: { verdict: 'fail', findings: [f], limitations: [], report: NARRATIVE } });
+  assert.deepEqual(check(ok), []);
+  for (const field of ['file', 'title', 'detail']) {
+    const missing = check({ ...ok, [field]: field === 'file' ? undefined : '  ' });
+    assert.ok(missing.some((p) => p.includes(field)), `${field}：${missing.join('；')}`);
+  }
+  assert.deepEqual(check({ severity: 'low', title: '命名', detail: 'x' }), [], '低级不要求位置');
+  const badDisp = validateResult({ ...base, review: { verdict: 'pass', findings: [], limitations: [], report: NARRATIVE, dispositions: [{ id: 'H1', status: 'done', evidence: 'x' }] } });
+  assert.ok(badDisp.some((p) => p.includes('dispositions')), badDisp.join('；'));
+});
+
+test('修后复核：上一轮报告里有高、中级发现时，dispositions 要逐条交代，缺一条不可登记；齐全时报告里有“上一轮处置”一节', () => {
+  const prior = '## 发现\n\n| 编号 | 级别 | 位置 | 问题 | 触发条件或例子 | 理由 | 建议改法 |\n|---|---|---|---|---|---|---|\n| H1 | 高 | src/a.ts:3 | 越权 | 任何人可删 | 影响他人数据 | 校验所有者 |\n| M1 | 中 | src/a.ts:9 | 漏边界 | 空数组 | 主路径外出错 | 补判断 |\n| L1 | 低 | src/a.ts | 命名 | - | - | - |\n';
+  const request = { review: { kind: 'code', round: 'followup' }, model: { id: 'm', source: 'request', chosenBy: 'user', reason: null }, context: { priorReport: prior }, target: { baseSha: 'b'.repeat(40), headSha: 'a'.repeat(40), files: ['src/a.ts'], excludedFiles: [] } };
+  const integrity = { copyUnchanged: true, repoUnchanged: true, headUnchanged: true, exitCode: 0 };
+  const result = (dispositions) => ({ version: 1, execution: { status: 'completed' }, review: { verdict: 'pass', findings: [], limitations: [], report: NARRATIVE, dispositions }, provenance: { executor: 'x', actualModel: 'm' } });
+  const partial = assess({ result: result([{ id: 'H1', status: 'fixed', evidence: '已加所有者校验' }]), request, integrity });
+  assert.equal(partial.registrable, false);
+  assert.ok(partial.reasons.some((r) => r.includes('M1')), partial.reasons.join('\n'));
+  assert.ok(!partial.reasons.some((r) => r.includes('L1')), '低级不要求交代');
+  const full = result([{ id: 'H1', status: 'fixed', evidence: '已加所有者校验' }, { id: 'M1', status: 'fixed', evidence: '补了空数组判断与测试' }]);
+  const a = assess({ result: full, request, integrity });
+  assert.equal(a.registrable, true, a.reasons.join('\n'));
+  const text = renderReport({ request, result: full, assessment: a, meta: { reviewer: 'external:x', inputHash: '0'.repeat(64), durationMs: 1000, usageLine: '无' } });
+  assert.match(text, /## 上一轮处置/);
+  assert.match(text, /\| M1 \| 已修好 \| 补了空数组判断与测试 \|/);
+  assert.equal(reportVerdict(text).verdict, 'pass');
+  // 首轮（或没给上一轮报告）不要求
+  assert.equal(assess({ result: result([]), request: { ...request, review: { kind: 'code', round: 'first' } }, integrity }).registrable, true);
+});
+
+test('报告指纹：运行目录里的 report.md 生成后被改过，补登拒绝；缺 report.sha256 的旧运行目录要求重跑', async () => {
+  const { root, head } = repo();
+  const res = await run(root, head, 'fail');
+  assert.equal(res.ok, true, res.message);
+  assert.ok(fs.existsSync(path.join(res.runDir, 'report.sha256')), '渲染时记下报告指纹');
+  const reportPath = path.join(res.runDir, 'report.md');
+  const original = fs.readFileSync(reportPath, 'utf8');
+  fs.writeFileSync(reportPath, original.replace('| 高级 |', '| 低级 |'));
+  const tampered = registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh([head]) });
+  assert.equal(tampered.ok, false);
+  assert.match(tampered.message, /report\.md 在生成之后被改过/);
+  fs.writeFileSync(reportPath, original);
+  fs.rmSync(path.join(res.runDir, 'report.sha256'));
+  const old = registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh([head]) });
+  assert.equal(old.ok, false);
+  assert.match(old.message, /report\.sha256/);
+});
+
+test('命令行：--risk、--final-round 经真实参数分发生效（非法值、首轮带 --final-round、--risk high 缺 --context 都报错；register 不接受这两个参数）', () => {
+  const { root } = repo();
+  const cli = fileURLToPath(new URL('../gate/external-review.mjs', import.meta.url));
+  const cases = [
+    [['run', '--executor', 'fake', '--risk', 'mid'], /--risk 只能是 low 或 high/],
+    [['run', '--executor', 'fake', '--final-round'], /--final-round 只能与 --round followup 同用/],
+    [['run', '--executor', 'fake', '--round', 'first', '--final-round'], /--final-round 只能与 --round followup 同用/],
+    [['run', '--executor', 'fake', '--risk', 'high'], /--risk high 须用 --context/],
+    [['register', '--run-dir', 'x', '--risk', 'high'], /只用于 run/],
+    [['register', '--run-dir', 'x', '--final-round'], /只用于 run/],
+  ];
+  for (const [args, why] of cases) {
+    const r = spawnSync(process.execPath, [cli, ...args], { cwd: root, encoding: 'utf8' });
+    assert.equal(r.status, 1, args.join(' '));
+    assert.match(r.stderr, why, args.join(' '));
+  }
 });

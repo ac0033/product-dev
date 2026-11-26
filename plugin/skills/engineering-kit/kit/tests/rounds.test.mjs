@@ -8,7 +8,7 @@
 //   trendWarnings(entries, keyOf) → 字符串数组（没有情形时为空数组）。
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { failKeys, ROUND_KEYS, roundBlock, roundState, trendWarnings } from '../gate/rounds.mjs';
+import { failKeys, finalTarget, ROUND_KEYS, roundBlock, roundMissing, roundState, trendWarnings } from '../gate/rounds.mjs';
 import * as review from '../gate/review.mjs';
 
 const keyOf = ROUND_KEYS.pr.of;
@@ -205,4 +205,45 @@ test('A10 收敛提示：最新两轮之间同一编号再次出现、级别升�
   ], keyOf);
   assert.equal(again.length, 1, JSON.stringify(again));
   for (const w of [...up, ...more, ...again]) assert.equal(typeof w, 'string');
+});
+
+// ---------- 首轮复审的修复（PR #40） ----------
+
+test('收敛提示按审查种类比较：不同审查的同号不算重复；复审者标“重复出现”的直接报；高级、中级数量分别比较', () => {
+  const withIssues = (head, findings, kind, issues = []) => ({ ...fail(head, findings, kind), issues });
+  // 上一轮代码复审 M1、这一轮一致性审 M1：编号是各报告自己排的，不比
+  assert.deepEqual(trendWarnings([fail('a', { ...F(0, 1), mediumIds: ['M1'] }), fail('b', { ...F(0, 1), mediumIds: ['M1'] }, 'consistency')], keyOf), []);
+  // 复审者在编号后标了“重复出现”
+  const marked = trendWarnings([
+    fail('a', { ...F(0, 1), mediumIds: ['M1'] }),
+    withIssues('b', { ...F(0, 1), mediumIds: ['M5'] }, 'code', [{ id: 'M5', mark: '重复出现', severity: 'medium', location: 'x', problem: 'y' }]),
+  ], keyOf);
+  assert.equal(marked.length, 1, JSON.stringify(marked));
+  assert.match(marked[0], /重复出现.*M5/);
+  // 2 高 → 2 中：总数不变，但中级由 0 增到 2，要提示
+  const shift = trendWarnings([fail('a', { ...F(2), highIds: ['H1', 'H2'] }), fail('b', { ...F(0, 2), mediumIds: ['M7', 'M8'] })], keyOf);
+  assert.ok(shift.some((w) => w.includes('中级发现数量增加')), JSON.stringify(shift));
+  // 2 中 + 1 高 → 1 中 + 2 高：高级数量增加
+  const higher = trendWarnings([fail('a', { ...F(1, 2), highIds: ['H1'], mediumIds: ['M1', 'M2'] }), fail('b', { ...F(2, 1), highIds: ['H5', 'H6'], mediumIds: ['M9'] })], keyOf);
+  assert.ok(higher.some((w) => w.includes('高级发现数量增加')), JSON.stringify(higher));
+});
+
+test('roundMissing：最新一轮内容上两种审查都登记了才算收齐；一致性审延期也算有处置', () => {
+  const head = sha('b');
+  assert.deepEqual(roundMissing([fail('b', F(0, 1))], keyOf, head), ['一致性审']);
+  assert.deepEqual(roundMissing([fail('b', F(0, 1)), pass('a', 'consistency')], keyOf, head), ['一致性审'], '别的内容上的登记不算');
+  assert.deepEqual(roundMissing([fail('b', F(0, 1)), { kind: 'consistency', verdict: 'defer', headSha: head }], keyOf, head), []);
+  assert.deepEqual(roundMissing([fail('b', F(0, 1), 'consistency'), pass('b')], keyOf, head), []);
+});
+
+test('finalTarget：第 N 轮之后第一次在别的内容上登记的那份内容；同一内容上补登另一种审查不算', () => {
+  const two = [fail('a', F(1)), fail('b', F(1))];
+  assert.equal(finalTarget(two, keyOf), null);
+  assert.equal(finalTarget([...two, pass('b', 'consistency')], keyOf), null, '第 N 轮内容上的补登');
+  assert.equal(finalTarget([...two, pass('c'), pass('d')], keyOf), sha('c'));
+  // 已用掉：别的内容上登记被拒，同一内容上另一种审查首次登记放行
+  const used = [...two, pass('c')];
+  assert.match(block(used, 'pass', { cur: { key: sha('d'), kind: 'code' } }), /最后一轮已用在提交/);
+  assert.equal(block(used, 'pass', { cur: { key: sha('c'), kind: 'consistency' } }), null);
+  assert.match(block(used, 'pass', { cur: { key: sha('c'), kind: 'code' } }) ?? '', /最后一轮已用在提交|--user-decision/);
 });

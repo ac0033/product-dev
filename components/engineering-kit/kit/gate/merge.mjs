@@ -40,15 +40,20 @@ export function mergePr({ root, pr, method = 'squash', gh = defaultGh }) {
   for (const p of st.ciProblems) problems.push(`${p}（最终提交 ${short(st.head)}）`);
   const scope = docsOnlyPr(root, config, st.head);
   if (scope.why) notes.push(scope.why);
-  const closed = closeClearance(root, no, st.head, config);
-  if (closed) {
-    problems.push(...closed.problems);
-    notes.push(...closed.notes);
-  }
-  for (const r of scope.docs || closed ? [] : REQUIRED) {
-    const result = recordClears(root, no, st.head, config, r);
-    problems.push(...result.problems);
-    notes.push(...result.notes);
+  if (!scope.docs) {
+    // 两条放行路径：有效的收口记录，或普通双审。收口记录失效（例如之后改坏了风险登记）时不挡住普通双审，两条都不满足才拒绝
+    const closed = closeClearance(root, no, st.head, config);
+    const normal = { problems: [], notes: [] };
+    if (!closed || closed.problems.length) {
+      for (const r of REQUIRED) {
+        const result = recordClears(root, no, st.head, config, r);
+        normal.problems.push(...result.problems);
+        normal.notes.push(...result.notes);
+      }
+    }
+    if (closed && !closed.problems.length) notes.push(...closed.notes);
+    else if (!normal.problems.length) notes.push(...normal.notes, ...(closed ? [`收口记录不再有效（${closed.problems.join('；')}），按普通双审放行`] : []));
+    else problems.push(...normal.problems, ...(closed ? closed.problems.map((p) => `收口：${p}`) : []));
   }
   if (problems.length > 0) return { ok: false, problems, notes, head: st.head, ci: st.ci };
   runGh(gh, ['pr', 'merge', no, `--${method}`, '--match-head-commit', st.head, '--delete-branch'], root);

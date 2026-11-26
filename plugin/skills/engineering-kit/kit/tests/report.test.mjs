@@ -11,6 +11,7 @@ import {
   FINDING_COLUMNS,
   findingGaps,
   findingProblems,
+  findingsSection,
   markFences,
   missingSections,
   parseFindings,
@@ -139,4 +140,37 @@ test('迁移不回归：review.mjs 仍导出 markFences、reportVerdict、missin
   assert.equal(reportVerdict('## 结论\n通过。\n').verdict, 'pass');
   assert.deepEqual(missingSections('## 范围\nx\n## 发现\ny\n', ['范围', '发现', '作者的验证']), ['作者的验证']);
   assert.equal(markFences('a\n```\nb\n```\nc').lines.length, 5);
+});
+
+// ---------- 首轮复审的修复（PR #40） ----------
+
+test('高、中级行还要写位置、问题、触发条件；低级不要求', () => {
+  assert.deepEqual(findingGaps({ severity: 'medium', location: '', problem: 'p', trigger: '', reason: 'r', fix: 'f' }), ['位置', '触发条件或例子']);
+  assert.deepEqual(findingGaps({ severity: 'high', location: 'a.ts', problem: '-', trigger: 't', reason: 'r', fix: 'f' }), ['问题']);
+  assert.deepEqual(findingGaps({ severity: 'low', location: '', problem: '', trigger: '', reason: '', fix: '' }), []);
+  assert.match(findingProblems(doc(row('M1', '中', '', '问题', '', '理由', '改法'))).join('\n'), /M1.*缺.*位置.*触发条件或例子/);
+});
+
+test('HTML 注释里的表看不见，不当证据：全部藏在注释里的发现表算没有表；可见的表照常', () => {
+  const hidden = `## 发现\n\n<!--\n${HEAD7}\n${ok('M1', '中')}\n-->\n\n## 结论\n不通过。\n`;
+  assert.equal(parseFindings(hidden).parsed, 0);
+  assert.match(findingProblems(hidden).join('\n'), /找不到可解析的表头/);
+  const inline = `## 发现\n\n${HEAD7}\n${ok('M1', '中')}\n<!-- ${ok('H9', '高')} -->\n\n## 结论\n不通过。\n`;
+  assert.equal(parseFindings(inline).parsed, 1, '同一行里注释掉的部分不算');
+  assert.deepEqual(parseFindings(inline).highIds, []);
+});
+
+test('发现节里附带的取证表（没有编号、级别两栏）不当成不合格的发现表', () => {
+  const text = doc(ok('M1', '中')).replace('## 作者的验证', '| 位置 | 证据 |\n|---|---|\n| src/dedup.ts | 复现输出 |\n\n## 作者的验证');
+  assert.deepEqual(findingProblems(text), []);
+  assert.equal(parseFindings(text).parsed, 1);
+});
+
+test('发现节的节名可配置：findingsSection 取 reviewSections 里含“发现”的节名；找不到表时提示写明节名', () => {
+  assert.equal(findingsSection(['范围', '发现', '作者的验证']), '发现');
+  assert.equal(findingsSection(['范围', '审查发现', '作者的验证']), '审查发现');
+  assert.equal(findingsSection(['范围', '作者的验证']), '发现');
+  const renamed = doc(ok('M1', '中')).replace('## 发现', '## 审查发现');
+  assert.equal(parseFindings(renamed, { section: '审查发现' }).parsed, 1);
+  assert.match(findingProblems(renamed).join('\n'), /“发现”一节里找不到可解析的表头/);
 });
