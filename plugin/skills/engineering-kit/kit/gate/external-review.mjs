@@ -318,7 +318,8 @@ export function materialize(root, headSha, dir, { exclude = [], maxBytes = DEFAU
       const target = path.join(dir, ...e.file.split('/'));
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, content);
-      fs.chmodSync(target, 0o444);
+      // Windows 上不设只读：设了，清理时就得按路径逐个改回可写，检查与修改之间有被替换的窗口。复审者有没有写文件由前后两次 dirHash 判定
+      if (process.platform !== 'win32') fs.chmodSync(target, 0o444);
     }
   }
   return { files: blobs.length, bytes: total, skipped, unsafe };
@@ -419,20 +420,10 @@ export function changedParts(before, after) {
   return Object.entries(STATE_PARTS).filter(([k]) => before.parts[k] !== after.parts[k]).map(([, name]) => name);
 }
 
-/** 删除只读副本：先恢复可写再删（Windows 上只读文件删不掉）。 */
+/** 删除只读副本。不改任何文件的权限（Windows 上副本本来就不设只读，见 materialize）；rmSync 删除链接本身、不跟随。 */
 function removeCopy(dir, runDir, identity) {
   if (!ownedCopy(dir, runDir, identity)) return '副本路径已被替换或移走，未清理';
-  const walk = (d) => {
-    for (const name of fs.readdirSync(d)) {
-      const p = path.join(d, name);
-      const st = fs.lstatSync(p, { throwIfNoEntry: false });
-      if (!st || st.isSymbolicLink()) continue;
-      if (st.isDirectory()) walk(p);
-      else if (process.platform === 'win32' && st.isFile() && st.nlink === 1) fs.chmodSync(p, 0o666);
-    }
-  };
   try {
-    walk(dir);
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     return null;
   } catch (e) {
@@ -762,7 +753,8 @@ function checkContextSize(value, label) {
 
 /**
  * 修后复核的待处置清单：同种审查在被审提交之前最后一次不通过的高、中级（与登记时 admissionProblems 的选取规则相同），连同那份数据的指纹。
- * 上一轮是外部复审者做的，位置和问题原文本来就出自外发过的内容，原样带上；是本地复审者做的，原文可能引用不外发的文件，只带编号和级别。
+ * 清单只带编号和级别：上一轮的位置和问题原文不论出自谁，都可能涉及按当前策略不外发的内容（本地复审者看得到不外发的文件，两轮之间项目也可能收紧 externalExclude）。
+ * 复审者核对用的上一轮报告由调用者经 --prior-report 提供，发送前由调用者按当前外发策略核对。
  */
 function followupFindings(root, pr, kind, headSha) {
   const history = readLog(prLogFile(root, prNumber(pr))).filter((r) => r.kind === kind);
@@ -773,10 +765,7 @@ function followupFindings(root, pr, kind, headSha) {
   if (fs.statSync(prev.data).size > MAX_REVIEW_BYTES) throw new Error('上一轮复审数据超过 512 KiB');
   const bytes = fs.readFileSync(prev.data);
   if (sha256(bytes) !== prev.dataSha) throw new Error('上轮失败登记的数据副本指纹不符');
-  const external = typeof prev.reviewer === 'string' && prev.reviewer.startsWith(REVIEWER_PREFIX);
-  const prior = JSON.parse(bytes).findings.filter(isSerious).map(({ id, severity, location, problem }) => (external
-    ? { id, severity, location, problem }
-    : { id, severity, note: '上一轮由本地复审者做出，位置和问题原文不外发；按编号对照本次修复差异逐条处置' }));
+  const prior = JSON.parse(bytes).findings.filter(isSerious).map(({ id, severity }) => ({ id, severity }));
   checkContextSize(JSON.stringify(prior), '上一轮待处置清单');
   return { findings: prior, sha: prev.dataSha };
 }
@@ -825,6 +814,9 @@ export async function runExternalReview(opts) {
   const baseSha = opts.base ? gitOk(root, ['rev-parse', '--verify', `${opts.base}^{commit}`], '解析 --base').trim() : (fork ?? policy.baseRev);
 
   const prior = config.reviewFlow === 'pr' && round === 'followup' ? followupFindings(root, pr, kind, headSha) : { findings: [], sha: null };
+  if (prior.findings.length && !opts.priorReport) {
+    throw new Error(`修后复核的上一轮有高、中级发现（${prior.findings.map((f) => f.id).join('、')}）：待处置清单只外发编号和级别，须用 --prior-report 附上一轮报告（发送前按当前外发策略核对），复审者据它逐条处置`);
+  }
   const { request } = buildRequest({ root, baseSha, headSha, kind, round, risk, priorFindings: prior.findings, priorFailSha: prior.sha, model, limits, extraExclude: policy.exclude, contextText: opts.contextText ?? null, priorReport: opts.priorReport ?? null });
   const requestText = JSON.stringify(request);
   const inputHash = sha256(requestText);

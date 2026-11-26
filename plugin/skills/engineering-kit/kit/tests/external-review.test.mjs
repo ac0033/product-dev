@@ -143,6 +143,8 @@ function repo({ allow = ['fake'], maxRounds, sections, secrets = false } = {}) {
 async function run(root, head, mode, extra = {}) {
   // 执行器只拿到环境变量允许清单里的变量和本机配置写的 env，所以模式（和假执行器要动手的仓库、钩子目录）经本机配置的 env 传
   const { env, ...rest } = extra;
+  // 修后复核在上一轮有高、中级发现时必须带上一轮报告（PR #42 第 2 轮）；用例没写时给一份占位报告，专门测缺报告的用例显式传 null
+  if (rest.round === 'followup' && !('priorReport' in rest)) rest.priorReport = '上一轮报告（测试占位，已按当前外发策略核对）';
   const local = { ...LOCAL, executors: { fake: { ...LOCAL.executors.fake, env: { FAKE_MODE: mode, ...env } } } };
   return runExternalReview({ root, executor: 'fake', pr: '7', gh: rest.gh ?? fakeGh([head]), localConfig: local, outDir: path.join(tmpDir('ekit-xr-'), 'run'), ...rest });
 }
@@ -1425,6 +1427,32 @@ test('H6 只读副本：materialize 只往本次新建的空目录里写，目�
   fs.writeFileSync(path.join(dir, 'keep.txt'), 'sentinel');
   assert.throws(() => ER.materialize(root, head, dir), /空目录/);
   assert.equal(fs.readFileSync(path.join(dir, 'keep.txt'), 'utf8'), 'sentinel');
+});
+
+test('S9 修后复核：上一轮是外部复审者做的，待处置清单也只外发编号和级别；有高、中级发现而没带 --prior-report 时拒绝运行（PR #42 第 2 轮代码 H1、M2，一致性 M5）', async () => {
+  const { root, head } = repo();
+  const first = await run(root, head, 'fail-two');
+  assert.equal(first.ok, true, first.message);
+  assert.equal(registerRun({ root, runDir: first.runDir, summary: 's', gh: fakeGh([head]) }).ok, true);
+  const head2 = nextHead(root, 'fix-ext');
+  const refused = await attempt(run(root, head2, 'pass', { gh: fakeGh([head2]), round: 'followup', priorReport: null }));
+  assert.equal(refused.ok, false, '上一轮有高、中级发现，没带上一轮报告不能组包');
+  assert.match(refused.message, /--prior-report/);
+  const res = await run(root, head2, 'pass', { gh: fakeGh([head2]), round: 'followup', priorReport: '上一轮报告：H1、M1 的位置和问题摘要（已按当前外发策略核对）' });
+  assert.equal(res.ok, true, res.message);
+  const request = readJson(path.join(res.runDir, 'request.json'));
+  assert.deepEqual(request.context.priorFindings.map((p) => p.id), ['H1', 'M1']);
+  for (const p of request.context.priorFindings) assert.deepEqual(Object.keys(p).sort(), ['id', 'severity'], '上一轮的位置和问题原文不进待处置清单');
+  assert.match(request.context.priorReport, /已按当前外发策略核对/);
+});
+
+test('H6 只读副本：Windows 上副本文件不设只读（清理时就不必按路径改权限，没有替换窗口），其他平台设只读；复审者有没有写文件由前后哈希判定（PR #42 第 2 轮代码 M5、一致性 M2）', () => {
+  const { root, head } = repo();
+  const dir = path.join(tmpDir('ekit-mat-'), 'workspace');
+  ER.materialize(root, head, dir);
+  const mode = fs.statSync(path.join(dir, 'src', 'auth.ts')).mode;
+  if (process.platform === 'win32') assert.ok(mode & 0o200, 'Windows 上副本文件可写');
+  else assert.equal(mode & 0o222, 0, '其他平台副本文件只读');
 });
 
 test('报告写明模型选择依据（--model-reason）（PR #42 一致性审 L1）', async () => {

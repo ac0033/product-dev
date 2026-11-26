@@ -91,20 +91,26 @@ function checkedData({ config, reviewer, reportPath, reviewData }) {
   return issues.length ? { message: issues.join('\n') } : { data };
 }
 
-/** 在被审树和基准树核对定位路径；推送前流程查工作区、HEAD 和与主干的分叉点（功能分支已提交删除的文件只在分叉点的树里）。 */
+/** 在被审树和基准树核对定位路径；推送前流程查工作区、HEAD、与主干的分叉点和数据给的基准（功能分支已提交删除的文件只在分叉点或基准的树里）。 */
 function missingPaths(root, data, flow, base = null) {
   const files = new Set(data.findings.flatMap((f) => f.files ?? []));
   const inTree = (rev, file) => git(root, ['cat-file', '-e', `${rev}:${file}`]).ok;
   return [...files].filter((file) => flow === 'pr'
     ? !inTree(data.reviewedCommit, file) && !inTree(data.reviewedBase, file)
-    : !fs.existsSync(path.join(root, file)) && !inTree('HEAD', file) && !(base && inTree(base, file)));
+    : !fs.existsSync(path.join(root, file)) && !inTree('HEAD', file) && !(base && inTree(base, file)) && !(data.reviewedBase && inTree(data.reviewedBase, file)));
 }
 
-/** pre-push 流程的覆盖：数据给了被审范围才核对（外部复审一定给），范围须从与主干的分叉点开始，且没有未交给复审者的改动文件；没给范围的返回 null，不核对。 */
+/**
+ * pre-push 流程的覆盖。列了未交给复审者的改动文件的，不论给没给范围都只算部分覆盖；给了被审范围的（外部复审一定给），
+ * 终点须是当前 HEAD、起点须是与主干的分叉点；没给范围、也没列这类文件的返回 null，不核对。基准和终点只给一个的，登记前已拒绝。
+ */
 function prePushCoverage(root, data, config) {
-  if (!data.reviewedCommit || !data.reviewedBase) return null;
+  const unreviewedFiles = data.unreviewedFiles ?? [];
+  if (!data.reviewedCommit) return unreviewedFiles.length ? coverageOf({ unreviewedFiles }) : null;
+  const head = git(root, ['rev-parse', 'HEAD']).out.trim();
+  if (data.reviewedCommit !== head) return { full: false, why: `被审范围的终点 ${data.reviewedCommit.slice(0, 12)} 不是当前 HEAD ${head.slice(0, 12)}，之后的改动没有复审` };
   return coverageOf({
-    reviewedBase: data.reviewedBase, reviewedCommit: data.reviewedCommit, coveredCommits: [], unreviewedFiles: data.unreviewedFiles ?? [],
+    reviewedBase: data.reviewedBase, reviewedCommit: data.reviewedCommit, coveredCommits: [], unreviewedFiles,
     forkPoint: forkPoint(root, resolveBase(root, config.base), data.reviewedCommit),
     baseIsAncestor: git(root, ['merge-base', '--is-ancestor', data.reviewedBase, data.reviewedCommit]).ok,
   });
@@ -232,6 +238,9 @@ export function recordReview({ root, verdict, reviewer, reportPath, reviewData, 
   const checked = verdict === 'defer' ? {} : checkedData({ config, reviewer, reportPath, reviewData });
   if (checked.message) return { ok: false, message: checked.message };
   const { data } = checked;
+  if (data && Boolean(data.reviewedCommit) !== Boolean(data.reviewedBase)) {
+    return { ok: false, message: '被审范围的基准（reviewedBase）和终点（reviewedCommit）须同时给出或都不给' };
+  }
   if (data) {
     let fork = null; // 基准分支解析不了时只查工作区和 HEAD（与改动前一样），覆盖另由 prePushCoverage 按被审范围判定
     try { fork = forkPoint(root, resolveBase(root, config.base), 'HEAD'); } catch { fork = null; }
@@ -313,7 +322,8 @@ function registerLocked({ root, config, verdict, reviewer, data, evidenceChecked
   if (data) {
     const { reviewedBase, reviewedCommit } = data;
     const unavailable = [reviewedCommit, reviewedBase].filter((rev) => !git(root, ['cat-file', '-e', `${rev}^{commit}`]).ok);
-    const coveredCommits = prior.filter((r) => r.kind === kind && ['pass', 'fail', 'accept'].includes(r.verdict) && r.coverage === 'full').map((r) => r.headSha);
+    // 只接续带结构化数据副本的登记（0.9.0 起）：更早的记录在旧规则下判的覆盖，可能漏算没交给复审者的改动文件，无法证明完整
+    const coveredCommits = prior.filter((r) => r.kind === kind && ['pass', 'fail', 'accept'].includes(r.verdict) && r.coverage === 'full' && r.dataSha).map((r) => r.headSha);
     coverage = coverageOf({ reviewedBase, reviewedCommit, coveredCommits, unreviewedFiles: data.unreviewedFiles ?? [],
       forkPoint: forkPoint(root, resolveBase(root, config.base), reviewedCommit),
       baseIsAncestor: git(root, ['merge-base', '--is-ancestor', reviewedBase, reviewedCommit]).ok,
