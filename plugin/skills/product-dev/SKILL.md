@@ -111,7 +111,7 @@ description: 产品开发的唯一入口。用户提出产品或开发相关的�
 | 推送前自查 | 作者一侧的问题清零 | 自查不算独立复审（R7）；不靠屏蔽检查或跳过测试变绿（R4） | 按 [self-review.md](references/self-review.md) 的清单逐项过 | 自查发现的问题已修，或写明不修的理由 |
 | 机械闸门 | 静态检查、测试记录都与当前代码一致 | 标准只有达标与未达标；闸门失败就修代码，不改阈值（R4） | 首次候选 `node scripts/engineering/gate/gate.mjs`（`fullTests` 为 `ci` 的项目它只做静态检查，不要求本机测试记录——此时“测试记录”一栏以 CI 在最终提交上的结果为准，全量由 CI 跑），修复后 `node scripts/engineering/gate/gate.mjs --affected`；各阶段跑什么见 [process.md](references/process.md) 的“测试的四个阶段” | 闸门输出通过；首次候选另有变异检查的输出（反转了哪个条件、哪条测试失败） |
 | PR 与 CI | PR 最终提交上的必需检查全部通过 | 命令返回 0 不等于业务成功（R5）；不绕过失败的检查 | `git push`（推送钩子运行 `scripts/engineering/gate/verify.mjs`）、`gh pr create`、`gh pr checks`；细则见 [套件流程文档](../engineering-kit/references/process.md) 第 4 节 | PR 链接和检查结果 |
-| 独立复审 | 代码复审和一致性审的结论绑定 PR 最终提交 | 复审者独立于作者，模型按 R9 分档；首轮查全、收齐再改、修后只复核修复；高、中级问题合并前修完，低级和提示级的默认记进后续清单（已登记、不扩大风险的可以同批改，见 [review.md](references/review.md) 第 8 节） | 首轮按 [review.md](references/review.md) 第 1、2 节对同一提交并行派发代码复审 `product-dev:code-reviewer`（[定义](../../agents/code-reviewer.md)，中高风险带上同一文件的安全清单）和一致性审，也可以改用外部复审者（其他厂商的模型，接入与调用见同一文件第 1 节末“外部复审者”）。任务书一律用同一文件第 2 节的模板（首轮用首轮任务书，修后用修后复核任务书）原样填写，不自拟；差异先存成文件，路径写进任务书；报告由主对话原样落盘，不改写，核对后再登记。不通过时按同一文件的“一轮与修复循环”处理；登记用 `node scripts/engineering/gate/review.mjs`，两种流程的登记与延期命令见 [套件流程文档](../engineering-kit/references/process.md) 第 4 节“套件闸门的两种流程”一段 | 登记成功的输出；PR 里的复审摘要和后续清单 |
+| 独立复审 | 代码复审和一致性审的结论绑定 PR 最终提交 | 复审者独立于作者，模型按 R9 分档；首轮查全、收齐再改、修后只复核修复；高、中级问题合并前修完，低级和提示级的默认记进后续清单（已登记、不扩大风险的可以同批改，见 [review.md](references/review.md) 第 8 节） | 首轮按 [review.md](references/review.md) 第 1、2 节对同一提交并行派发代码复审 `product-dev:code-reviewer`（[定义](../../agents/code-reviewer.md)，中高风险带上同一文件的安全清单）和一致性审，也可以改用外部复审者（其他厂商的模型，接入与调用见同一文件第 1 节末“外部复审者”）。任务书一律用同一文件第 2 节的模板（首轮用首轮任务书，修后用修后复核任务书）原样填写，不自拟；差异先存成文件，路径写进任务书；复审数据（第 7 节的 JSON）由主对话原样落盘，不改写，核对后再登记。不通过时按同一文件的“一轮与修复循环”处理；登记用 `node scripts/engineering/gate/review.mjs`，两种流程的登记与延期命令见 [套件流程文档](../engineering-kit/references/process.md) 第 4 节“套件闸门的两种流程”一段 | 登记成功的输出；PR 里的复审摘要和后续清单 |
 | 合并与收工 | 经合并入口合并，删除分支和工作树，清理临时文件 | 汇报“完成”前确认已清理（R8、R10）；经验提炼分清用户提出和 agent 总结 | `pr` 流程用 `node scripts/engineering/gate/merge.mjs <PR>`，`pre-push` 流程走项目约定的入口；收工步骤见 [套件流程文档](../engineering-kit/references/process.md) 第 7 节；之后跑 `node scripts/engineering/gate/hygiene.mjs` | 合并提交；分支与工作树已删；巡检无新增问题 |
 | 验收与发布 | 预发验证、用户验收、灰度上线各留证据 | 实现、CI、验收、上线四种状态不能互相替代（R5）；生产发布和回滚单独授权（R2） | 按 [套件流程文档](../engineering-kit/references/process.md) 第 5 节；验收证据用 `docs/_templates/acceptance-pack.md`（[模板原件](../engineering-kit/kit/templates/docs/templates/acceptance-pack.md)） | `docs/acceptance/`、`docs/release/` 下的记录 |
 
@@ -143,7 +143,7 @@ description: 产品开发的唯一入口。用户提出产品或开发相关的�
 | 小改动 | 开工检查 → 逐片开发（测试先行）→ 推送前自查 → 机械闸门 → PR 与 CI → 独立复审 → 合并与收工 | 不做探索、契约、方案对比、任务拆解和测试设计；只做代码复审，一致性审可延期；两者的做法见表下第一条 |
 | 只改文档 | 开工检查 → 直接改 → 机械闸门 → PR 与 CI → 合并与收工 | 不做独立复审（R7）；一致性审并入巡检，由用户或已授权的定时任务触发，见 [套件流程文档](../engineering-kit/references/process.md) 第 8 节 |
 
-- 代码复审照第 4 节“独立复审”一行的要求派发和登记（review.md 第 2 节的任务书、差异存成文件、报告原样落盘后登记）；一致性审延期也要登记：`node scripts/engineering/gate/review.mjs defer --kind consistency --reason "<理由>"`（`pr` 流程加 `--pr <编号>`）。
+- 代码复审照第 4 节“独立复审”一行的要求派发和登记（review.md 第 2 节的任务书、差异存成文件、复审数据原样落盘后登记）；一致性审延期也要登记：`node scripts/engineering/gate/review.mjs defer --kind consistency --reason "<理由>"`（`pr` 流程加 `--pr <编号>`）。
 - 次序同第 4 节：`pre-push` 流程下，小新增和小改动的独立复审排在闸门之后、推送之前。
 - 做的过程中发现超出了判断条件（要改接口、动第二个模块、动了 `reviewIgnore` 之外的文件），立刻升档，告诉用户并补上缺的步骤。
 - 规则、技能正文、提示词、可执行原型这类会改变行为的文件不算“只改文档”，按它改变的范围定档。套件 0.7.0 起新装项目的默认 `reviewIgnore` 只含纯说明文件，闸门和合并入口会要求审查它们；更早安装的项目配置不随升级改变，还留着宽口径（`**/*.md`、`docs/**`）时，机制上不会要求审查它们，复审要按本条主动做，并按同步时的升级提示收窄（办法见 [process.md](references/process.md) 的“配置闸门”）。
@@ -170,7 +170,7 @@ description: 产品开发的唯一入口。用户提出产品或开发相关的�
 - 没有浏览器工具时，“实际走查”不能算完成：启动原型后请用户走查，或标明未走查。没有图表渲染环境时，架构图标明未渲染。
 - 浏览器工具打不开或操作不了本机文件（`file://` 地址）时，以原型目录为根起一个只监听 127.0.0.1 的临时静态服务（脚本放在项目之外），用它的地址走查；走查完关掉服务并在汇报里写明，关不掉的把端口和进程号告诉用户。用脚本模拟页面逻辑得到的结果只算线索，不算实际走查。
 - 宿主的权限机制拒绝了某个动作（删除文件、结束进程）时，不换一种办法绕过去：说明哪一步没做成、现场留下了什么，交用户处理。
-- 可选加强（只有 Claude Code 有，不能代替上面任何一步的工具）：`/simplify` 会直接改代码，只在逐片开发里测试转绿之后用，用完重跑测试，不算自查也不算复审；`/code-review` 和 `/security-review` 可以在独立复审之外多跑一遍，它们的输出要登记时须按 [review.md](references/review.md) 的报告格式整理，并由独立上下文产生。
+- 可选加强（只有 Claude Code 有，不能代替上面任何一步的工具）：`/simplify` 会直接改代码，只在逐片开发里测试转绿之后用，用完重跑测试，不算自查也不算复审；`/code-review` 和 `/security-review` 可以在独立复审之外多跑一遍，它们的输出要登记时须由独立上下文按 [review.md](references/review.md) 第 7 节交回复审数据，主对话不代为整理。
 - 不调用 feature-dev 自带的流程命令，只用它的三个子代理；agent-skills 和 ponytail 只取方法，不采用它们的文件路径、git 流程和回复格式。
 - impeccable 的接入：产品权威是 `docs/01-需求/PRD.md`。impeccable 的 `init` 会在项目根目录写 `PRODUCT.md`，它只作 impeccable 的衍生摘要：开头写明以 PRD 为准并链接过去，两者不一致时改 `PRODUCT.md`，产品决定仍经需求角色改 PRD。`PRODUCT.md`、`DESIGN.md`（impeccable 记录的视觉设计系统，原型说明引用它）和 `.impeccable/`（impeccable 的配置与工作目录）都留在项目根目录，不迁进 `docs/`，因为 impeccable 按根目录找它们；套件 0.7.0 起的配置模板已把 `.impeccable` 列进 `layout.topLevelAllowed`，更早安装的项目按同步时的升级提示手动加。子代理 `product-dev:impeccable-finish-reviewer` 的评审只作设计走查的输入，不能代替第 4 节登记的独立复审，也不用它的名字登记。
 

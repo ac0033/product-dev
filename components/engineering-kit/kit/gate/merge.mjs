@@ -12,7 +12,8 @@
 // 任一项不满足就逐条列出原因、以 1 退出、不合并；gh 不存在或调用失败同样报错退出。
 // 用法：node scripts/engineering/gate/merge.mjs <PR> [--method squash|merge|rebase]
 import fs from 'node:fs';
-import { assertPolicy, defaultGh, diffNames, git, isIgnoredDoc, isMain, loadConfig, prNumber, prRecordFile, readPr, repoRoot, resolveBase, runGh } from './lib.mjs';
+import { readLog } from './review.mjs';
+import { assertPolicy, defaultGh, diffNames, forkPoint, git, isIgnoredDoc, isMain, loadConfig, prLogFile, prNumber, prRecordFile, readPr, repoRoot, resolveBase, runGh, withPrLock } from './lib.mjs';
 
 /** 允许的合并方式（对应 gh pr merge 的 --squash、--merge、--rebase）。 */
 const METHODS = ['squash', 'merge', 'rebase'];
@@ -54,9 +55,9 @@ function docsOnly(root, config, head) {
   } catch (e) {
     return { docs: false, why: `基准分支解析不了（${e.message}），判断不了是否只改文档${fetchHint}` };
   }
-  const mb = git(root, ['merge-base', base, head]);
-  if (!mb.ok) return { docs: false, why: `本地算不出基准分支 ${base} 与最终提交的共同提交，判断不了是否只改文档${fetchHint}` };
-  const r = diffNames(root, [mb.out.trim(), head]);
+  const mb = forkPoint(root, base, head);
+  if (!mb) return { docs: false, why: `本地算不出基准分支 ${base} 与最终提交的共同提交，判断不了是否只改文档${fetchHint}` };
+  const r = diffNames(root, [mb, head]);
   return { docs: r.ok && r.files.length > 0 && r.files.every((f) => isIgnoredDoc(f, config.reviewIgnore)), why: null };
 }
 
@@ -83,7 +84,13 @@ export function mergePr({ root, pr, method = 'squash', gh = defaultGh }) {
   }
   if (!METHODS.includes(method)) throw new Error(`合并方式只能是 ${METHODS.join('、')}（当前 ${method}）`);
   const no = prNumber(pr);
+  return withPrLock(root, no, () => mergeLocked(root, no, gh, config, method));
+}
+
+/** 锁内读取并核对同一 PR 的最新登记，合并仍绑定核对过的提交。 */
+function mergeLocked(root, no, gh, config, method) {
   const st = readPr(root, no, gh, config.requiredChecks);
+  const history = readLog(prLogFile(root, no)); // 坏行按行号报错，不当作没有历史
   const short = (sha) => String(sha).slice(0, 12);
   const problems = [];
   const notes = [];
@@ -93,9 +100,13 @@ export function mergePr({ root, pr, method = 'squash', gh = defaultGh }) {
   if (scope.why) notes.push(scope.why);
   for (const r of scope.docs ? [] : REQUIRED) {
     const rec = readPrRecord(root, no, r.kind);
+    const last = history.findLast((e) => e.kind === r.kind);
     if (!rec) problems.push(`缺少${r.name}记录：先运行 review.mjs … --pr ${no} --kind ${r.kind}`);
+    else if (!last || last.at !== rec.at || last.verdict !== rec.verdict || last.headSha !== rec.headSha) problems.push(`${r.name}的最新记录与登记历史的最后一条不一致（可能是上次登记写到一半失败），对最终提交重新登记后再合并`);
     else if (!r.accept.includes(rec.verdict)) problems.push(`${r.name}结论是 ${rec.verdict}，不是 ${r.accept.join(' 或 ')}`);
-    else if (rec.headSha !== st.head && !(r.docsDelta && onlyDocsBetween(root, rec.headSha, st.head, config.reviewIgnore))) {
+    else if (rec.verdict !== 'defer' && rec.coverage !== 'full') {
+      problems.push(`${r.name}记录只覆盖部分差异（被审范围 ${short(rec.reviewedBase)}..${short(rec.headSha)}），需对完整范围重新复审并登记`);
+    } else if (rec.headSha !== st.head && !(r.docsDelta && onlyDocsBetween(root, rec.headSha, st.head, config.reviewIgnore))) {
       problems.push(`${r.name}记录已过期：记录针对提交 ${short(rec.headSha)}，PR 当前最终提交是 ${short(st.head)}，需对新提交重新审查并登记`);
     } else {
       if (rec.headSha !== st.head) notes.push(`沿用${r.name}记录：记录针对提交 ${short(rec.headSha)}，到最终提交 ${short(st.head)} 之间只改了文档`);

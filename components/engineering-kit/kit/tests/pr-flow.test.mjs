@@ -15,14 +15,42 @@ import { runSmoke } from '../gate/smoke.mjs';
 import { verify } from '../gate/verify.mjs';
 import { classify } from '../hooks/pre-bash.mjs';
 import { BUNDLE_ROOT, extractTag, syncKit } from '../sync.mjs';
-import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, tmpRepo, trackTmp, write } from './helpers.mjs';
+import { commitAll, failingData, featureRepo, git, read, reportFile, reviewData, reviewDataFile, SRC_HEADER, tmpRepo, trackTmp, write } from './helpers.mjs';
 
-/** 一个合格的复审报告：字数够、含“结论”、结论为通过。 */
-const GOOD_REPORT = `范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n已逐条核对 PR 的最终提交，dedup 函数与测试用例的边界条件（空数组、重复项）均有覆盖。\n处置：无需处理。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n结论\n通过\n`;
+/** 合格的复审数据（ek-review/1）的两节文字：合计超过测试配置的最少字数（60 字）。 */
+const SECTIONS = { 范围: '读了 dedup 函数、调用方和对应测试，确认改动范围与说明一致。', 作者的验证: '核对了作者给出的测试输出，边界条件（空数组、重复项）均有覆盖，没有重跑。' };
 
-/** PR 的两个最终提交（复审时的、复审后又推送的）。 */
-const HEAD = 'a'.repeat(40);
+/** 通过的数据；不通过的数据带一条合格的中级发现。被审提交与基准由调用方给（pr 流程必填）。 */
+const passData = (over = {}) => reviewData({ sections: SECTIONS, ...over });
+const failData = (over = {}) => failingData({ sections: SECTIONS, ...over });
+
+/**
+ * PR 的最终提交：每个测试仓库建好后记下（newPrRepo）。被审提交必须是本地真实存在的提交，
+ * 数据的 reviewedCommit 要等于假 gh 返回的 headRefOid，所以假 gh 与数据都用它；NEW_HEAD 是“复审后 PR 又推送”的假提交号。
+ */
+let HEAD = null;
 const NEW_HEAD = 'b'.repeat(40);
+
+/** 与主干的分叉点：完整覆盖时数据的被审基准。 */
+const forkOf = (root, head = HEAD) => (head ? git(root, ['merge-base', 'main', head]).trim() : null);
+
+/** 当前 PR 的完整覆盖数据（被审提交 = PR 最终提交，基准 = 与主干的分叉点）。 */
+const dataFor = (root, kind, verdict, over = {}) => (verdict === 'fail' || verdict === 'accept' ? failData : passData)({ kind, reviewedCommit: HEAD, reviewedBase: forkOf(root), ...over });
+
+/** 在功能分支上提交一份代码改动，返回提交号。 */
+function codeCommit(root, tag) {
+  write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort(); // ${tag}\n}\n`);
+  write(root, 'test/dedup.test.ts', `import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, '${tag}');\n`);
+  commitAll(root, tag);
+  return git(root, ['rev-parse', 'HEAD']).trim();
+}
+
+/** pr 流程的功能分支仓库：默认已提交一份代码改动，它就是 PR 的最终提交（记进 HEAD）；commit: false 时功能分支上没有提交。 */
+function newPrRepo(config = {}, { commit = true } = {}) {
+  const root = featureRepo({ reviewFlow: 'pr', ...config });
+  HEAD = commit ? codeCommit(root, 'pr-head') : git(root, ['rev-parse', 'HEAD']).trim();
+  return root;
+}
 
 /** 全部通过的检查：检查运行成功、提交状态成功（未配置必需检查名时每一项都算必需，须为成功）。 */
 const GREEN = [
@@ -56,14 +84,15 @@ function fakeGh(view) {
 /** 合并命令是否被调用过。 */
 const merged = (gh) => gh.calls.some((a) => a[1] === 'merge');
 
-/** 配置为 pr 流程的功能分支仓库。 */
-const prRepo = () => featureRepo({ reviewFlow: 'pr' });
+/** 配置为 pr 流程的功能分支仓库（已提交一份代码改动作为 PR 的最终提交）；prRepoEmpty 的功能分支上没有提交。 */
+const prRepo = () => newPrRepo();
+const prRepoEmpty = () => newPrRepo({}, { commit: false });
 
-/** 登记一项审查（pass/fail 带合格报告，defer 带理由）。 */
+/** 登记一项审查（pass/fail 带合格的复审数据，defer 带理由）。数据的被审提交是 PR 最终提交，基准是与主干的分叉点。 */
 function register(root, gh, kind, verdict = 'pass', extra = {}) {
   const base = { root, verdict, pr: '7', kind, gh, ...extra };
   if (verdict === 'defer') return recordReview({ reason: '低风险小改动，并入本周巡检', ...base });
-  return recordReview({ reviewer: 'feature-dev:code-reviewer', reportPath: reportFile(GOOD_REPORT), summary: 's', ...base });
+  return recordReview({ reviewer: 'feature-dev:code-reviewer', reportPath: reviewDataFile(dataFor(root, kind, verdict)), summary: 's', ...base });
 }
 
 // 验收 1 由现有 pre-push 测试覆盖；这里补“pre-push 项目不受新参数影响”。
@@ -88,7 +117,7 @@ test('配置：reviewFlow 默认 pre-push，只认 pre-push 与 pr；扁平回�
 });
 
 test('验收 2：pr 流程推送核对——有通过的测试记录、没有复审记录即通过', () => {
-  const root = prRepo();
+  const root = prRepoEmpty();
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
   write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   assert.equal(runGate({ root }).ok, true);
@@ -135,7 +164,7 @@ test('必需检查：未配置 requiredChecks 时每一项都算必需，跳过�
 });
 
 test('必需检查：列出 requiredChecks 后，必需检查须成功，跳过或中性只放行非必需检查，合并输出分开报告', () => {
-  const root = featureRepo({ reviewFlow: 'pr', requiredChecks: ['test', 'lint'] });
+  const root = newPrRepo({ requiredChecks: ['test', 'lint'] });
   const view = prView({ checks: [...GREEN, ...SOFT, { __typename: 'CheckRun', name: 'docs', status: 'COMPLETED', conclusion: 'SUCCESS' }] });
   assert.equal(register(root, fakeGh(view), 'code').ok, true);
   assert.equal(register(root, fakeGh(view), 'consistency').ok, true);
@@ -157,7 +186,7 @@ test('必需检查：列出 requiredChecks 后，必需检查须成功，跳过�
     // 找不到的必需检查：提示里列出本次 PR 上实际看到的检查名，便于改正配置
     [[GREEN[0], ...SOFT], /必需检查没有出现在 PR 上：lint（.*job 名.*本次 PR 上的检查名：test、e2e、info）/],
   ]) {
-    const r = register(featureRepo({ reviewFlow: 'pr', requiredChecks: ['test', 'lint'] }), fakeGh(prView({ checks })), 'code');
+    const r = register(newPrRepo({ requiredChecks: ['test', 'lint'] }), fakeGh(prView({ checks })), 'code');
     assert.equal(r.ok, false, JSON.stringify(checks));
     assert.match(r.message, why);
   }
@@ -166,7 +195,7 @@ test('必需检查：列出 requiredChecks 后，必需检查须成功，跳过�
 test('必需检查：同一工作流里同名的检查合在一起判定（同一个 job 跑了两份）：一份成功、其余跳过算成功，有失败或运行中仍拦；不同工作流的同名检查各算一组', () => {
   const run = (conclusion) => ({ __typename: 'CheckRun', name: 'test', status: conclusion ? 'COMPLETED' : 'IN_PROGRESS', conclusion });
   const lint = GREEN[1];
-  const repo = () => featureRepo({ reviewFlow: 'pr', requiredChecks: ['test', 'lint'] });
+  const repo = () => newPrRepo({ requiredChecks: ['test', 'lint'] });
   assert.equal(register(repo(), fakeGh(prView({ checks: [run('SUCCESS'), run('SKIPPED'), lint] })), 'code').ok, true, '成功加跳过：算成功');
   for (const [checks, why] of [
     [[run('SUCCESS'), run('FAILURE'), lint], /CI 检查未通过：test（FAILURE）/],
@@ -253,8 +282,8 @@ test('登记：报告与复审者检查对 pr 流程照常生效；defer 只限�
   const root = prRepo();
   const gh = fakeGh(prView());
   assert.match(register(root, gh, 'code', 'pass', { reviewer: 'me-myself' }).message, /复审者/);
-  assert.match(register(root, gh, 'code', 'pass', { reportPath: reportFile('结论\n通过\n') }).message, /不少于/);
-  assert.match(register(root, gh, 'code', 'pass', { reportPath: reportFile(GOOD_REPORT.replace('通过\n', '不通过\n')) }).message, /不通过/);
+  assert.match(register(root, gh, 'code', 'pass', { reportPath: reviewDataFile(dataFor(root, 'code', 'pass', { sections: reviewData().sections })) }).message, /不少于/);
+  assert.match(register(root, gh, 'code', 'pass', { reportPath: reviewDataFile(dataFor(root, 'code', 'fail')) }).message, /不通过|fail/);
   assert.match(register(root, gh, 'code', 'defer').message, /只有一致性审可以延期/);
   assert.match(register(root, gh, 'consistency', 'defer', { reason: ' ' }).message, /--reason/);
   assert.match(register(root, gh, 'tests').message, /--kind/);
@@ -314,7 +343,7 @@ test('验收 7：缺少任一审查记录，或其中一份结论为 fail 时拒
   assert.ok(res.problems.some((p) => p.includes('缺少一致性审记录')), res.problems.join('\n'));
 
   register(root, gh, 'consistency');
-  const f = register(root, gh, 'code', 'fail', { reportPath: reportFile(GOOD_REPORT.replace('通过\n', '不通过\n')) });
+  const f = register(root, gh, 'code', 'fail');
   assert.equal(f.ok, true, f.message);
   res = mergePr({ root, pr: '7', gh });
   assert.equal(res.ok, false);
@@ -404,7 +433,7 @@ test('验收 10：pr 流程项目同步后有 merge.mjs、冒烟通过；回滚�
 
 test('只改文档的 PR：没有任何审查记录、CI 全过时合并；CI 未过时拒绝', () => {
   // 0.6.0 起“只改文档”按本地差异判定：PR 的最终提交要在临时仓库里真的存在
-  const root = prRepo();
+  const root = prRepoEmpty();
   const docs = ['README.md', 'docs/04-开发/note.md'];
   for (const f of docs) write(root, f, '说明\n');
   commitAll(root, 'docs');
@@ -423,7 +452,7 @@ test('只改文档的 PR：没有任何审查记录、CI 全过时合并；CI �
 
 test('文档与代码混合的 PR 没有审查记录时拒绝合并', () => {
   // 0.6.0 起按本地差异判定，混合改动在临时仓库里真的提交出来（否则最终提交不在本地，结论不说明问题）
-  const root = prRepo();
+  const root = prRepoEmpty();
   write(root, 'README.md', '# 说明\n');
   write(root, 'src/dedup.ts', `${SRC_HEADER}export const x = 1;\n`);
   commitAll(root, 'mixed');
@@ -437,16 +466,98 @@ test('文档与代码混合的 PR 没有审查记录时拒绝合并', () => {
 test('本地没有 PR 最终提交、或本地差异为空时不按只改文档处理（gh 的文件列表不作依据）', () => {
   // 0.6.0 前这里测的是 gh 文件列表为空或达到 100 个；现在 gh 的列表不再作为“只改文档”的依据，改测两种算不出或为空的本地情况
   const docs = Array.from({ length: 3 }, (_, i) => `docs/n${i}.md`);
-  const gh = fakeGh(prView({ files: docs })); // 最终提交 a…a 不在本地
+  const gh = fakeGh(prView({ files: docs, head: 'a'.repeat(40) })); // 最终提交 a…a 不在本地
   const res = mergePr({ root: prRepo(), pr: '7', gh });
   assert.equal(res.ok, false);
   assert.ok(res.problems.some((p) => p.includes('缺少代码复审记录')), res.problems.join('\n'));
   assert.equal(merged(gh), false);
 
-  const root = prRepo(); // 功能分支上没有任何提交：最终提交就是基准提交，差异为空
+  const root = prRepoEmpty(); // 功能分支上没有任何提交：最终提交就是基准提交，差异为空
   const empty = fakeGh(prView({ files: docs, head: git(root, ['rev-parse', 'HEAD']).trim() }));
   const r2 = mergePr({ root, pr: '7', gh: empty });
   assert.equal(r2.ok, false);
   assert.ok(r2.problems.some((p) => p.includes('缺少代码复审记录')), r2.problems.join('\n'));
   assert.equal(merged(empty), false);
+});
+
+// ---------- 复审数据绑定被审提交与覆盖范围（H3、H7） ----------
+
+test('H3 手工登记绑定被审提交：数据的 reviewedCommit 与登记时 PR 的最终提交不同 → 拒绝，写明“审的是 A，PR 现在是 B”，不写记录', () => {
+  const root = prRepo();
+  const earlier = git(root, ['rev-parse', 'HEAD~1']).trim();
+  const gh = fakeGh(prView());
+  const r = register(root, gh, 'code', 'pass', { reportPath: reviewDataFile(dataFor(root, 'code', 'pass', { reviewedCommit: earlier, reviewedBase: forkOf(root, earlier) })) });
+  assert.equal(r.ok, false, r.message);
+  assert.match(r.message, new RegExp(`${earlier.slice(0, 12)}.*${HEAD.slice(0, 12)}`));
+  assert.equal(fs.existsSync(path.join(root, '.git', 'engineering-gate', 'pr', '7', 'code.json')), false, '拒绝时不写记录');
+  assert.equal(fs.existsSync(path.join(root, '.git', 'engineering-gate', 'pr', '7', 'log.jsonl')), false);
+  assert.equal(register(root, gh, 'code').ok, true, '被审提交就是 PR 最终提交时登记成功');
+});
+
+test('H7 部分差异不能放行：基准收窄到 PR 中间的提交或等于被审提交时，pass、accept 拒绝并写明缺哪段覆盖，fail 可登记且记为部分覆盖', () => {
+  const root = prRepo();
+  const first = HEAD;
+  const second = codeCommit(root, 'second');
+  HEAD = second;
+  const gh = fakeGh(prView());
+  const partial = (kind, verdict, base) => register(root, gh, kind, verdict, { reportPath: reviewDataFile(dataFor(root, kind, verdict, { reviewedBase: base })), userDecision: verdict === 'accept' ? '用户接受（测试）' : undefined });
+  for (const base of [first, second]) {
+    for (const verdict of ['pass', 'accept']) {
+      const r = partial('code', verdict, base);
+      assert.equal(r.ok, false, `${verdict} base=${base.slice(0, 7)}：${r.message}`);
+      assert.match(r.message, /覆盖/);
+    }
+  }
+  assert.equal(fs.existsSync(path.join(root, '.git', 'engineering-gate', 'pr', '7', 'code.json')), false, '拒绝时不写记录');
+  const f = partial('code', 'fail', first);
+  assert.equal(f.ok, true, f.message);
+  assert.equal(f.record.coverage, 'partial');
+  const full = register(root, gh, 'consistency', 'pass');
+  assert.equal(full.ok, true, full.message);
+  assert.equal(full.record.coverage, 'full');
+});
+
+test('H7 修后复核接上前一次的完整覆盖：基准是同种审查此前完整覆盖的被审提交时算完整覆盖；换了审查种类则不算', () => {
+  const root = prRepo();
+  const first = HEAD;
+  assert.equal(register(root, fakeGh(prView()), 'code').ok, true);
+  const second = codeCommit(root, 'second');
+  HEAD = second;
+  const gh = fakeGh(prView());
+  const chained = register(root, gh, 'code', 'pass', { reportPath: reviewDataFile(dataFor(root, 'code', 'pass', { reviewedBase: first })) });
+  assert.equal(chained.ok, true, chained.message);
+  assert.equal(chained.record.coverage, 'full');
+  const other = register(root, gh, 'consistency', 'pass', { reportPath: reviewDataFile(dataFor(root, 'consistency', 'pass', { reviewedBase: first })) });
+  assert.equal(other.ok, false, '一致性审没有前一次完整覆盖可接，不算完整覆盖');
+  assert.match(other.message, /覆盖/);
+});
+
+test('H7 合并入口只认完整覆盖：pass、accept 记录是部分覆盖或没有 coverage 字段（旧记录）时拒绝；defer 不要求', () => {
+  const root = prRepo();
+  const gh = fakeGh(prView());
+  assert.equal(register(root, gh, 'code').ok, true);
+  assert.equal(register(root, gh, 'consistency', 'defer').ok, true);
+  const file = path.join(root, '.git', 'engineering-gate', 'pr', '7', 'code.json');
+  const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(rec.coverage, 'full');
+  assert.equal(mergePr({ root, pr: '7', gh }).ok, true, '完整覆盖的 pass 加 defer 可合并');
+  const partial = { ...rec, coverage: 'partial' };
+  fs.writeFileSync(file, JSON.stringify(partial));
+  const res = mergePr({ root, pr: '7', gh });
+  assert.equal(res.ok, false);
+  assert.ok(res.problems.some((p) => p.includes('只覆盖部分差异')), res.problems.join('\n'));
+  delete partial.coverage;
+  fs.writeFileSync(file, JSON.stringify(partial));
+  const old = mergePr({ root, pr: '7', gh });
+  assert.equal(old.ok, false, '没有 coverage 字段的旧记录同样拒绝');
+  assert.ok(old.problems.some((p) => p.includes('只覆盖部分差异')), old.problems.join('\n'));
+});
+
+test('S1 Markdown 报告不再能登记（pr 流程）：传 .md 文本被拒，提示须为 ek-review/1 JSON，不写记录', () => {
+  const root = prRepo();
+  const md = '范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n结论\n通过\n';
+  const r = register(root, fakeGh(prView()), 'code', 'pass', { reportPath: reportFile(md) });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /JSON/);
+  assert.equal(fs.existsSync(path.join(root, '.git', 'engineering-gate', 'pr', '7', 'code.json')), false);
 });

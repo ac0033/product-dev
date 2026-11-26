@@ -121,3 +121,49 @@ export function featureRepo(config = {}) {
   git(root, ['checkout', '-q', '-b', 'feat']);
   return root;
 }
+
+/** 各级别发现编号的前缀（与 gate/review-data.mjs 的 SEVERITY_PREFIX 同一口径）。 */
+const PREFIX = { high: 'H', medium: 'M', low: 'L', info: 'I' };
+
+/** 一条合格的发现（默认中级，七栏都有内容）；overrides 覆盖字段，改了级别而没给 id 时编号随级别变。 */
+export function finding(overrides = {}) {
+  const severity = overrides.severity ?? 'medium';
+  return {
+    id: `${PREFIX[severity] ?? 'M'}1`,
+    severity,
+    location: 'src/dedup.ts:12',
+    problem: '空数组时返回 undefined。',
+    trigger: '传入 [] 时。',
+    reason: '调用方直接取长度会抛错，主路径上就会遇到。',
+    fix: '空数组时返回 []，并补一条空数组的测试。',
+    ...overrides,
+  };
+}
+
+/** 一份合格的复审数据（ek-review/1）：默认是低风险、通过的代码复审，没有发现；overrides 浅合并到顶层。 */
+export function reviewData(overrides = {}) {
+  return {
+    format: 'ek-review/1',
+    kind: 'code',
+    verdict: 'pass',
+    risk: 'low',
+    reviewedCommit: null,
+    reviewedBase: null,
+    sections: { 范围: '读了改动的函数、调用方和对应测试。', 作者的验证: '核对了作者给出的测试输出，没有重跑。' },
+    findings: [],
+    dispositions: [],
+    ...overrides,
+  };
+}
+
+/** 一份不通过的复审数据：一条合格的中级发现。 */
+export function failingData(overrides = {}) {
+  return reviewData({ verdict: 'fail', findings: [finding()], ...overrides });
+}
+
+/** 把复审数据写成仓库之外的临时 JSON 文件，返回路径；传字符串时原样写入（用来造不合法的文件）。 */
+export function reviewDataFile(data = reviewData()) {
+  const p = path.join(tmpDir('ekit-review-'), 'review.json');
+  fs.writeFileSync(p, typeof data === 'string' ? data : JSON.stringify(data, null, 2));
+  return p;
+}

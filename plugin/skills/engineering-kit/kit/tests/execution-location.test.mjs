@@ -11,7 +11,7 @@ import { POLICY_KEYS, loadConfig, readRecord } from '../gate/lib.mjs';
 import { mergePr } from '../gate/merge.mjs';
 import { recordReview } from '../gate/review.mjs';
 import { verify } from '../gate/verify.mjs';
-import { commitAll, featureRepo, git, reportFile, SRC_HEADER, TEST_CONFIG, tmpRepo, write } from './helpers.mjs';
+import { commitAll, featureRepo, git, reviewData, reviewDataFile, SRC_HEADER, TEST_CONFIG, tmpRepo, write } from './helpers.mjs';
 
 /** ci 模式的合法配置片段。 */
 const CI = { reviewFlow: 'pr', fullTests: 'ci', ciRunner: 'github-hosted', requiredChecks: ['test'] };
@@ -207,7 +207,10 @@ test('合并入口：ci 模式本机没有测试记录，最终提交上缺少�
   assert.equal(runGate({ root }).ok, true);
   assert.equal(readRecord(root, 'tests.json'), null, 'ci 模式本机不写测试记录');
   const head = git(root, ['rev-parse', 'HEAD']).trim();
-  const report = reportFile('范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n已逐条核对 PR 的最终提交，dedup 函数与测试用例的边界条件（空数组、重复项）均有覆盖。\n处置：无需处理。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n结论\n通过\n');
+  // 两种审查各一份 ek-review/1 数据：被审提交是 PR 的最终提交，被审基准是与主干的分叉点（完整覆盖）
+  const fork = git(root, ['merge-base', 'main', head]).trim();
+  const sections = { 范围: '读了 dedup 函数、调用方和对应测试，确认改动范围与说明一致。', 作者的验证: '核对了作者给出的测试输出，边界条件（空数组、重复项）均有覆盖，没有重跑。' };
+  const report = (kind) => reviewDataFile(reviewData({ kind, sections, reviewedCommit: head, reviewedBase: fork }));
   const view = (checks) => ({ state: 'OPEN', headRefOid: head, statusCheckRollup: checks, files: [{ path: 'src/dedup.ts', additions: 1, deletions: 0 }, { path: 'test/dedup.test.ts', additions: 1, deletions: 0 }] });
   const gh = (v) => {
     const calls = [];
@@ -221,7 +224,7 @@ test('合并入口：ci 模式本机没有测试记录，最终提交上缺少�
   const full = { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' };
   const lint = { __typename: 'CheckRun', name: 'lint', status: 'COMPLETED', conclusion: 'SUCCESS' };
   for (const kind of ['code', 'consistency']) {
-    const r = recordReview({ root, verdict: 'pass', pr: '7', kind, gh: gh(view([full, lint])), reviewer: 'feature-dev:code-reviewer', reportPath: report, summary: 's' });
+    const r = recordReview({ root, verdict: 'pass', pr: '7', kind, gh: gh(view([full, lint])), reviewer: 'feature-dev:code-reviewer', reportPath: report(kind), summary: 's' });
     assert.equal(r.ok, true, r.message);
   }
   for (const [checks, why] of [

@@ -8,15 +8,21 @@ import { checkComments } from '../gate/check-comments.mjs';
 import { checkTestFirst, referencesFile } from '../gate/check-test-first.mjs';
 import { acquireLock, changedFiles, loadConfig, readRecord, recordDir, scopeFiles, treeHash, writeRecord } from '../gate/lib.mjs';
 import { runGate } from '../gate/gate.mjs';
-import { branchDirName, markFences, missingSections, recordReview, reportVerdict } from '../gate/review.mjs';
+import { branchDirName, recordReview } from '../gate/review.mjs';
 import { newFileProblems, verify } from '../gate/verify.mjs';
-import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, TEST_CONFIG, tmpRepo, trackTmp, write } from './helpers.mjs';
+import { commitAll, failingData, featureRepo, git, read, reportFile, reviewData, reviewDataFile, SRC_HEADER, TEST_CONFIG, tmpRepo, trackTmp, write } from './helpers.mjs';
 
 /** 测试直接使用测试配置对象（不经过 loadConfig 读文件）。 */
 const cfg = { ...TEST_CONFIG };
 
-/** 一个合格的复审报告：字数够、含“结论”、结论为通过。 */
-const GOOD_REPORT = `范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n已逐条核对改动的 dedup 函数与测试用例，边界条件（空数组、重复项）均有覆盖。\n处置：无需处理。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n结论\n通过\n`;
+/** 合格的复审数据（ek-review/1）的两节文字：合计超过测试配置的最少字数（60 字）。 */
+const SECTIONS = { 范围: '读了 dedup 函数、调用方和对应测试，确认改动范围与说明一致。', 作者的验证: '核对了作者给出的测试输出，边界条件（空数组、重复项）均有覆盖，没有重跑。' };
+
+/** 合格的通过数据：低风险、没有发现。 */
+const goodData = () => reviewData({ sections: SECTIONS });
+
+/** 不通过的数据：一条合格的中级发现。 */
+const failData = () => failingData({ sections: SECTIONS });
 
 test('测试先行：源文件改动时，引用它的测试也必须在本次改动里', () => {
   const root = featureRepo();
@@ -120,7 +126,7 @@ test('复审记录：报告太短 → 拒绝', () => {
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
   write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   assert.equal(runGate({ root }).ok, true);
-  const rp = reportFile('结论\n通过\n');
+  const rp = reviewDataFile(reviewData());
   const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: rp, summary: 's' });
   assert.equal(r.ok, false);
   assert.match(r.message, /不少于/);
@@ -131,7 +137,7 @@ test('复审记录：复审者不在允许名单 → 拒绝', () => {
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
   write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   runGate({ root });
-  const rp = reportFile(GOOD_REPORT);
+  const rp = reviewDataFile(goodData());
   const r = recordReview({ root, verdict: 'pass', reviewer: 'me-myself', reportPath: rp, summary: 's' });
   assert.equal(r.ok, false);
   assert.match(r.message, /复审者/);
@@ -140,22 +146,23 @@ test('复审记录：复审者不在允许名单 → 拒绝', () => {
   assert.match(r.message, /general-purpose/);
 });
 
-test('复审记录：报告结论写“不通过”却记 pass → 拒绝', () => {
+test('S4 复审记录：数据结论是 fail（有中级发现）却记 pass → 拒绝，不写记录', () => {
   const root = featureRepo();
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
   write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   runGate({ root });
-  const rp = reportFile(GOOD_REPORT.replace('通过\n', '不通过\n'));
+  const rp = reviewDataFile(failData());
   const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: rp, summary: 's' });
   assert.equal(r.ok, false);
-  assert.match(r.message, /不通过/);
+  assert.match(r.message, /不通过|fail/);
+  assert.equal(readRecord(root, 'review.json'), null);
 });
 
 test('复审记录：没有通过的测试记录时拒绝（先跑闸门）', () => {
   const root = featureRepo();
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
   write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
-  const rp = reportFile(GOOD_REPORT);
+  const rp = reviewDataFile(goodData());
   const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: rp, summary: 's' });
   assert.equal(r.ok, false);
   assert.match(r.message, /先运行闸门/);
@@ -166,7 +173,7 @@ test('推送前核对：完整流程通过；改源文件后作废；只改文�
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
   write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
   assert.equal(runGate({ root }).ok, true);
-  const rp = reportFile(GOOD_REPORT);
+  const rp = reviewDataFile(goodData());
   assert.equal(recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: rp, summary: 's' }).ok, true);
   commitAll(root, 'feat: dedup sorted');
   assert.equal(verify({ root }).ok, true, JSON.stringify(verify({ root })));
@@ -240,18 +247,6 @@ test('推送核对与巡检的顶层目录白名单一致：testGlobs 推出的 
   const config = loadConfig(root);
   const problems = newFileProblems(root, config, {});
   assert.deepEqual(problems.filter((p) => p.includes('顶层目录')), [], problems.join('\n'));
-});
-
-test('复审记录：“结论：**不通过**”“结论：未通过”也识别为不通过', () => {
-  for (const verdictLine of ['结论：**不通过**\n', '结论：未通过\n']) {
-    const root = featureRepo();
-    write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
-    write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
-    runGate({ root });
-    const rp = reportFile(`${GOOD_REPORT.replace('结论\n通过\n', '')}${verdictLine}`);
-    const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: rp, summary: 's' });
-    assert.equal(r.ok, false, verdictLine);
-  }
 });
 
 test('测试先行：模块名必须是完整的导入文件名，user-service 不算引用了 user', () => {
@@ -348,7 +343,7 @@ test('复审登记（pre-push）：记录分支名和 HEAD 提交号，报告副
   commitAll(root, 'feat: dedup sorted');
   assert.equal(runGate({ root }).ok, true);
   const head = git(root, ['rev-parse', 'HEAD']).trim();
-  const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile(GOOD_REPORT), summary: 's' });
+  const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reviewDataFile(goodData()), summary: 's' });
   assert.equal(r.ok, true, r.message);
   assert.equal(r.record.branch, 'feat');
   assert.equal(r.record.headSha, head);
@@ -364,7 +359,7 @@ test('复审登记（pre-push）：记录分支名和 HEAD 提交号，报告副
   write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort().reverse();\n}\n`);
   write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'reversed');\n");
   assert.equal(runGate({ root }).ok, true);
-  const r2 = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile(GOOD_REPORT), summary: 's2' });
+  const r2 = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reviewDataFile(goodData()), summary: 's2' });
   assert.equal(r2.ok, true, r2.message);
   assert.equal(r2.record.branch, 'topic/second');
   assert.equal(r2.record.uncommitted, 2, '登记时还没提交的改动要如实记下');
@@ -389,7 +384,7 @@ test('复审登记（pre-push）：只改文档时树哈希不变，登记靠文
     write(root, 'AGENTS.md', text);
     commitAll(root, `docs: ${text.length}`);
     assert.equal(runGate({ root }).ok, true);
-    const r = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(GOOD_REPORT), summary: 's' });
+    const r = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reviewDataFile(goodData()), summary: 's' });
     assert.equal(r.ok, true, r.message);
     rounds.push(r);
   }
@@ -403,7 +398,7 @@ test('复审登记（pre-push）：只改文档时树哈希不变，登记靠文
   assert.ok(rounds[1].message.includes(b.docHash.slice(0, 12)) && rounds[1].message.includes(b.headSha.slice(0, 12)), rounds[1].message);
   // 文档还没提交时再改一轮：提交号没变，文档内容哈希仍然不同
   write(root, 'AGENTS.md', '# 规则\n\n第三轮（未提交）\n');
-  const r3 = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(GOOD_REPORT), summary: 's' });
+  const r3 = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reviewDataFile(goodData()), summary: 's' });
   assert.equal(r3.ok, true, r3.message);
   assert.equal(r3.record.headSha, b.headSha);
   assert.notEqual(r3.record.docHash, b.docHash);
@@ -416,15 +411,15 @@ test('复审登记（pre-push）：代码改动里夹着文档时也记文档内
   write(root, 'docs/04-开发/note.md', '说明一\n');
   commitAll(root, 'feat');
   assert.equal(runGate({ root }).ok, true);
-  const r1 = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(GOOD_REPORT), summary: 's' });
+  const r1 = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reviewDataFile(goodData()), summary: 's' });
   write(root, 'docs/04-开发/note.md', '说明二\n');
-  const r2 = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(GOOD_REPORT), summary: 's' });
+  const r2 = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reviewDataFile(goodData()), summary: 's' });
   assert.equal(r1.record.docsOnly, false);
   assert.equal(r1.record.treeHash, r2.record.treeHash);
   assert.notEqual(r1.record.docHash, r2.record.docHash);
   git(root, ['checkout', '-q', '--detach']);
   // 0.5.1 起登记 fail 要求报告结论是不通过，所以这里用结论为不通过的报告
-  const r3 = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(GOOD_REPORT.replace('通过\n', '不通过\n')), summary: 's' });
+  const r3 = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reviewDataFile(failData()), summary: 's' });
   assert.equal(r3.ok, true, r3.message);
   assert.equal(r3.record.branch, null);
   assert.match(r3.message, /游离/);
@@ -447,7 +442,7 @@ test('复审登记（pre-push）：历史写不进去时登记整个不生效，
   assert.equal(runGate({ root }).ok, true);
   // 把历史文件的位置占成目录，追加必然失败
   fs.mkdirSync(path.join(recordDir(root), 'reviews', 'log.jsonl'), { recursive: true });
-  assert.throws(() => recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(GOOD_REPORT), summary: 's' }));
+  assert.throws(() => recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reviewDataFile(goodData()), summary: 's' }));
   assert.equal(readRecord(root, 'review.json'), null);
   assert.equal(verify({ root }).ok, false, '登记没成功，推送核对不能通过');
 });
@@ -457,7 +452,7 @@ test('复审登记（pre-push）：分支恰好叫 log.jsonl 时，报告目录�
   git(root, ['checkout', '-q', '-b', 'log.jsonl']);
   commitAll(root, 'feat');
   assert.equal(runGate({ root }).ok, true);
-  const r = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(GOOD_REPORT), summary: 's' });
+  const r = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reviewDataFile(goodData()), summary: 's' });
   assert.equal(r.ok, true, r.message);
   assert.ok(fs.statSync(path.join(recordDir(root), 'reviews', 'log.jsonl')).isFile());
 });
@@ -476,9 +471,7 @@ test('闸门输出：删除的源文件计入测试先行的“无需测试”�
   assert.ok(res.messages.some((m) => /^注释检查通过.*不含 reviewIgnore 之内的和已删除的.*检查 0 个/.test(m)), res.messages.join('\n'));
 });
 
-// ---------- 复审报告的格式检查：必需的节（reviewSections）取代字数 ----------
-
-const FULL = '## 范围\n读了 dedup 函数与测试。\n\n## 发现\n无。\n\n## 作者的验证\n核对了作者的测试输出，没有重跑。\n\n## 结论\n通过。无高、中级问题。\n';
+// ---------- 复审数据的格式检查：必需的节（reviewSections）取代字数；报告格式是 ek-review/1 JSON ----------
 
 /** 用一份配置建仓库并准备好能登记复审的改动，返回仓库根。 */
 function reviewReadyRepo(config) {
@@ -489,115 +482,62 @@ function reviewReadyRepo(config) {
   return root;
 }
 
-test('missingSections：标题行和“节名：内容”两种写法都认，带编号、星号的也认', () => {
-  assert.deepEqual(missingSections(FULL, ['范围', '发现', '作者的验证']), []);
-  assert.deepEqual(missingSections('### 1. 范围\n看了。\n## 一、发现\n无\n**作者的验证**：已核对\n', ['范围', '发现', '作者的验证']), []);
-  assert.deepEqual(missingSections('范围：读了 a.ts\n- 发现：无\n> 作者的验证：核对了\n', ['范围', '发现', '作者的验证']), []);
-});
+const REVIEWER = 'feature-dev:code-reviewer';
 
-test('missingSections：围栏里只能放内容不能当标题；“##范围”无空格不算标题；同一行写法在标题行里也认；空子标题不算内容', () => {
-  assert.deepEqual(missingSections('## 作者的验证\n```\nnode --test：309 通过\n```\n## 结论\n通过\n', ['作者的验证']), [], '一节的内容只有一个围栏时算有内容');
-  assert.deepEqual(missingSections('##范围\n##发现\n无\n', ['范围', '发现']), ['范围', '发现'], '井号后没有空格不算标题');
-  assert.deepEqual(missingSections('## 范围：只读了 diff\n## 发现\n无\n', ['范围', '发现']), [], '标题行里冒号后写了内容算有内容');
-  assert.deepEqual(missingSections('## 范围\n### 细项\n## 发现\n无\n', ['范围', '发现']), ['范围'], '只有空子标题的节没有内容');
-});
-
-test('missingSections：缺节、空节、节名只是别的词的前缀、藏在代码围栏里的都算缺', () => {
-  assert.deepEqual(missingSections('## 范围\n读了。\n## 结论\n通过\n', ['范围', '发现', '作者的验证']), ['发现', '作者的验证']);
-  assert.deepEqual(missingSections('## 范围\n\n## 发现\n无\n', ['范围', '发现']), ['范围'], '标题下没有内容算缺');
-  assert.deepEqual(missingSections('## 范围内的问题\n读了。\n', ['范围']), ['范围'], '“范围内的问题”不是“范围”一节');
-  assert.deepEqual(missingSections('```markdown\n## 范围\n读了。\n```\n', ['范围']), ['范围'], '围栏里的模板不算');
-  assert.deepEqual(missingSections('## 范围\n### 细项\n读了。\n## 发现\n无\n', ['范围', '发现']), [], '子标题下的内容算本节的内容');
-  assert.deepEqual(missingSections('任意内容', []), [], '写成空数组表示不要求任何节');
-});
-
-test('复审记录：默认不再按字数判定，四节齐全的短报告可以登记', () => {
+test('复审记录：默认不再按字数判定，节齐全的短数据可以登记', () => {
   const root = reviewReadyRepo({ reviewMinChars: undefined });
   assert.equal(loadConfig(root).reviewMinChars, 0);
-  const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile(FULL), summary: 's' });
+  const r = recordReview({ root, verdict: 'pass', reviewer: REVIEWER, reportPath: reviewDataFile(reviewData()), summary: 's' });
   assert.equal(r.ok, true, r.message);
 });
 
-test('复审记录：缺必需的节 → 拒绝，并说明缺哪几节；字数再多也不行', () => {
+test('S2 复审记录：缺必需的节 → 拒绝，并说明缺哪几节；字数再多也不行；不写任何记录', () => {
   const root = reviewReadyRepo({ reviewMinChars: undefined });
-  const long = `${'已逐条核对。'.repeat(80)}\n## 发现\n无\n## 结论\n通过。理由充分。\n`;
-  const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile(long), summary: 's' });
+  const long = reviewData({ sections: { 概述: '已逐条核对。'.repeat(80) } });
+  const r = recordReview({ root, verdict: 'pass', reviewer: REVIEWER, reportPath: reviewDataFile(long), summary: 's' });
   assert.equal(r.ok, false);
-  assert.match(r.message, /缺少必需的节：范围、作者的验证/);
+  assert.match(r.message, /范围/);
+  assert.match(r.message, /作者的验证/);
+  assert.equal(readRecord(root, 'review.json'), null, '拒绝时不写最新记录');
+  assert.equal(fs.existsSync(path.join(recordDir(root), 'reviews', 'log.jsonl')), false, '拒绝时不写历史');
+});
+
+test('S2 复审记录：节有名字但内容为空、只有占位词时同样算缺', () => {
+  const root = reviewReadyRepo({ reviewMinChars: undefined });
+  for (const empty of ['', '   ', '无', 'N/A', '&nbsp;']) {
+    const data = reviewData({ sections: { ...SECTIONS, 范围: empty } });
+    const r = recordReview({ root, verdict: 'pass', reviewer: REVIEWER, reportPath: reviewDataFile(data), summary: 's' });
+    assert.equal(r.ok, false, JSON.stringify(empty));
+    assert.match(r.message, /范围/);
+  }
 });
 
 test('复审记录：旧配置里显式写的 reviewMinChars 仍然生效，与必需的节一起判定', () => {
   const root = reviewReadyRepo({ reviewMinChars: 400 });
-  const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile(FULL), summary: 's' });
+  const r = recordReview({ root, verdict: 'pass', reviewer: REVIEWER, reportPath: reviewDataFile(goodData()), summary: 's' });
   assert.equal(r.ok, false);
   assert.match(r.message, /不少于 400/);
 });
 
-test('复审记录：reviewSections 可以按项目改写（只要求发现）', () => {
+test('复审记录：reviewSections 可以按项目改写（只要求发现，数据的 sections 可以为空）', () => {
   const root = reviewReadyRepo({ reviewMinChars: undefined, reviewSections: ['发现'] });
-  const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile('## 发现\n无\n## 结论\n通过。没有问题。\n'), summary: 's' });
+  const r = recordReview({ root, verdict: 'pass', reviewer: REVIEWER, reportPath: reviewDataFile(reviewData({ sections: {} })), summary: 's' });
   assert.equal(r.ok, true, r.message);
 });
 
-// ---------- 必需的节与结论：围栏的几种写法（N1–N3 与 reportVerdict 跳过围栏） ----------
-
-test('N1 空围栏不算内容：只有两行围栏标记的节算空；围栏里有字的照常算', () => {
-  assert.deepEqual(missingSections('## 范围\n```\n```\n## 发现\n无\n', ['范围', '发现']), ['范围'], '只有空围栏的节');
-  assert.deepEqual(missingSections('## 范围\n~~~\n\n~~~\n## 发现\n无\n', ['范围', '发现']), ['范围'], '围栏里只有空行，波浪线围栏也一样');
-  assert.deepEqual(missingSections('## 范围\n```text\n```\n## 发现\n无\n', ['范围', '发现']), ['范围'], '带说明文字的空围栏');
-  assert.deepEqual(missingSections('## 范围\n```\n读了 a.ts\n```\n## 发现\n无\n', ['范围', '发现']), [], '围栏里有内容算有内容');
-  assert.deepEqual(missingSections('## 范围\n```\n```\n读了 a.ts\n## 发现\n无\n', ['范围', '发现']), [], '空围栏之外另有内容');
-});
-
-test('N2 同一行写法与标题行口径一致：井号后都要有空格', () => {
-  assert.deepEqual(missingSections('##范围：x\n## 发现\n无\n', ['范围', '发现']), ['范围'], '“##范围：x”不认');
-  assert.deepEqual(missingSections('## 范围：x\n## 发现\n无\n', ['范围', '发现']), [], '“## 范围：x”认');
-  assert.deepEqual(missingSections('##范围\nx\n## 发现\n无\n', ['范围', '发现']), ['范围'], '“##范围”作标题也不认，两种写法同一口径');
-  assert.deepEqual(missingSections('> **范围**：x\n- 发现：无\n', ['范围', '发现']), [], '引用符、列表符、星号照常认');
-  assert.deepEqual(missingSections('-范围：x\n', ['范围']), ['范围'], '列表符后也要有空格');
-});
-
-test('L1 同一行写法的正则不回溯：很长的嵌套引用、列表符、井号加空白，匹配失败也在短时间内返回', () => {
-  const started = Date.now();
-  for (const unit of ['> ', '-  ', '#  ', '> -  # ', ' \t']) {
-    const line = `${unit.repeat(60)}不是节名`;
-    assert.deepEqual(missingSections(`${line}\n`, ['范围', '发现', '作者的验证']), ['范围', '发现', '作者的验证'], JSON.stringify(unit));
-  }
-  assert.ok(Date.now() - started < 2000, `耗时 ${Date.now() - started} ms，疑似回溯`);
-  assert.deepEqual(missingSections(`${'> '.repeat(30)}范围：x\n`, ['范围']), [], '嵌套引用里的同一行写法照常认');
-});
-
-test('N3 围栏没闭合：其后的节认不出，提示里说明是围栏没闭合并指出行号；闭合后正常', () => {
-  const unclosed = '## 范围\n读了。\n```text\n贴的输出\n## 发现\n无\n## 作者的验证\n核对了\n## 结论\n通过。\n';
-  assert.deepEqual(missingSections(unclosed, ['范围', '发现', '作者的验证']), ['发现', '作者的验证']);
+test('S1 Markdown 报告不再能登记：传 .md 文本被拒，提示须为 ek-review/1 JSON；不写任何记录', () => {
   const root = reviewReadyRepo({ reviewMinChars: undefined });
-  const r = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile(unclosed), summary: 's' });
-  assert.equal(r.ok, false);
-  assert.match(r.message, /缺少必需的节：发现、作者的验证/);
-  assert.match(r.message, /第 3 行起的代码围栏没有闭合/);
-  const noVerdict = recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile('## 范围\n读了。\n## 发现\n无\n## 作者的验证\n核对了\n```\n结论：通过\n'), summary: 's' });
-  assert.equal(noVerdict.ok, false);
-  assert.match(noVerdict.message, /找不到明确的结论.*第 7 行起的代码围栏没有闭合/s);
-  assert.doesNotMatch(recordReview({ root, verdict: 'pass', reviewer: 'feature-dev:code-reviewer', reportPath: reportFile('## 范围\n读了。\n'), summary: 's' }).message, /围栏/, '没有围栏问题时不提围栏');
-  const closed = unclosed.replace('贴的输出\n', '贴的输出\n```\n');
-  assert.deepEqual(missingSections(closed, ['范围', '发现', '作者的验证']), []);
-});
-
-test('围栏的闭合规则：闭合要同种字符、个数不少于开头、后面没有文字；四个反引号的围栏里可以放三个反引号的模板', () => {
-  const nested = '## 范围\n````markdown\n```\n## 发现\n无\n```\n````\n';
-  assert.deepEqual(missingSections(nested, ['范围', '发现']), ['发现'], '内层三个反引号不闭合外层，模板里的发现不算');
-  assert.equal(markFences(nested).unclosedAt, null);
-  assert.equal(markFences('```\n~~~\n').unclosedAt, 1, '波浪线不闭合反引号围栏');
-  assert.equal(markFences('````\n```\n').unclosedAt, 1, '较短的围栏不闭合较长的');
-  assert.equal(markFences('```js\n```\n').unclosedAt, null);
-  assert.equal(markFences('行内 ```code``` 不是围栏\n').unclosedAt, null);
-});
-
-test('reportVerdict 跳过代码围栏：围栏里的结论行与围栏里的“第一个非空行”都不算', () => {
-  const template = '## 结论\n```markdown\n结论：不通过。\n```\n';
-  assert.equal(reportVerdict(template).verdict, null, '只有围栏里的结论：认不出');
-  assert.equal(reportVerdict(`${template}\n结论：通过。无高、中级问题。\n`).verdict, 'pass', '围栏里的“不通过”不与围栏外的“通过”冲突');
-  assert.equal(reportVerdict('## 结论\n```\n不通过\n```\n通过。理由。\n').verdict, 'pass', '标题行之后跳过围栏找第一个非空行');
-  assert.equal(reportVerdict('````\n```\n结论：通过。\n```\n````\n').verdict, null, '嵌套围栏里的结论也不算');
-  assert.equal(reportVerdict('结论：通过。\n').verdict, 'pass', '没有围栏时照旧');
+  const md = [
+    '## 范围\n读了 dedup 函数与测试。\n\n## 发现\n无。\n\n## 作者的验证\n核对了作者的测试输出，没有重跑。\n\n## 结论\n通过。无高、中级问题。\n',
+    '范围：读了 a.ts\n发现：无\n作者的验证：核对了\n结论：通过\n',
+    '## 范围\n读了。\n```text\n贴的输出（围栏没有闭合）\n## 发现\n无\n',
+  ];
+  for (const text of md) {
+    const r = recordReview({ root, verdict: 'pass', reviewer: REVIEWER, reportPath: reportFile(text), summary: 's' });
+    assert.equal(r.ok, false, text);
+    assert.match(r.message, /JSON/);
+    assert.match(r.message, new RegExp('ek-review/1'));
+  }
+  assert.equal(readRecord(root, 'review.json'), null);
+  assert.equal(fs.existsSync(path.join(recordDir(root), 'reviews', 'log.jsonl')), false);
 });
