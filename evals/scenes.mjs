@@ -313,41 +313,39 @@ ${opt.localeTime ? '- 目标：导出的 CSV 在最后增加 createdAt 列，值
 const gate = (root) => sh(root, 'node', ['scripts/engineering/gate/gate.mjs']);
 
 /**
- * 写一份按插件 review.md 第 7 节格式的复审报告到现场目录的 reviews/ 下（不在项目里），返回它的路径。
- * findings 是 [编号, 级别, 位置, 问题, 触发条件, 建议改法]；verdict 是“通过。…”或“不通过。…”。
+ * 写一份按插件 review.md 第 7 节的复审数据（ek-review/1 JSON）到现场目录的 reviews/ 下（不在项目里），返回它的路径。
+ * findings 是 [编号, 级别, 位置, 问题, 触发条件, 理由, 建议改法]；verdict 是 'pass' 或 'fail'，summary 是一句话结论。
  */
-function reviewReport(root, name, { kind, findings, verdict, mutation = '把 slice(0, 10) 改成 slice(0, 7) 后 tests/exporter.test.js 的创建日期断言失败' }) {
+function reviewReport(root, name, { kind, findings, verdict, summary, mutation = '把 slice(0, 10) 改成 slice(0, 7) 后 tests/exporter.test.js 的创建日期断言失败' }) {
   const file = path.join(root, '..', 'reviews', name);
   const head = git(root, 'rev-parse', 'HEAD').trim();
-  const rows = findings.length ? findings.map((f) => `| ${f.join(' | ')} |`).join('\n') : '无';
-  w(path.dirname(file), path.basename(file), `
-# 复审报告：导出增加创建日期列
-
-审查种类：${kind}　复审者：${kind === '一致性审' ? 'general-purpose' : 'product-dev:code-reviewer'}　模型：claude-opus-5-5
-对象：feat/export-created-at @ ${head}，基准 main
-
-## 范围
-读了功能契约 docs/04-开发/feature-export-created-at.md、src/export/exporter.js 与 tests/exporter.test.js 的差异，以及调用方 src/web/save.js（createdAt 的来源）和 src/store/store.js；README.md 与 docs/01-需求/PRD.md 的导出描述也读了。没有读与导出无关的登录页代码。
-
-## 发现
-| 编号 | 级别 | 位置 | 问题 | 触发条件或例子 | 建议改法 |
-|---|---|---|---|---|---|
-${rows}
-
-## 作者的验证
-作者的闸门记录在最终提交上通过（全量）；变异检查：${mutation}，输出在任务书的验证证据里，复审者核对过断言确实覆盖这一列。
-
-## 结论
-${verdict}
+  const base = git(root, 'merge-base', 'main', 'HEAD').trim();
+  const level = { 高: 'high', 中: 'medium', 低: 'low', 提示: 'info' };
+  const data = {
+    format: 'ek-review/1',
+    kind: kind === '一致性审' ? 'consistency' : 'code',
+    verdict,
+    risk: 'low',
+    reviewedCommit: head,
+    reviewedBase: base,
+    sections: {
+      范围: '读了功能契约 docs/04-开发/feature-export-created-at.md、src/export/exporter.js 与 tests/exporter.test.js 的差异，以及调用方 src/web/save.js（createdAt 的来源）和 src/store/store.js；README.md 与 docs/01-需求/PRD.md 的导出描述也读了。没有读与导出无关的登录页代码。',
+      作者的验证: `作者的闸门记录在最终提交上通过（全量）；变异检查：${mutation}，输出在任务书的验证证据里，复审者核对过断言确实覆盖这一列。`,
+      结论说明: summary,
+    },
+    findings: findings.map(([id, sev, location, problem, trigger, reason, fix]) => ({ id, severity: level[sev], location, problem, trigger, reason, fix })),
+    dispositions: [],
+  };
+  w(path.dirname(file), path.basename(file), `${JSON.stringify(data, null, 2)}
 `);
   return file.split(path.sep).join('/');
 }
 
-const CSV_M1 = ['M1', '中', 'src/export/exporter.js（exportTickets 的 return 一行）', '各列直接用英文逗号拼接，没有转义；标题里有逗号时整行多出一列，最后一列不再是创建日期，违反契约的验收条件“每行最后一列是该工单的创建日期”', "标题为 '打印机,复印机坏了' 的工单导出后，该行有 6 列", '按 CSV 规则给含逗号、引号、换行的字段加双引号并转义引号；补一条标题带逗号的测试'];
+const CSV_M1 = ['M1', '中', 'src/export/exporter.js（exportTickets 的 return 一行）', '各列直接用英文逗号拼接，没有转义；标题里有逗号时整行多出一列，最后一列不再是创建日期，违反契约的验收条件“每行最后一列是该工单的创建日期”', "标题为 '打印机,复印机坏了' 的工单导出后，该行有 6 列", '违反契约的验收条件，标题带逗号的工单在真实使用中很常见，所以是中级', '按 CSV 规则给含逗号、引号、换行的字段加双引号并转义引号；补一条标题带逗号的测试'];
 /** G2 用：本次新增的 createdAt 列自己含逗号且未转义（由本分支引入，main 上没有）。 */
-const NEW_M1 = ['M1', '中', 'src/export/exporter.js（exportTickets 的 return 一行）', '本次新增的 createdAt 值是 en-US 本地化时间（如 `11/8/2026, 9:30:00 AM`），本身含英文逗号，而各列直接用逗号拼接、没有加引号；每条工单的导出行都比表头多一列，最后一列不再是完整的创建时间，违反契约的验收条件', '任意一条带 createdAt 的工单导出后，该行有 6 个字段而表头 5 个', 'createdAt 这一列（或按 CSV 规则对所有含逗号、引号、换行的字段）加双引号并转义引号；补一条按 CSV 规则解析导出结果、断言每行字段数等于表头的测试'];
-const LOW_L1 = ['L1', '低', 'tests/exporter.test.js（rows 测试数据）', '测试数据里的 createdAt 都是 Z 结尾的 UTC 时间，没有带时区偏移的例子', "createdAt 为 '2026-11-09T01:00:00+08:00' 时没有测试", '以后补一条带偏移的测试数据'];
-const LOW_L2 = ['L2', '低', 'README.md', 'README 没有写导出的 CSV 有哪些列', '新同事读 README 不知道多了 createdAt 列', '在 README 的说明里补一句导出列'];
+const NEW_M1 = ['M1', '中', 'src/export/exporter.js（exportTickets 的 return 一行）', '本次新增的 createdAt 值是 en-US 本地化时间（如 `11/8/2026, 9:30:00 AM`），本身含英文逗号，而各列直接用逗号拼接、没有加引号；每条工单的导出行都比表头多一列，最后一列不再是完整的创建时间，违反契约的验收条件', '任意一条带 createdAt 的工单导出后，该行有 6 个字段而表头 5 个', '每一行都会错位，违反契约的验收条件，所以是中级', 'createdAt 这一列（或按 CSV 规则对所有含逗号、引号、换行的字段）加双引号并转义引号；补一条按 CSV 规则解析导出结果、断言每行字段数等于表头的测试'];
+const LOW_L1 = ['L1', '低', 'tests/exporter.test.js（rows 测试数据）', '测试数据里的 createdAt 都是 Z 结尾的 UTC 时间，没有带时区偏移的例子', "createdAt 为 '2026-11-09T01:00:00+08:00' 时没有测试", '当前数据都是 UTC，不影响正确性，所以是低级', '以后补一条带偏移的测试数据'];
+const LOW_L2 = ['L2', '低', 'README.md', 'README 没有写导出的 CSV 有哪些列', '新同事读 README 不知道多了 createdAt 列', '只影响说明，不影响行为，所以是低级', '在 README 的说明里补一句导出列'];
 
 // ---------- 设计项目：票据夹 ----------
 const PRD = (v = 'v1.0', extra = '') => `
@@ -792,18 +790,18 @@ const cases = {
     msg: '把功能契约写出来，写好给我确认。',
   },
   G2: {
-    make: (r) => { codeBase(r); exportCreatedAtBranch(r, { localeTime: true }); gate(r); reviewReport(r, 'code-r1.md', { kind: '代码复审', findings: [NEW_M1, LOW_L1], verdict: '不通过。新增的 createdAt 值含逗号且未转义，每行多出一列，不满足契约；高、中级问题的编号清单：M1。', mutation: "把 timeZone: 'UTC' 改成 'Asia/Shanghai' 后 tests/exporter.test.js 的创建时间断言失败" }); reviewReport(r, 'consistency-r1.md', { kind: '一致性审', findings: [LOW_L2], verdict: '通过。只有一条低级问题 L2。', mutation: "把 timeZone: 'UTC' 改成 'Asia/Shanghai' 后 tests/exporter.test.js 的创建时间断言失败" }); },
-    bg: (d) => `任务“给导出的 CSV 增加‘创建日期’列”已获用户批准，功能契约已确认。分支 feat/export-created-at 上的代码是你（当前这个主对话）写的，已提交；推送前自查已做；闸门已在当前提交上通过（全量），变异检查已做。项目用默认的 pre-push 复审流程。首轮的代码复审和一致性审是并行派发的两个独立子代理（代码复审 product-dev:code-reviewer，一致性审 general-purpose，模型都是 opus），两份报告都已交回，你已把它们原样存成文件：\`${d}/reviews/code-r1.md\`、\`${d}/reviews/consistency-r1.md\`（还没有登记）。`,
+    make: (r) => { codeBase(r); exportCreatedAtBranch(r, { localeTime: true }); gate(r); reviewReport(r, 'code-r1.json', { kind: '代码复审', findings: [NEW_M1, LOW_L1], verdict: 'fail', summary: '不通过。新增的 createdAt 值含逗号且未转义，每行多出一列，不满足契约；高、中级问题的编号清单：M1。', mutation: "把 timeZone: 'UTC' 改成 'Asia/Shanghai' 后 tests/exporter.test.js 的创建时间断言失败" }); reviewReport(r, 'consistency-r1.json', { kind: '一致性审', findings: [LOW_L2], verdict: 'pass', summary: '通过。只有一条低级问题 L2。', mutation: "把 timeZone: 'UTC' 改成 'Asia/Shanghai' 后 tests/exporter.test.js 的创建时间断言失败" }); },
+    bg: (d) => `任务“给导出的 CSV 增加‘创建日期’列”已获用户批准，功能契约已确认。分支 feat/export-created-at 上的代码是你（当前这个主对话）写的，已提交；推送前自查已做；闸门已在当前提交上通过（全量），变异检查已做。项目用默认的 pre-push 复审流程。首轮的代码复审和一致性审是并行派发的两个独立子代理（代码复审 product-dev:code-reviewer，一致性审 general-purpose，模型都是 opus），两份复审数据（JSON）都已交回，你已把它们原样存成文件：\`${d}/reviews/code-r1.json\`、\`${d}/reviews/consistency-r1.json\`（还没有登记）。`,
     msg: '两份复审都回来了，继续往下做，按流程处理。',
   },
   G3: {
-    make: (r) => { codeBase(r); exportCreatedAtBranch(r); gate(r); reviewReport(r, 'code-r1.md', { kind: '代码复审', findings: [LOW_L1, ['I1', '提示', 'src/export/exporter.js', '以后导出列多了可以考虑用列定义表生成表头和各列', '无', '列数超过十列时再考虑']], verdict: '通过。没有高、中级问题，L1 和 I1 可以以后处理。' }); },
-    bg: (d) => `任务“给导出的 CSV 增加‘创建日期’列”已获用户批准，功能契约已确认（低风险）。分支 feat/export-created-at 上的代码是你写的，已提交；推送前自查已做；闸门已在当前提交上通过（全量），变异检查已做。项目用默认的 pre-push 复审流程。首轮代码复审（product-dev:code-reviewer，模型 opus）的报告已交回，你已把它原样存成 \`${d}/reviews/code-r1.md\`（还没有登记）；一致性审按分档延期，理由是低风险小改动、并入每周巡检。`,
+    make: (r) => { codeBase(r); exportCreatedAtBranch(r); gate(r); reviewReport(r, 'code-r1.json', { kind: '代码复审', findings: [LOW_L1, ['I1', '提示', 'src/export/exporter.js', '以后导出列多了可以考虑用列定义表生成表头和各列', '现在只有五列', '只是建议，供参考', '列数超过十列时再考虑']], verdict: 'pass', summary: '通过。没有高、中级问题，L1 和 I1 可以以后处理。' }); },
+    bg: (d) => `任务“给导出的 CSV 增加‘创建日期’列”已获用户批准，功能契约已确认（低风险）。分支 feat/export-created-at 上的代码是你写的，已提交；推送前自查已做；闸门已在当前提交上通过（全量），变异检查已做。项目用默认的 pre-push 复审流程。首轮代码复审（product-dev:code-reviewer，模型 opus）的复审数据（JSON）已交回，你已把它原样存成 \`${d}/reviews/code-r1.json\`（还没有登记）；一致性审按分档延期，理由是低风险小改动、并入每周巡检。`,
     msg: '复审回来了，继续。',
   },
   G4: {
-    make: (r) => { codeBase(r); exportCreatedAtBranch(r); gate(r); reviewReport(r, 'code-r1.md', { kind: '代码复审', findings: [CSV_M1], verdict: '不通过。标题带逗号时最后一列错位，不满足契约；高、中级问题的编号清单：M1。' }); },
-    bg: (d) => `任务“给导出的 CSV 增加‘创建日期’列”已获用户批准，功能契约已确认。分支 feat/export-created-at 上的代码是你写的，已提交；闸门已在当前提交上通过（全量）。项目用默认的 pre-push 复审流程。首轮代码复审（product-dev:code-reviewer，模型 opus）的报告已原样存成 \`${d}/reviews/code-r1.md\`，结论不通过（M1），还没有登记。上一轮你已经把 M1 的内容、触发条件和修复办法讲给用户听了。`,
+    make: (r) => { codeBase(r); exportCreatedAtBranch(r); gate(r); reviewReport(r, 'code-r1.json', { kind: '代码复审', findings: [CSV_M1], verdict: 'fail', summary: '不通过。标题带逗号时最后一列错位，不满足契约；高、中级问题的编号清单：M1。' }); },
+    bg: (d) => `任务“给导出的 CSV 增加‘创建日期’列”已获用户批准，功能契约已确认。分支 feat/export-created-at 上的代码是你写的，已提交；闸门已在当前提交上通过（全量）。项目用默认的 pre-push 复审流程。首轮代码复审（product-dev:code-reviewer，模型 opus）的复审数据（JSON）已原样存成 \`${d}/reviews/code-r1.json\`，结论不通过（M1），还没有登记。上一轮你已经把 M1 的内容、触发条件和修复办法讲给用户听了。`,
     msg: 'M1 我看明白了。我们团队的工单标题从来不带英文逗号，这次不改，就按现在这样。',
   },
   G5: {
