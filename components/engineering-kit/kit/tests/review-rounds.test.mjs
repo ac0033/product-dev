@@ -196,10 +196,10 @@ const stop = () => rs([...roundHigh(A), ...roundHigh(B), ...roundHigh(C)]);
 const DECISION = '用户 2026-11-26 在对话中同意继续';
 const admit = (state, over) => admitRegistration(state, { verdict: 'pass', kind: 'code', head: E, userDecision: null, ...over });
 
-test('A10b admitRegistration：accept、defer、有内容的 userDecision 在任何阶段恒放行', () => {
+test('A10b admitRegistration：accept、有内容的 userDecision 在任何阶段恒放行；defer 除收齐前之外放行（收齐前见 A13）', () => {
   for (const [name, state] of [['collecting', collecting()], ['close-only', closeOnly()], ['final-next', finalNext()], ['stop', stop()]]) {
     assert.equal(admit(state, { verdict: 'accept' }), null, `${name} accept`);
-    assert.equal(admit(state, { verdict: 'defer', kind: 'consistency' }), null, `${name} defer`);
+    if (name !== 'collecting') assert.equal(admit(state, { verdict: 'defer', kind: 'consistency' }), null, `${name} defer`);
     for (const verdict of ['pass', 'fail']) assert.equal(admit(state, { verdict, userDecision: DECISION }), null, `${name} ${verdict} 带用户决定`);
   }
   assert.equal(typeof admit(stop(), { userDecision: '   ' }), 'string', '空白的用户决定不算');
@@ -458,3 +458,33 @@ test('A12 “已修”证据：发现没有 files 时 fixedIn 必须非空且都
   assert.match(closureProblems(goodFacts({ expected: expectedNoKey, register: { entries: expectedNoKey.map((x) => ({ ...x })), problems: [] } })).join('|'), /修复差异/, '没有 files 键同样处理');
 });
 
+
+// ---------- PR #43 第 1 轮复审的回归 ----------
+
+test('A7 roundState：最后一轮从第 N 轮收齐之后算起；收齐前经用户同意在别的提交上的登记不占用最后一轮（PR #43 代码 M1、一致性 M3）', () => {
+  const early = rec('code', 'pass', C, [], { userDecision: '用户同意先在 C 上登记' });
+  const s = rs([...roundHigh(A), fail('code', B, [f('H1'), f('M1')]), early, pass('consistency', B)]);
+  assert.equal(s.phase, 'final-next');
+  assert.equal(s.finalHead, null, '收齐前的例外登记不算最后一轮');
+  const later = rs([...roundHigh(A), fail('code', B, [f('H1'), f('M1')]), early, pass('consistency', B), pass('code', D)]);
+  assert.equal(later.finalHead, D, '收齐后第一个别的提交才是最后一轮');
+});
+
+test('A10 roundState：同一轮里通过的那份报告带无法彻底解决或系统性标记（哪怕是低级）也停下（PR #43 代码 M3、一致性 M2）', () => {
+  const unresolvable = rs([fail('code', A, [f('M1')]), rec('consistency', 'pass', A, [f('L1', { unresolvable: true })])]);
+  assert.equal(unresolvable.phase, 'stop');
+  assert.match(text(unresolvable), /无法彻底解决/);
+  const systemic = rs([fail('code', A, [f('M1')]), rec('consistency', 'pass', A, [f('L1', { systemic: true })])]);
+  assert.equal(systemic.phase, 'stop');
+  assert.match(text(systemic), /系统性/);
+  const counts = rs([fail('code', A, [f('M1')]), rec('consistency', 'pass', A, [f('L1')])]);
+  assert.deepEqual(counts.latest.counts, { high: 0, medium: 1 }, '数量只数高、中级');
+});
+
+test('A13 admitRegistration：收齐前一致性审的延期也只能登记在缺它的那个提交上，别的提交要用户决定（PR #43 一致性 M5）', () => {
+  const s = rs([fail('code', A, [f('M1')])]);
+  assert.equal(s.phase, 'collecting');
+  assert.equal(admitRegistration(s, { verdict: 'defer', kind: 'consistency', head: A, userDecision: null }), null, '在缺它的提交上延期放行');
+  assert.equal(typeof admitRegistration(s, { verdict: 'defer', kind: 'consistency', head: B, userDecision: null }), 'string', '在别的提交上延期要用户决定');
+  assert.equal(admitRegistration(s, { verdict: 'defer', kind: 'consistency', head: B, userDecision: '用户同意' }), null);
+});

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { DEFAULTS, FLAT_KEYS, normalizeConfig, toProfile } from '../gate/config.mjs';
-import { POLICY_KEYS, isIgnoredDoc } from '../gate/lib.mjs';
+import { POLICY_KEYS, isIgnoredDoc, withLock } from '../gate/lib.mjs';
 import { mergePr } from '../gate/merge.mjs';
 import * as REVIEW from '../gate/review.mjs';
 import { recordReview } from '../gate/review.mjs';
@@ -461,4 +461,44 @@ test('A14 配置：风险登记文件永远不算“只改文档”', () => {
   const ignore = ['docs/**', '**/*.md', 'README.md'];
   assert.equal(isIgnoredDoc('docs/note.md', ignore), true, '对照：普通文档算');
   assert.equal(isIgnoredDoc(REG, ignore), false);
+});
+
+// ---------- PR #43 第 1 轮复审的回归 ----------
+
+test('H7 收口要求失败那一轮的每种审查都是完整覆盖：代码复审只审了部分差异时 close 被拒、合并入口不放行（PR #43 代码 H1、一致性 M1）', async () => {
+  const { root, main } = rcRepo();
+  const c1 = addCommit(root, 1);
+  must(reg(root, 'code', 'fail', c1, [M()]));
+  must(reg(root, 'consistency', 'pass', c1));
+  const mid = addCommit(root, 2);
+  const c2 = addCommit(root, 3);
+  // 第 2 轮的代码复审只审了 mid..c2（部分覆盖，只能登记 fail）
+  const partial = reviewData({ kind: 'code', verdict: 'fail', findings: [M('M2')], reviewedCommit: c2, reviewedBase: mid, dispositions: [{ id: 'M1', status: 'fixed', evidence: '已按建议修改并补了测试。' }] });
+  const r = must(recordReview({ root, verdict: 'fail', reviewer: 'feature-dev:code-reviewer', reportPath: reviewDataFile(partial), summary: 's', pr: '7', kind: 'code', gh: fakeGh(c2) }));
+  assert.equal(r.record.coverage, 'partial');
+  must(reg(root, 'consistency', 'pass', c2));
+  const fix = fixCommit(root, 4);
+  must(await writeRisks(root, fix));
+  commitAll(root, 'risks');
+  const head = headOf(root);
+  const before = logRows(root).length;
+  const c = await closeRound(root, head);
+  assertCloseRefused(root, c, before);
+  assert.match(msgOf(c), /覆盖/);
+  const m = mergePr({ root, pr: '7', gh: fakeGh(head) });
+  assert.equal(m.ok, false, '部分覆盖不能借收口合并');
+  assert.ok(m.problems.some((p) => /覆盖/.test(p)), m.problems.join(' / '));
+});
+
+test('A12 风险登记的读改写按文件串行：别的 PR 正在写同一份风险登记时，risks 报占用、不写文件（PR #43 代码 H3、一致性 M8）', async () => {
+  const { root } = midRounds();
+  const fix = fixCommit(root, 4);
+  // writeRisks 在调用时同步执行（call 包装成 Promise），所以它是在锁被别人持有期间运行的
+  let pending;
+  withLock(root, 'risk-register', () => { pending = writeRisks(root, fix); });
+  const inner = await pending.catch((e) => ({ ok: false, message: e.message }));
+  assert.equal(inner.ok, false);
+  assert.match(msgOf(inner), /占用/);
+  assert.equal(fs.existsSync(path.join(root, REG)), false, '没有写风险登记');
+  must(await writeRisks(root, fix));
 });

@@ -1505,3 +1505,25 @@ test('报告写明模型选择依据（--model-reason）（PR #42 一致性审 L
   assert.equal(res.ok, true, res.message);
   assert.match(fs.readFileSync(res.reportPath, 'utf8'), /跨厂商比不出强弱/);
 });
+
+test('S9 产物完整：报告发布失败时运行不标为可登记，也不留下报告；补登被拒（PR #43 代码 M4、一致性 M6）', async () => {
+  const { root, head } = repo();
+  const original = fs.renameSync;
+  fs.renameSync = (from, to) => {
+    if (String(to).endsWith('report.md')) throw Object.assign(new Error('注入的报告发布失败（测试）'), { code: 'EIO' });
+    return original(from, to);
+  };
+  let res;
+  try {
+    res = await run(root, head, 'pass');
+  } finally {
+    fs.renameSync = original;
+  }
+  assert.equal(res.ok, false);
+  assert.match(res.message, /注入的报告发布失败/);
+  const runDir = res.runDir;
+  assert.ok(runDir, '失败时也交回运行目录');
+  assert.equal(fs.existsSync(path.join(runDir, 'report.md')), false, '没有残缺或孤立的报告');
+  assert.equal(readJson(path.join(runDir, 'assessment.json')).assessment.registrable, false, '判定文件写明不可登记');
+  assert.equal(registerRun({ root, runDir, summary: 's', gh: fakeGh([head]) }).ok, false);
+});
