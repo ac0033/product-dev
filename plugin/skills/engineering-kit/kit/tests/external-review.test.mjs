@@ -1505,3 +1505,65 @@ test('报告写明模型选择依据（--model-reason）（PR #42 一致性审 L
   assert.equal(res.ok, true, res.message);
   assert.match(fs.readFileSync(res.reportPath, 'utf8'), /跨厂商比不出强弱/);
 });
+
+test('S9 产物完整：报告发布失败时运行不标为可登记，也不留下报告；补登被拒（PR #43 代码 M4、一致性 M6）', async () => {
+  const { root, head } = repo();
+  const original = fs.renameSync;
+  fs.renameSync = (from, to) => {
+    if (String(to).endsWith('report.md')) throw Object.assign(new Error('注入的报告发布失败（测试）'), { code: 'EIO' });
+    return original(from, to);
+  };
+  let res;
+  try {
+    res = await run(root, head, 'pass');
+  } finally {
+    fs.renameSync = original;
+  }
+  assert.equal(res.ok, false);
+  assert.match(res.message, /注入的报告发布失败/);
+  const runDir = res.runDir;
+  assert.ok(runDir, '失败时也交回运行目录');
+  assert.equal(fs.existsSync(path.join(runDir, 'report.md')), false, '没有残缺或孤立的报告');
+  assert.equal(readJson(path.join(runDir, 'assessment.json')).assessment.registrable, false, '判定文件写明不可登记');
+  assert.equal(registerRun({ root, runDir, summary: 's', gh: fakeGh([head]) }).ok, false);
+});
+
+test('S9 产物顺序：发布报告的那一刻判定文件还没写；报告发布后写判定失败时撤下报告、不可登记；撤下也失败时照样交回不可登记的结果并写明残留（PR #43 第 2 轮代码 M4、M5，一致性 M4）', async () => {
+  const { root, head } = repo();
+  const rename = fs.renameSync;
+  const writeFile = fs.writeFileSync;
+  const rm = fs.rmSync;
+  // 1. 发布报告时判定文件还不存在
+  let seenAtPublish = null;
+  fs.renameSync = (from, to) => {
+    if (String(to).endsWith('report.md')) seenAtPublish = fs.existsSync(path.join(path.dirname(String(to)), 'assessment.json'));
+    return rename(from, to);
+  };
+  let ok;
+  try { ok = await run(root, head, 'pass'); } finally { fs.renameSync = rename; }
+  assert.equal(ok.ok, true, ok.message);
+  assert.equal(seenAtPublish, false, '报告发布时还没有可登记的判定');
+  // 2. 报告发布后写判定失败：撤下报告，判定不可登记
+  const failAssessment = (file, ...rest) => {
+    if (String(file).endsWith('assessment.json')) throw Object.assign(new Error('注入的判定写入失败（测试）'), { code: 'EIO' });
+    return writeFile(file, ...rest);
+  };
+  fs.writeFileSync = failAssessment;
+  let res;
+  try { res = await run(root, head, 'pass'); } finally { fs.writeFileSync = writeFile; }
+  assert.equal(res.ok, false);
+  assert.equal(fs.existsSync(path.join(res.runDir, 'report.md')), false, '撤下了已发布的报告');
+  assert.equal(readJson(path.join(res.runDir, 'assessment.json')).assessment.registrable, false);
+  // 3. 撤下报告也失败：不抛出，交回不可登记的结果并写明报告残留
+  fs.writeFileSync = failAssessment;
+  fs.rmSync = (p, ...rest) => {
+    if (String(p).endsWith('report.md')) throw Object.assign(new Error('注入的撤下失败（测试）'), { code: 'EBUSY' });
+    return rm(p, ...rest);
+  };
+  let both;
+  try { both = await run(root, head, 'pass'); } finally { fs.writeFileSync = writeFile; fs.rmSync = rm; }
+  assert.equal(both.ok, false);
+  assert.match(both.message, /没能撤下/);
+  assert.equal(readJson(path.join(both.runDir, 'assessment.json')).assessment.registrable, false);
+  assert.equal(registerRun({ root, runDir: both.runDir, summary: 's', gh: fakeGh([head]) }).ok, false);
+});

@@ -2,7 +2,7 @@
 // 业务含义：闸门要回答三件事——这次改动了哪些文件（范围）、这些文件现在的内容是什么（树哈希）、
 // 测试与复审记录是不是针对这份内容、这个基准提交做的（绑定）。范围只有一个口径（gateScope）：
 // 配置、豁免表和套件脚本永远在范围内。判定依据不由被审分支决定，在 loadConfig 一处得出：基准分支设置（base）取默认主干上的配置，
-// 判定策略字段（POLICY_KEYS：reviewIgnore、reviewFlow、requiredChecks、reviewers、reviewMinChars、reviewSections、reviewKeyword、maxReviewRounds、externalExecutors、externalExclude、fullTests、ciRunner）取基准提交上的配置。
+// 判定策略字段（含复审轮次、收口方式和风险登记路径，见 POLICY_KEYS）取基准提交上的配置。
 // 只读 git 与工作区，写入只发生在 git 目录下的记录目录里，
 // 不污染工作区。测试与推送前复审记录放在各工作树自己的 git 目录（互不覆盖）；全局锁与 PR 审查记录（pr 流程）
 // 放在 git 公共目录：同一仓库同时只跑一个闸门，PR 的复审与合并可以在不同工作树进行。
@@ -17,7 +17,7 @@ export const CONFIG_FILE = 'engineering.config.json';
 /** 豁免表（相对仓库根）。每一条都必须写理由，复审时逐条核对。 */
 export const EXEMPT_FILE = 'scripts/engineering/exempt.json';
 
-import { normalizeConfig } from './config.mjs';
+import { DEFAULTS, normalizeConfig } from './config.mjs';
 
 /** 判断当前脚本是否被直接运行（而不是被测试 import），用于决定是否执行命令行入口。 */
 // 入口判断按真实路径比较：Node 的模块地址是真实路径，而命令行里可能经过目录连接（junction/符号链接），
@@ -61,7 +61,7 @@ export function gitCommonDir(root) {
  * 其余字段（testCommand、testEnv、testGroups、sourceGlobs、testGlobs、commentMode、layout、hygiene 等）仍用工作区的值：它们随功能分支一起变化是正常的（新加语言、改测试命令），而且配置文件
  * 永远在闸门范围内，改了就要过测试与复审，会被复审者看到。base 另由默认主干上的配置决定（mainlineBase）。
  */
-export const POLICY_KEYS = ['reviewIgnore', 'reviewFlow', 'requiredChecks', 'reviewers', 'reviewMinChars', 'reviewSections', 'reviewKeyword', 'maxReviewRounds', 'externalExecutors', 'externalExclude', 'fullTests', 'ciRunner'];
+export const POLICY_KEYS = ['reviewIgnore', 'reviewFlow', 'requiredChecks', 'reviewers', 'reviewMinChars', 'reviewSections', 'reviewKeyword', 'maxReviewRounds', 'roundClosure', 'riskRegister', 'externalExecutors', 'externalExclude', 'fullTests', 'ciRunner'];
 
 /**
  * 读取某个提交上的项目配置并展开。该提交上没有配置文件时返回 null；读不出或不合法时抛错（失败不放行），
@@ -335,8 +335,8 @@ export const DEPENDENCY_FILES = [
 ];
 
 /** 是否算文档（不计入闸门范围）：匹配给定的 reviewIgnore，且不是永远在范围内的文件。 */
-export function isIgnoredDoc(rel, reviewIgnore) {
-  return !matchesAny(rel, ALWAYS_IN_SCOPE) && matchesAny(rel, reviewIgnore);
+export function isIgnoredDoc(rel, reviewIgnore, riskRegister = DEFAULTS.riskRegister) {
+  return rel !== riskRegister && !matchesAny(rel, ALWAYS_IN_SCOPE) && matchesAny(rel, reviewIgnore);
 }
 
 /**
@@ -353,8 +353,8 @@ export function gateScope(root, config) {
   const { rev } = baseRevision(root, config.base);
   const changed = changedSince(root, rev);
   const { reviewIgnore } = config;
-  const scope = changed.filter((f) => !isIgnoredDoc(f, reviewIgnore));
-  const docs = changed.filter((f) => isIgnoredDoc(f, reviewIgnore));
+  const scope = changed.filter((f) => !isIgnoredDoc(f, reviewIgnore, config.riskRegister));
+  const docs = changed.filter((f) => isIgnoredDoc(f, reviewIgnore, config.riskRegister));
   return { baseRev: rev, changed, reviewIgnore, scope, docs };
 }
 
@@ -633,47 +633,55 @@ export function forkPoint(root, baseRef, commit) {
   return r.ok ? r.out.trim() : null;
 }
 
-/** 序列化同一 PR 的同步登记与合并核对，共享工作树使用同一把锁。 */
-export function withPrLock(root, pr, fn) {
-  const parent = path.dirname(prLogFile(root, prNumber(pr)));
-  const lock = path.join(parent, 'lock');
-  const ownerFile = path.join(lock, 'owner.json');
-  fs.mkdirSync(parent, { recursive: true });
-  function owner() {
-    try { return fs.readFileSync(ownerFile, 'utf8'); }
-    catch (e) { if (e.code !== 'ENOENT') throw e; return ''; }
-  }
-  // 失效只认两种：持有者信息完整而进程已不在；持有者信息没写成（建锁后崩溃）且超过十分钟。持有者还活着时不论持锁多久都不回收（慢请求、进程暂停）。
-  function stale() {
-    const stat = fs.statSync(lock, { throwIfNoEntry: false });
-    if (!stat) return false;
-    const text = owner();
+/**
+ * 互斥锁（不等待，被占用就报错）。用 git 引用的比较交换实现：`git update-ref <引用> <新值> <旧值>` 在 git 自己的独占锁文件下核对旧值再改，是原子的。
+ * 引用 refs/engineering-gate/locks/<name> 指向一个记着持有者（pid、开始时间、随机令牌）的对象；引用在仓库的公共目录里，各工作树共用。
+ * 取锁：引用不存在时创建（旧值写空，已存在就失败）；存在而持有者进程已不在时，从判定失效的那个对象比较交换成自己的，期间别人先换掉了就失败。
+ * 所以回收只替换判定失效的那一代，不会删掉后继持有者的锁。持有者还活着、或持有者信息读不出时报占用（读不出的要人确认后手动删）。
+ * 释放：只在引用仍指向自己的对象时删除。持锁多久都不回收活着的持有者（慢请求、进程暂停）。
+ */
+export function withLock(root, name, fn, label = `锁 ${name}`) {
+  const ref = `refs/engineering-gate/locks/${name}`;
+  const run = (args, input) => spawnSync('git', args, { cwd: root, encoding: 'utf8', input });
+  const me = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token: crypto.randomUUID() });
+  const made = run(['hash-object', '-w', '--stdin'], me);
+  if (made.status !== 0) throw new Error(`${label}：写不出持有者信息（git hash-object 失败）：${String(made.stderr).trim()}`);
+  const mine = made.stdout.trim();
+  const holder = (sha) => (sha ? run(['cat-file', '-p', sha]).stdout ?? '' : '');
+  const current = run(['rev-parse', '--verify', '--quiet', ref]).stdout.trim();
+  let expected = '';
+  if (current) {
+    const text = holder(current);
     let pid = null;
     try { pid = JSON.parse(text).pid; } catch { pid = null; }
-    if (Number.isInteger(pid)) return ownerGone(text);
-    return Date.now() - stat.mtimeMs > 600000;
+    if (!Number.isInteger(pid)) throw new Error(`${label}被占用：持有者信息读不出（${ref}）；确认没有进程在用后运行 git update-ref -d ${ref} 删除`);
+    if (!ownerGone(text)) throw new Error(`${label}被占用：${text.trim()}`);
+    expected = current;
   }
-  function occupied() { return new Error(`PR #${pr} 的登记锁被占用：${owner() || lock}`); }
-  try {
-    fs.mkdirSync(lock);
-  } catch (e) {
-    if (e.code !== 'EEXIST') throw e;
-    if (!stale()) throw occupied();
-    // 失效锁的回收也须互斥，防止另一位回收者删除刚建好的锁。
-    const reclaim = path.join(parent, 'reclaim');
-    try { fs.mkdirSync(reclaim); }
-    catch (err) { if (err.code === 'EEXIST') throw occupied(); throw err; }
-    try {
-      if (stale()) fs.rmSync(lock, { recursive: true });
-      try { fs.mkdirSync(lock); }
-      catch (err) { if (err.code === 'EEXIST') throw occupied(); throw err; }
-    } finally { fs.rmdirSync(reclaim); }
+  const swapped = run(['update-ref', ref, mine, expected]);
+  if (swapped.status !== 0) {
+    // git 改引用时自己先独占建 <引用>.lock；上次 git 进程异常退出会留下它，之后的比较交换都会失败，和“有人持锁”不是一回事
+    const common = run(['rev-parse', '--git-common-dir']).stdout.trim();
+    const gitLock = common ? path.join(path.resolve(root, common), ...ref.split('/')) + '.lock' : null;
+    if (gitLock && fs.existsSync(gitLock)) {
+      throw new Error(`${label}暂时取不到：git 的引用锁文件 ${gitLock} 残留（另一个 git 进程正在改这个引用，或上次异常退出）；确认没有 git 进程在运行后删除它再重试`);
+    }
+    const now = run(['rev-parse', '--verify', '--quiet', ref]).stdout.trim();
+    throw new Error(`${label}被占用：${holder(now).trim() || String(swapped.stderr).trim()}`);
   }
-  const identity = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token: crypto.randomUUID() });
   try {
-    fs.writeFileSync(ownerFile, identity);
     return fn();
   } finally {
-    if (!owner() || owner() === identity) fs.rmSync(lock, { recursive: true, force: true });
+    const released = run(['update-ref', '-d', ref, mine]);
+    if (released.status !== 0) {
+      process.stderr.write(`警告：${label}没有释放（${ref}）：${String(released.stderr).trim()}；确认没有进程在用后运行 git update-ref -d ${ref}\n`);
+    }
   }
+}
+
+/** 序列化同一 PR 的同步登记、收口与合并核对（各工作树共用同一把锁）。 */
+export function withPrLock(root, pr, fn) {
+  const no = prNumber(pr);
+  fs.mkdirSync(path.dirname(prLogFile(root, no)), { recursive: true });
+  return withLock(root, `pr-${no}`, fn, `PR #${pr} 的登记锁`);
 }

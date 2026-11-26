@@ -34,7 +34,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { baseRevision, defaultGh, EMPTY_TREE, forkPoint, git, isMain, loadConfig, prLogFile, prNumber, readPr, repoRoot } from './lib.mjs';
-import { EXTERNAL_REVIEWER_PREFIX, readLog, recordReview } from './review.mjs';
+import { EXTERNAL_REVIEWER_PREFIX, prRoundState, readFailureFindings, readLog, recordReview } from './review.mjs';
+import { FINAL_ROUND_TEXT, admitRegistration } from './review-rounds.mjs';
 
 import { DISPOSITIONS, GAP_ITEMS, GAP_STATUSES, MAX_REVIEW_BYTES, REVIEW_FORMAT, SEVERITIES, SEVERITY_PREFIX, canonicalJson, fingerprint, isSerious, previousFail, renderReport, reviewedHeadProblem, validateReviewData, verdictOf } from './review-data.mjs';
 
@@ -778,16 +779,12 @@ function checkContextSize(value, label) {
  * 清单只带编号和级别：上一轮的位置和问题原文不论出自谁，都可能涉及按当前策略不外发的内容（本地复审者看得到不外发的文件，两轮之间项目也可能收紧 externalExclude）。
  * 复审者核对用的上一轮报告由调用者经 --prior-report 提供，发送前由调用者按当前外发策略核对。
  */
-function followupFindings(root, pr, kind, headSha) {
-  const history = readLog(prLogFile(root, prNumber(pr))).filter((r) => r.kind === kind);
+function followupFindings(entries, kind, headSha) {
+  const history = entries.filter((r) => r.kind === kind);
   if (!history.length) throw new Error('同种审查尚无登记，首轮请用 --round first');
   const prev = previousFail(history, kind, headSha);
   if (!prev) return { findings: [], sha: null };
-  if (!prev.data) throw new Error('上轮失败登记缺少复审数据副本，无法生成待处置清单');
-  if (fs.statSync(prev.data).size > MAX_REVIEW_BYTES) throw new Error('上一轮复审数据超过 512 KiB');
-  const bytes = fs.readFileSync(prev.data);
-  if (sha256(bytes) !== prev.dataSha) throw new Error('上轮失败登记的数据副本指纹不符');
-  const prior = JSON.parse(bytes).findings.filter(isSerious).map(({ id, severity }) => ({ id, severity }));
+  const prior = readFailureFindings(prev).filter(isSerious).map(({ id, severity }) => ({ id, severity }));
   checkContextSize(JSON.stringify(prior), '上一轮待处置清单');
   return { findings: prior, sha: prev.dataSha };
 }
@@ -835,7 +832,15 @@ export async function runExternalReview(opts) {
   const fork = forkPoint(root, policy.baseRev, headSha);
   const baseSha = opts.base ? gitOk(root, ['rev-parse', '--verify', `${opts.base}^{commit}`], '解析 --base').trim() : (fork ?? policy.baseRev);
 
-  const prior = config.reviewFlow === 'pr' && round === 'followup' ? followupFindings(root, pr, kind, headSha) : { findings: [], sha: null };
+  const closureEnabled = config.reviewFlow === 'pr' && config.roundClosure === 'fix-and-record';
+  const followup = config.reviewFlow === 'pr' && round === 'followup';
+  const history = closureEnabled || followup ? readLog(prLogFile(root, prNumber(pr))) : [];
+  const state = closureEnabled ? prRoundState(config, history) : null;
+  if (state && ['close-only', 'stop'].includes(state.phase)) {
+    const blocked = admitRegistration(state, { kind, verdict: 'pass', head: headSha, userDecision: opts.userDecision });
+    if (blocked) throw new Error(blocked);
+  }
+  const prior = followup ? followupFindings(history, kind, headSha) : { findings: [], sha: null };
   if (prior.findings.length) {
     // 待处置清单只外发编号和级别，复审者核对靠调用者附的上一轮报告：它须是上一份不通过数据对应的那份（带指纹），每条待处置编号都在
     const text = opts.priorReport ?? '';
@@ -845,6 +850,11 @@ export async function runExternalReview(opts) {
     }
   }
   const { request } = buildRequest({ root, baseSha, headSha, kind, round, risk, priorFindings: prior.findings, priorFailSha: prior.sha, model, limits, extraExclude: policy.exclude, contextText: opts.contextText ?? null, priorReport: opts.priorReport ?? null });
+  // 最后一轮：final-next 阶段还没定提交时的新提交，或已绑定的最后一轮提交上的任何一种审查（第一份已登记为不通过、阶段转为收齐前时也一样）
+  if (state && ((state.phase === 'final-next' && !state.finalHead) || (state.finalHead && state.finalHead === headSha))) {
+    request.review.finalRound = true;
+    request.context.instructions += '\n' + FINAL_ROUND_TEXT;
+  }
   const requestText = JSON.stringify(request);
   const inputHash = sha256(requestText);
   const runDir = makeRunDir(root, opts.outDir, headSha);
@@ -852,6 +862,7 @@ export async function runExternalReview(opts) {
   const runIdentity = fs.lstatSync(runDir);
   const runOwned = () => ownedCopy(runDir, path.dirname(runDir), runIdentity);
   let identity;
+  let published = null;
   try {
     fs.writeFileSync(path.join(runDir, 'request.json'), `${JSON.stringify(request, null, 2)}\n`);
     fs.writeFileSync(path.join(runDir, 'input.sha256'), `${inputHash}  request.json（被审 ${headSha}）\n`);
@@ -901,14 +912,24 @@ export async function runExternalReview(opts) {
     const meta = { reviewer, inputHash, durationMs: proc.durationMs, usageLine: usageLine(result?.usage), pr: pr === undefined ? null : String(pr) };
     const reportPath = path.join(runDir, 'report.md');
     let reviewData;
+    let report = null;
     if (assessment.registrable) {
       reviewData = toReviewData({ request, result, assessmentNotes: assessment.notes });
       assessment.dataSha = fingerprint(reviewData);
-      const report = renderReport(reviewData, { reviewer, model: result.provenance.actualModel, keyword: config.reviewKeyword, fingerprint: assessment.dataSha,
-        extraLines: [`请求模型：${model.id}（来源 ${model.source}，由 ${model.chosenBy} 选择${model.reason ? `；依据：${model.reason}` : ''}）`, `推理强度：${model.effort ?? '执行器默认'}`, `用量：${meta.usageLine}`, `输入哈希：${inputHash}`] });
+      report = renderReport(reviewData, { reviewer, model: result.provenance.actualModel, keyword: config.reviewKeyword, fingerprint: assessment.dataSha,
+        extraLines: [`请求模型：${model.id}（来源 ${model.source}，由 ${model.chosenBy} 选择${model.reason ? `；依据：${model.reason}` : ''}）`, `推理强度：${model.effort ?? '执行器默认'}`, `用量：${meta.usageLine}`, `输入哈希：${inputHash}`, ...(request.review.finalRound ? ['最后一轮复审'] : [])] });
       fs.writeFileSync(path.join(runDir, 'review.json'), canonicalJson(reviewData), { flag: 'wx' });
       fs.writeFileSync(path.join(runDir, 'review.sha256'), assessment.dataSha + '\n', { flag: 'wx' });
-      fs.writeFileSync(reportPath, report, { flag: 'wx' });
+    }
+    // 产物顺序：数据、报告（先写完整的暂存文件再改名），最后才是判定文件；判定写明可登记时，其余产物都已就位。
+    // 中途失败由下面的 catch 撤下本次发布的报告，并写一份不可登记的判定
+    if (report !== null) {
+      const staged = `${reportPath}.${crypto.randomUUID()}.tmp`;
+      try {
+        fs.writeFileSync(staged, report, { flag: 'wx' });
+        fs.renameSync(staged, reportPath);
+        published = reportPath;
+      } finally { fs.rmSync(staged, { force: true }); }
     }
     fs.writeFileSync(path.join(runDir, 'assessment.json'), JSON.stringify({ assessment, integrity, copied, meta, provenance: result?.provenance ?? null, usage: result?.usage ?? null }, null, 2) + '\n', { flag: 'wx' });
     const base = { runDir, result, assessment, reportPath: null, registration: null };
@@ -935,6 +956,10 @@ export async function runExternalReview(opts) {
     if (identity) {
       const note = removeCopy(copy, runDir, identity);
       if (note) reasons.push(note);
+    }
+    if (published) {
+      try { fs.rmSync(published, { force: true }); }
+      catch (err) { reasons.push(`已发布的报告没能撤下（${err.message}），残留在 ${published}；它不对应可登记的结果，请手动删除`); }
     }
     const assessment = { registrable: false, verdict: null, reasons, notes: [] };
     const failure = path.join(runDir, 'assessment-' + crypto.randomUUID() + '.tmp');
