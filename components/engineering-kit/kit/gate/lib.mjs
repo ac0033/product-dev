@@ -659,15 +659,35 @@ export function withPrLock(root, pr, fn) {
   } catch (e) {
     if (e.code !== 'EEXIST') throw e;
     if (!stale()) throw occupied();
-    // 失效锁的回收也须互斥，防止另一位回收者删除刚建好的锁。
+    // 失效锁的回收也须互斥，防止另一位回收者删除刚建好的锁。回收者中途退出会留下回收目录：
+    // 它同样记下持有者，持有者已不在、或没写成且超过一分钟（回收本身只要几毫秒）时清掉再取一次，取不到就报占用。
     const reclaim = path.join(parent, 'reclaim');
-    try { fs.mkdirSync(reclaim); }
-    catch (err) { if (err.code === 'EEXIST') throw occupied(); throw err; }
+    const reclaimOwner = path.join(reclaim, 'owner.json');
+    const reclaimStale = () => {
+      const stat = fs.statSync(reclaim, { throwIfNoEntry: false });
+      if (!stat) return false;
+      let text = '';
+      try { text = fs.readFileSync(reclaimOwner, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      let pid = null;
+      try { pid = JSON.parse(text).pid; } catch { pid = null; }
+      if (Number.isInteger(pid)) return ownerGone(text);
+      return Date.now() - stat.mtimeMs > 60000;
+    };
+    const takeReclaim = () => {
+      try { fs.mkdirSync(reclaim); return true; }
+      catch (err) { if (err.code === 'EEXIST') return false; throw err; }
+    };
+    if (!takeReclaim()) {
+      if (!reclaimStale()) throw occupied();
+      fs.rmSync(reclaim, { recursive: true, force: true });
+      if (!takeReclaim()) throw occupied();
+    }
     try {
+      fs.writeFileSync(reclaimOwner, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
       if (stale()) fs.rmSync(lock, { recursive: true });
       try { fs.mkdirSync(lock); }
       catch (err) { if (err.code === 'EEXIST') throw occupied(); throw err; }
-    } finally { fs.rmdirSync(reclaim); }
+    } finally { fs.rmSync(reclaim, { recursive: true, force: true }); }
   }
   const identity = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token: crypto.randomUUID() });
   try {

@@ -254,6 +254,11 @@ export function recordReview({ root, verdict, reviewer, reportPath, reviewData, 
   // 本次改动只取一次，分成闸门范围（scope）和文档（docs）两部分，与 gate.mjs、verify.mjs 同一口径（gateScope）
   const { baseRev, changed, scope, docs } = gateScope(root, config);
   const hash = treeHash(root, scope);
+  // 给了被审范围的复审审的是提交；登记却绑定工作区的树。闸门范围内还有未提交的改动时，那部分没经过复审，不能登记通过
+  if (data?.reviewedCommit && ['pass', 'accept'].includes(verdict)) {
+    const dirty = uncommittedInScope(root, scope);
+    if (dirty.length) return { ok: false, message: `复审审的是提交 ${data.reviewedCommit.slice(0, 12)}，工作区还有未提交的改动：${dirty.join('、')}；这些改动没有经过复审。先提交，再对新的 HEAD 复审后登记` };
+  }
   if (verdict !== 'defer') {
     const tests = readRecord(root, 'tests.json');
     if (tests && tests.passed && tests.base !== baseRev) {

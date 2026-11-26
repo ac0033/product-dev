@@ -910,16 +910,24 @@ export async function runExternalReview(opts) {
     const meta = { reviewer, inputHash, durationMs: proc.durationMs, usageLine: usageLine(result?.usage), pr: pr === undefined ? null : String(pr) };
     const reportPath = path.join(runDir, 'report.md');
     let reviewData;
+    let report = null;
     if (assessment.registrable) {
       reviewData = toReviewData({ request, result, assessmentNotes: assessment.notes });
       assessment.dataSha = fingerprint(reviewData);
-      const report = renderReport(reviewData, { reviewer, model: result.provenance.actualModel, keyword: config.reviewKeyword, fingerprint: assessment.dataSha,
+      report = renderReport(reviewData, { reviewer, model: result.provenance.actualModel, keyword: config.reviewKeyword, fingerprint: assessment.dataSha,
         extraLines: [`请求模型：${model.id}（来源 ${model.source}，由 ${model.chosenBy} 选择${model.reason ? `；依据：${model.reason}` : ''}）`, `推理强度：${model.effort ?? '执行器默认'}`, `用量：${meta.usageLine}`, `输入哈希：${inputHash}`, ...(request.review.finalRound ? ['最后一轮复审'] : [])] });
       fs.writeFileSync(path.join(runDir, 'review.json'), canonicalJson(reviewData), { flag: 'wx' });
       fs.writeFileSync(path.join(runDir, 'review.sha256'), assessment.dataSha + '\n', { flag: 'wx' });
-      fs.writeFileSync(reportPath, report, { flag: 'wx' });
     }
     fs.writeFileSync(path.join(runDir, 'assessment.json'), JSON.stringify({ assessment, integrity, copied, meta, provenance: result?.provenance ?? null, usage: result?.usage ?? null }, null, 2) + '\n', { flag: 'wx' });
+    // 给人读的报告最后发布：判定落盘之后，先写完整的暂存文件再改名，写到一半失败不会留下残缺或与判定不符的报告
+    if (report !== null) {
+      const staged = `${reportPath}.${crypto.randomUUID()}.tmp`;
+      try {
+        fs.writeFileSync(staged, report, { flag: 'wx' });
+        fs.renameSync(staged, reportPath);
+      } finally { fs.rmSync(staged, { force: true }); }
+    }
     const base = { runDir, result, assessment, reportPath: null, registration: null };
     if (!assessment.registrable) {
       return { ...base, ok: false, message: [`外部复审没有产生可登记的报告（运行记录：${runDir}）：`, ...assessment.reasons].join('\n') };
