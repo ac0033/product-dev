@@ -13,14 +13,23 @@ const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\
 const REVIEW = read('plugin/skills/product-dev/references/review.md');
 const GATE = 'components/engineering-kit/kit/gate';
 
-/** 取从标题 start 开始、到下一个同级或更高级标题之前的一段（标题按行首 # 的个数判断）。 */
+/** 取从标题 start 开始、到下一个同级或更高级标题之前的一段（标题按行首 # 的个数判断；代码围栏里的 # 行是模板内容，不算标题）。 */
 function section(text, startPattern) {
   const lines = text.split('\n');
   const i = lines.findIndex((l) => startPattern.test(l));
   assert.ok(i >= 0, `找不到标题：${startPattern}`);
   const depth = /^(#+)/.exec(lines[i])[1].length;
+  let fence = null;
   let j = i + 1;
-  while (j < lines.length && !(/^(#+)\s/.test(lines[j]) && /^(#+)/.exec(lines[j])[1].length <= depth)) j++;
+  for (; j < lines.length; j++) {
+    const mark = /^\s*(`{3,}|~{3,})/.exec(lines[j]);
+    if (mark) {
+      if (!fence) fence = mark[1];
+      else if (mark[1][0] === fence[0] && mark[1].length >= fence.length) fence = null;
+      continue;
+    }
+    if (!fence && /^(#+)\s/.test(lines[j]) && /^(#+)/.exec(lines[j])[1].length <= depth) break;
+  }
   return lines.slice(i, j).join('\n');
 }
 /** Markdown 表头行里的栏名。 */

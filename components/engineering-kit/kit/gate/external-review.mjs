@@ -606,7 +606,7 @@ export function modelMatches(requested, actual) {
 /**
  * 判定能否登记、登记成什么结论。结论由代码定：有 high 或 medium 发现就是 fail；模型说 pass 且没有这类发现才是 pass。
  * 以下任一情况不可登记：执行不是 completed、执行器非 0 退出、结果 JSON 不合格、verdict 是 incomplete、实际模型缺失或与请求不符、
- * 审查说明不足 MIN_NARRATIVE_CHARS 字、只读副本或仓库工作区被改动、最终提交在复审期间变化。
+ * 审查说明不足 MIN_NARRATIVE_CHARS 字、只读副本或仓库工作区被改动、最终提交在复审期间变化、判为不通过却没有任何发现（写不出发现表）。
  * 返回 { registrable, verdict: 'pass'|'fail'|null, reasons, notes }。
  */
 export function assess({ result, problems = [], request, integrity }) {
@@ -632,6 +632,8 @@ export function assess({ result, problems = [], request, integrity }) {
     verdict = serious.length > 0 || r.verdict === 'fail' ? 'fail' : 'pass';
     if (r.verdict === 'pass' && serious.length > 0) notes.push(`执行器的结论是通过，但列出了 ${serious.length} 个高、中级问题，按发现判为不通过`);
     if (r.verdict === 'fail' && serious.length === 0) notes.push('执行器的结论是不通过，但没有列出高、中级问题；按执行器的结论记为不通过');
+    // 不通过的报告必须带发现表（review.mjs 登记时核对）：一条发现都没有时写不出表，在这里判为不可登记，不留到渲染时抛错
+    if (verdict === 'fail' && r.findings.length === 0) reasons.push('执行器的结论是不通过，但没有列出任何发现，写不出发现表；请重新复审');
   }
   return { registrable: reasons.length === 0 && verdict !== null, verdict: reasons.length === 0 ? verdict : null, reasons, notes };
 }

@@ -321,6 +321,12 @@ test('结果结构核对与判定：发现为空、退出码 0 不单独算通�
   const good = { ...result, review: { ...result.review, report: NARRATIVE } };
   assert.equal(assess({ result: good, request, integrity: ok }).verdict, 'pass');
   assert.equal(assess({ result: good, request, integrity: { ...ok, repoUnchanged: false } }).registrable, false);
+  // 执行器判不通过却一条发现也没列：写不出发现表，登记会被拒，所以在判定这一步就不可登记，不让渲染抛错
+  const bare = assess({ result: { ...good, review: { ...good.review, verdict: 'fail' } }, request, integrity: ok });
+  assert.equal(bare.registrable, false);
+  assert.ok(bare.reasons.some((r) => r.includes('没有列出任何发现')), bare.reasons.join('\n'));
+  const lowOnly = { ...good, review: { ...good.review, verdict: 'fail', findings: [{ severity: 'low', title: '命名', detail: 'x' }] } };
+  assert.equal(assess({ result: lowOnly, request, integrity: ok }).verdict, 'fail', '只有低级发现时照常按执行器结论记为不通过');
 });
 
 test('renderReport 自检：只有一处结论，且与判定一致', () => {
