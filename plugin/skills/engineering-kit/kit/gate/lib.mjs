@@ -643,9 +643,15 @@ export function withPrLock(root, pr, fn) {
     try { return fs.readFileSync(ownerFile, 'utf8'); }
     catch (e) { if (e.code !== 'ENOENT') throw e; return ''; }
   }
+  // 失效只认两种：持有者信息完整而进程已不在；持有者信息没写成（建锁后崩溃）且超过十分钟。持有者还活着时不论持锁多久都不回收（慢请求、进程暂停）。
   function stale() {
     const stat = fs.statSync(lock, { throwIfNoEntry: false });
-    return stat && (Date.now() - stat.mtimeMs > 600000 || ownerGone(owner()));
+    if (!stat) return false;
+    const text = owner();
+    let pid = null;
+    try { pid = JSON.parse(text).pid; } catch { pid = null; }
+    if (Number.isInteger(pid)) return ownerGone(text);
+    return Date.now() - stat.mtimeMs > 600000;
   }
   function occupied() { return new Error(`PR #${pr} 的登记锁被占用：${owner() || lock}`); }
   try {

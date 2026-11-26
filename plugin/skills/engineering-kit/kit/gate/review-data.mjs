@@ -18,10 +18,13 @@ export const isSerious = (f) => ['high', 'medium'].includes(f?.severity);
 /** 判断文字是否给出了实际内容：去掉不可见字符和 HTML 字符实体后要有文字或数字，去掉标点、符号和空白后也不能只剩占位词（“无。”“（暂无）”同样算没写）。 */
 export function hasContent(s) {
   if (typeof s !== 'string') return false;
-  const clean = s.replace(/\p{Cf}|&(?:[A-Za-z][A-Za-z0-9]*|#\d+|#x[0-9a-fA-F]+);/gu, '').trim();
+  const clean = s.replace(/\p{Cf}|\p{Default_Ignorable_Code_Point}|&(?:[A-Za-z][A-Za-z0-9]*|#\d+|#x[0-9a-fA-F]+);/gu, '').trim();
   const bare = clean.replace(/[\p{P}\p{S}\p{Z}\s]+/gu, '').toLowerCase();
   return /[\p{L}\p{N}]/u.test(clean) && !PLACEHOLDERS.includes(clean.toLowerCase()) && !PLACEHOLDERS.includes(bare);
 }
+
+/** 不是仓库相对 POSIX 路径：含反斜杠、盘符开头，或有空段、`.`、`..`。 */
+const badRepoPath = (file) => file.includes(String.fromCharCode(92)) || /^[a-z]:/i.test(file) || file.split('/').some((part) => ['', '.', '..'].includes(part));
 
 /** 检查文本类型、长度、不可见字符及必填内容，每栏报告一个具体问题。 */
 function textIssue(s, { single = false, required = false, max = 4000 } = {}) {
@@ -53,7 +56,7 @@ export function validateReviewData(data, { sections = [], flow, minChars = 0 } =
     if (typeof v === 'string' && seen?.has(v)) errors.push(`${at} 编号 ${v} 重复`);
     seen?.add(v);
   }
-  if (!object(data, '复审数据', ['format', 'kind', 'risk', 'verdict', 'reviewedCommit', 'reviewedBase', 'sections', 'findings', 'testGaps', 'dispositions'])) return errors;
+  if (!object(data, '复审数据', ['format', 'kind', 'risk', 'verdict', 'reviewedCommit', 'reviewedBase', 'sections', 'findings', 'testGaps', 'dispositions', 'unreviewedFiles', 'priorFailSha'])) return errors;
   choice(data.format, 'format', [REVIEW_FORMAT]);
   choice(data.kind, 'kind', ['code', 'consistency']);
   choice(data.verdict, 'verdict', ['pass', 'fail']);
@@ -62,6 +65,17 @@ export function validateReviewData(data, { sections = [], flow, minChars = 0 } =
     if (flow !== 'pr' && data[k] === null) continue;
     if (typeof data[k] !== 'string' || !/^[0-9a-f]{40}$/.test(data[k])) errors.push(`${k} 须为 40 位小写十六进制提交号`);
   }
+  if ('unreviewedFiles' in data) {
+    if (!Array.isArray(data.unreviewedFiles)) errors.push('unreviewedFiles 须为数组');
+    else {
+      if (new Set(data.unreviewedFiles).size !== data.unreviewedFiles.length) errors.push('unreviewedFiles 有重复路径');
+      for (const file of data.unreviewedFiles) {
+        checkText(file, 'unreviewedFiles', { single: true, required: true });
+        if (typeof file === 'string' && badRepoPath(file)) errors.push(`unreviewedFiles 须为仓库相对路径：${file}`);
+      }
+    }
+  }
+  if ('priorFailSha' in data && data.priorFailSha !== null && (typeof data.priorFailSha !== 'string' || !/^[0-9a-f]{64}$/.test(data.priorFailSha))) errors.push('priorFailSha 须为 64 位小写十六进制指纹或 null');
   let chars = 0;
   if (!isObject(data.sections)) errors.push('sections 须为对象');
   else {
@@ -155,9 +169,10 @@ export const compactFindings = (findings) => findings.map(({ id, severity, files
   ({ id, severity, files, unresolvable, systemic, prior }));
 
 /** 判断被审范围能否从分叉点或已有同种完整登记连续覆盖到被审提交。 */
-export function coverageOf({ reviewedBase, reviewedCommit, forkPoint, coveredCommits, baseIsAncestor }) {
+export function coverageOf({ reviewedBase, reviewedCommit, forkPoint, coveredCommits = [], baseIsAncestor, unreviewedFiles = [] }) {
   let why = '';
-  if (reviewedBase === reviewedCommit) why = '基准等于被审提交，未覆盖任何差异';
+  if (unreviewedFiles.length) why = `以下改动文件没有交给复审者：${unreviewedFiles.join('、')}；这部分须由能看到它们的复审者完整复审后才能放行`;
+  else if (reviewedBase === reviewedCommit) why = '基准等于被审提交，未覆盖任何差异';
   else if (!baseIsAncestor) why = `基准 ${reviewedBase} 不是被审提交 ${reviewedCommit} 的祖先`;
   else if (reviewedBase !== forkPoint && !coveredCommits.includes(reviewedBase)) why = `从分叉点 ${forkPoint ?? '（未知）'} 到基准 ${reviewedBase} 缺少同种审查的完整覆盖`;
   return { full: !why, why };
@@ -179,14 +194,15 @@ export function admissionProblems({ data, kind, verdict, flow, evidenceChecked, 
   if (data.verdict !== (verdict === 'accept' ? 'fail' : verdict)) errors.push(verdict === 'accept' ? 'accept 要求报告结论为不通过' : `报告结论是 ${data.verdict}，不能记录为 ${verdict}`);
   if (data.risk === 'high' && !hasContent(evidenceChecked)) errors.push('中高风险须用 --evidence-checked 写明主对话核对的证据');
   for (const f of missingFiles) errors.push(`被审范围中找不到文件 ${f}`);
+  if (coverage && ['accept', 'pass'].includes(verdict) && !coverage.full) errors.push(`只覆盖部分差异：${coverage.why}`);
   if (flow !== 'pr') return errors;
   const headProblem = reviewedHeadProblem(data.reviewedCommit, prHead);
   if (headProblem) errors.push(headProblem);
   if (['accept', 'pass'].includes(verdict)) {
-    if (!coverage.full) errors.push(`只覆盖部分差异：${coverage.why}`);
     if (data.risk !== 'high' && prior.some((r) => r.risk === 'high' && ['pass', 'fail', 'accept'].includes(r.verdict))) errors.push('此前已按中高风险登记，本轮不能降低风险档位');
   }
   const prev = previousFail(prior, data.kind, data.reviewedCommit);
+  if (data.priorFailSha && data.priorFailSha !== (prev?.dataSha ?? null)) errors.push(`复审依据的上一份不通过数据（${data.priorFailSha.slice(0, 12)}）不是当前登记历史里的上一份（${prev?.dataSha ? prev.dataSha.slice(0, 12) : '没有'}），按当前历史重新复核`);
   const ids = new Set((prev?.findings ?? []).filter(isSerious).map((f) => f.id));
   const dispositions = data.dispositions ?? [];
   for (const id of ids) if (!dispositions.some((d) => d.id === id)) errors.push(`缺少上轮 ${id} 的处置`);

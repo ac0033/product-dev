@@ -454,10 +454,10 @@ test('S2 admissionProblems：missingFiles 逐个列出', () => {
   assert.deepEqual(adm({ missingFiles: [] }), []);
 });
 
-test('S2 admissionProblems：pre-push 流程不做 H3、H7、S7、S8，仍做结论一致与 missingFiles', () => {
+test('S2 admissionProblems：pre-push 流程不做 H3、S7、S8，仍做结论一致与 missingFiles；没有被审范围时不核对覆盖', () => {
   const data = reviewData({ reviewedCommit: null, reviewedBase: null, dispositions: [FIXED] });
   const base = { data, kind: 'code', flow: 'pre-push', prHead: null, evidenceChecked: null, missingFiles: [] };
-  const p = admissionProblems({ ...base, verdict: 'pass', prior: [rec({ risk: 'high' })], coverage: { full: false, why: '缺一段' } });
+  const p = admissionProblems({ ...base, verdict: 'pass', prior: [rec({ risk: 'high' })], coverage: null });
   assert.deepEqual(p, []);
   const bad = admissionProblems({ ...base, verdict: 'fail', prior: [], coverage: { full: true, why: '' }, missingFiles: ['x.ts'] });
   assert.ok(has(bad, '结论') && has(bad, 'x.ts'), bad.join(' / '));
@@ -540,4 +540,41 @@ test('S5 renderReport：通过的数据结论写通过；处置与测试缺口�
 test('S2 hasContent：占位词带标点或括号（“无。”“（暂无）”“N/A.”“- 无”）也算没有内容；正常句子不受影响', () => {
   for (const s of ['无。', '暂无！', '（无）', '“无”', 'N/A.', 'TBD!', '- 无', '待补…', '无；']) assert.equal(hasContent(s), false, JSON.stringify(s));
   for (const s of ['无法复现。', '无（见 M1）', '没有无', 'none of the callers check it.']) assert.equal(hasContent(s), true, JSON.stringify(s));
+});
+
+test('H7 admissionProblems：pre-push 流程给了被审范围（如外部复审）时同样要求完整覆盖，部分覆盖的 pass、accept 拒绝，fail 放行（PR #42 一致性审 M1）', () => {
+  const data = reviewData({ reviewedCommit: B, reviewedBase: M });
+  const base = { data, kind: 'code', flow: 'pre-push', prHead: null, evidenceChecked: null, missingFiles: [], prior: [] };
+  const partial = { full: false, why: '缺一段' };
+  assert.ok(has(admissionProblems({ ...base, verdict: 'pass', coverage: partial }), '覆盖'));
+  const failData = failingData({ reviewedCommit: B, reviewedBase: M });
+  assert.deepEqual(admissionProblems({ ...base, data: failData, verdict: 'fail', coverage: partial }), []);
+});
+
+test('H7 coverageOf：有没交给复审者的改动文件时不是完整覆盖，原因列出这些文件（PR #42 双审 H1）', () => {
+  const c = coverageOf({ reviewedBase: M, reviewedCommit: B, forkPoint: M, coveredCommits: [], baseIsAncestor: true, unreviewedFiles: ['src/secret-algo.ts'] });
+  assert.equal(c.full, false);
+  assert.match(c.why, /src\/secret-algo\.ts/);
+  assert.equal(coverageOf({ reviewedBase: M, reviewedCommit: B, forkPoint: M, coveredCommits: [], baseIsAncestor: true, unreviewedFiles: [] }).full, true);
+});
+
+test('S2 validateReviewData：unreviewedFiles 只收仓库相对路径、不重复；priorFailSha 只收 64 位十六进制或 null', () => {
+  assert.deepEqual(validateReviewData(reviewData({ unreviewedFiles: ['src/a.ts'], priorFailSha: null }), { sections: ['范围', '发现', '作者的验证'] }), []);
+  for (const bad of [['../x'], ['/abs'], ['a', 'a'], 'src/a.ts']) assert.ok(validateReviewData(reviewData({ unreviewedFiles: bad }), { sections: ['范围', '发现', '作者的验证'] }).length > 0, JSON.stringify(bad));
+  assert.ok(validateReviewData(reviewData({ priorFailSha: 'abc' }), { sections: ['范围', '发现', '作者的验证'] }).some((e) => e.includes('priorFailSha')));
+});
+
+test('S8 admissionProblems：数据写明依据的上一份不通过数据指纹，与登记历史里的上一份不同时拒绝（PR #42 双审 M3/M2）', () => {
+  const sha = (c) => c.repeat(64);
+  const prior = [rec({ verdict: 'fail', headSha: M, dataSha: sha('a'), findings: [{ id: 'M1', severity: 'medium', files: [], unresolvable: false, systemic: false, prior: null }] })];
+  const data = prData({ dispositions: [FIXED], priorFailSha: sha('b') });
+  const p = admissionProblems({ data, verdict: 'pass', kind: 'code', flow: 'pr', prHead: B, prior, evidenceChecked: null, coverage: { full: true, why: '' }, missingFiles: [] });
+  assert.ok(has(p, '上一份'), p.join(' / '));
+  const ok = admissionProblems({ data: { ...data, priorFailSha: sha('a') }, verdict: 'pass', kind: 'code', flow: 'pr', prHead: B, prior, evidenceChecked: null, coverage: { full: true, why: '' }, missingFiles: [] });
+  assert.ok(!has(ok, '上一份'), ok.join(' / '));
+});
+
+test('S2 hasContent：默认可忽略字符（U+3164 HANGUL FILLER、U+115F、U+FFA0）不算内容（PR #42 代码复审 M6）', () => {
+  for (const cp of [0x3164, 0x115f, 0xffa0]) assert.equal(hasContent(String.fromCodePoint(cp)), false, cp.toString(16));
+  assert.equal(hasContent(String.fromCodePoint(0x3164) + '修复'), true);
 });

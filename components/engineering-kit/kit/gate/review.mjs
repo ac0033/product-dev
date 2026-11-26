@@ -91,13 +91,23 @@ function checkedData({ config, reviewer, reportPath, reviewData }) {
   return issues.length ? { message: issues.join('\n') } : { data };
 }
 
-/** 在被审树和基准树核对定位路径，推送前流程另查当前工作区。 */
-function missingPaths(root, data, flow) {
+/** 在被审树和基准树核对定位路径；推送前流程查工作区、HEAD 和与主干的分叉点（功能分支已提交删除的文件只在分叉点的树里）。 */
+function missingPaths(root, data, flow, base = null) {
   const files = new Set(data.findings.flatMap((f) => f.files ?? []));
   const inTree = (rev, file) => git(root, ['cat-file', '-e', `${rev}:${file}`]).ok;
   return [...files].filter((file) => flow === 'pr'
     ? !inTree(data.reviewedCommit, file) && !inTree(data.reviewedBase, file)
-    : !fs.existsSync(path.join(root, file)) && !inTree('HEAD', file));
+    : !fs.existsSync(path.join(root, file)) && !inTree('HEAD', file) && !(base && inTree(base, file)));
+}
+
+/** pre-push 流程的覆盖：数据给了被审范围才核对（外部复审一定给），范围须从与主干的分叉点开始，且没有未交给复审者的改动文件；没给范围的返回 null，不核对。 */
+function prePushCoverage(root, data, config) {
+  if (!data.reviewedCommit || !data.reviewedBase) return null;
+  return coverageOf({
+    reviewedBase: data.reviewedBase, reviewedCommit: data.reviewedCommit, coveredCommits: [], unreviewedFiles: data.unreviewedFiles ?? [],
+    forkPoint: forkPoint(root, resolveBase(root, config.base), data.reviewedCommit),
+    baseIsAncestor: git(root, ['merge-base', '--is-ancestor', data.reviewedBase, data.reviewedCommit]).ok,
+  });
 }
 
 /** 将规范数据与生成的报告存为一对副本，供历史索引引用。 */
@@ -223,7 +233,9 @@ export function recordReview({ root, verdict, reviewer, reportPath, reviewData, 
   if (checked.message) return { ok: false, message: checked.message };
   const { data } = checked;
   if (data) {
-    const issues = admissionProblems({ data, kind: k, verdict, flow: config.reviewFlow, evidenceChecked, missingFiles: missingPaths(root, data, config.reviewFlow) });
+    let fork = null; // 基准分支解析不了时只查工作区和 HEAD（与改动前一样），覆盖另由 prePushCoverage 按被审范围判定
+    try { fork = forkPoint(root, resolveBase(root, config.base), 'HEAD'); } catch { fork = null; }
+    const issues = admissionProblems({ data, kind: k, verdict, flow: config.reviewFlow, evidenceChecked, coverage: prePushCoverage(root, data, config), missingFiles: missingPaths(root, data, config.reviewFlow, fork) });
     if (issues.length) return { ok: false, message: issues.join('\n') };
   }
 
@@ -302,7 +314,7 @@ function registerLocked({ root, config, verdict, reviewer, data, evidenceChecked
     const { reviewedBase, reviewedCommit } = data;
     const unavailable = [reviewedCommit, reviewedBase].filter((rev) => !git(root, ['cat-file', '-e', `${rev}^{commit}`]).ok);
     const coveredCommits = prior.filter((r) => r.kind === kind && ['pass', 'fail', 'accept'].includes(r.verdict) && r.coverage === 'full').map((r) => r.headSha);
-    coverage = coverageOf({ reviewedBase, reviewedCommit, coveredCommits,
+    coverage = coverageOf({ reviewedBase, reviewedCommit, coveredCommits, unreviewedFiles: data.unreviewedFiles ?? [],
       forkPoint: forkPoint(root, resolveBase(root, config.base), reviewedCommit),
       baseIsAncestor: git(root, ['merge-base', '--is-ancestor', reviewedBase, reviewedCommit]).ok,
     });

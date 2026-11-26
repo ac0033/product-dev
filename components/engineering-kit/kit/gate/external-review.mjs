@@ -224,7 +224,7 @@ function gitOk(root, args, what) {
  * 组一份任务：被审的基准与最终提交、去掉敏感文件的 diff、上下文、模型与限制。返回 { request, excluded }，
  * excluded 是因敏感而没有外发的文件。最终提交必须已在本地（先 git fetch）。diff 超过上限时抛错（不截断：截断的输入审不完整）。
  */
-export function buildRequest({ root, baseSha, headSha, kind, round, model, limits, extraExclude = [], contextText = null, priorReport = null, priorFindings = [], risk = 'low' }) {
+export function buildRequest({ root, baseSha, headSha, kind, round, model, limits, extraExclude = [], contextText = null, priorReport = null, priorFindings = [], priorFailSha = null, risk = 'low' }) {
   for (const [label, rev] of [['基准', baseSha], ['最终提交', headSha]]) {
     if (rev !== EMPTY_TREE && !git(root, ['cat-file', '-e', `${rev}^{commit}`]).ok) throw new Error(`${label} ${rev} 不在本地，请先 git fetch`);
   }
@@ -240,7 +240,7 @@ export function buildRequest({ root, baseSha, headSha, kind, round, model, limit
     version: PROTOCOL_VERSION,
     review: { kind, round, risk },
     target: { baseSha, headSha, diff, files: names.filter((f) => !excluded.includes(f)), excludedFiles: excluded },
-    context: { instructions: reviewInstructions(kind, round, risk), project: contextText, priorReport, ...(priorFindings.length ? { priorFindings } : {}) },
+    context: { instructions: reviewInstructions(kind, round, risk), project: contextText, priorReport, ...(priorFindings.length ? { priorFindings } : {}), ...(priorFailSha ? { priorFailSha } : {}) },
     model,
     limits: { timeoutMs: limits.timeoutMs, maxTurns: limits.maxTurns },
   };
@@ -298,8 +298,13 @@ export function materialize(root, headSha, dir, { exclude = [], maxBytes = DEFAU
   });
   const total = blobs.reduce((n, e) => n + e.size, 0);
   if (total > maxBytes) throw new Error(`被审提交有 ${total} 字节的文件，超过只读副本上限 ${maxBytes}`);
-  fs.mkdirSync(path.dirname(dir), { recursive: true });
-  fs.mkdirSync(dir, { mode: 0o700 });
+  const existing = fs.lstatSync(dir, { throwIfNoEntry: false });
+  if (!existing) {
+    fs.mkdirSync(path.dirname(dir), { recursive: true });
+    fs.mkdirSync(dir, { mode: 0o700 });
+  } else if (!existing.isDirectory() || existing.isSymbolicLink() || fs.readdirSync(dir).length > 0) {
+    throw new Error(`只读副本目录须是本次新建的空目录：${dir}`);
+  }
   if (blobs.length > 0) {
     const r = spawnSync('git', ['cat-file', '--batch'], { cwd: root, input: `${blobs.map((e) => e.oid).join('\n')}\n`, maxBuffer: total + blobs.length * 128 + 1024 * 1024 });
     if (r.status !== 0) throw new Error(`读取被审提交的文件失败：${String(r.stderr)}`);
@@ -418,10 +423,12 @@ export function changedParts(before, after) {
 function removeCopy(dir, runDir, identity) {
   if (!ownedCopy(dir, runDir, identity)) return '副本路径已被替换或移走，未清理';
   const walk = (d) => {
-    for (const ent of fs.readdirSync(d, { withFileTypes: true })) {
-      const p = path.join(d, ent.name);
-      if (ent.isDirectory()) walk(p);
-      else if (process.platform === 'win32' && ent.isFile() && fs.lstatSync(p).nlink === 1) fs.chmodSync(p, 0o666);
+    for (const name of fs.readdirSync(d)) {
+      const p = path.join(d, name);
+      const st = fs.lstatSync(p, { throwIfNoEntry: false });
+      if (!st || st.isSymbolicLink()) continue;
+      if (st.isDirectory()) walk(p);
+      else if (process.platform === 'win32' && st.isFile() && st.nlink === 1) fs.chmodSync(p, 0o666);
     }
   };
   try {
@@ -553,6 +560,29 @@ function executorLaunch(name, ex) {
 // ───────────────────────────── 结果核对 ─────────────────────────────
 
 /** 结果 JSON 的结构核对，返回问题列表（空表示合格）。 */
+/** 按协议的 JSON 结构（REVIEW_SCHEMA 里用到的 type、enum、properties、required、items、anyOf）逐层校验，返回问题列表。 */
+function schemaProblems(v, s, at) {
+  if (s.anyOf) {
+    const nonNull = s.anyOf.filter((x) => x.type !== 'null');
+    if (v === null && nonNull.length < s.anyOf.length) return [];
+    return nonNull.length === 1 ? schemaProblems(v, nonNull[0], at) : (s.anyOf.some((x) => schemaProblems(v, x, at).length === 0) ? [] : [`${at} 不符合协议结构`]);
+  }
+  const kindOf = (x) => (x === null ? 'null' : Array.isArray(x) ? 'array' : Number.isInteger(x) ? 'integer' : typeof x);
+  const types = [].concat(s.type ?? []);
+  if (types.length && !types.includes(kindOf(v))) return [`${at} 类型应为 ${types.join(' 或 ')}`];
+  if (s.enum && !s.enum.includes(v)) return [`${at} 只能是 ${s.enum.join('、')}`];
+  const p = [];
+  if (kindOf(v) === 'object' && s.properties) {
+    for (const k of s.required ?? []) if (!Object.hasOwn(v, k)) p.push(`${at} 缺少 ${k}`);
+    for (const k of Object.keys(v)) {
+      if (!Object.hasOwn(s.properties, k)) p.push(`${at} 含未知字段 ${k}`);
+      else p.push(...schemaProblems(v[k], s.properties[k], `${at}.${k}`));
+    }
+  }
+  if (kindOf(v) === 'array' && s.items) v.forEach((x, i) => p.push(...schemaProblems(x, s.items, `${at}[${i}]`)));
+  return p;
+}
+
 export function validateResult(res) {
   const p = [];
   if (!isObj(res)) return ['结果不是 JSON 对象'];
@@ -573,6 +603,7 @@ export function validateResult(res) {
       if (f.line !== null && !Number.isInteger(f.line)) p.push(`${at} line 须为整数或 null`);
     });
     for (const field of REVIEW_SCHEMA.required) if (!Object.hasOwn(r, field)) p.push(`review 缺少 ${field}`);
+    for (const field of ['testGaps', 'dispositions']) if (Object.hasOwn(r, field)) p.push(...schemaProblems(r[field], REVIEW_SCHEMA.properties[field], `review.${field}`));
     for (const field of Object.keys(r)) if (!REVIEW_SCHEMA.required.includes(field)) p.push(`review 含未知字段 ${field}`);
     if (!Array.isArray(r.limitations) || !r.limitations.every((x) => typeof x === 'string')) p.push('review.limitations 必须是字符串数组');
     if (typeof r.report !== 'string') p.push('review.report 必须是字符串');
@@ -646,7 +677,9 @@ export function toReviewData({ request, result, assessmentNotes = [] }) {
   ];
   return { format: REVIEW_FORMAT, kind: request.review.kind, risk: request.review.risk, reviewedBase: baseSha, reviewedCommit: headSha,
     verdict: verdictOf(findings), findings, sections: Object.fromEntries(EXTERNAL_SECTIONS.map((name, i) => [name, bodies[i]])),
-    testGaps: r.testGaps, dispositions: r.dispositions };
+    testGaps: r.testGaps, dispositions: r.dispositions,
+    ...(excludedFiles.length ? { unreviewedFiles: [...excludedFiles] } : {}),
+    ...(request.context.priorFailSha ? { priorFailSha: request.context.priorFailSha } : {}) };
 }
 
 const oneLine = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
@@ -727,19 +760,25 @@ function checkContextSize(value, label) {
   if (value != null && Buffer.byteLength(value) > 64 * 1024) throw new Error(`${label} 超过 64 KiB`);
 }
 
-/** 修后复核只发送同种审查上次失败记录中的高、中级摘要。 */
-function followupFindings(root, pr, kind) {
+/**
+ * 修后复核的待处置清单：同种审查在被审提交之前最后一次不通过的高、中级（与登记时 admissionProblems 的选取规则相同），连同那份数据的指纹。
+ * 上一轮是外部复审者做的，位置和问题原文本来就出自外发过的内容，原样带上；是本地复审者做的，原文可能引用不外发的文件，只带编号和级别。
+ */
+function followupFindings(root, pr, kind, headSha) {
   const history = readLog(prLogFile(root, prNumber(pr))).filter((r) => r.kind === kind);
   if (!history.length) throw new Error('同种审查尚无登记，首轮请用 --round first');
-  const prev = previousFail(history, kind);
-  if (!prev) return [];
+  const prev = previousFail(history, kind, headSha);
+  if (!prev) return { findings: [], sha: null };
   if (!prev.data) throw new Error('上轮失败登记缺少复审数据副本，无法生成待处置清单');
   if (fs.statSync(prev.data).size > MAX_REVIEW_BYTES) throw new Error('上一轮复审数据超过 512 KiB');
   const bytes = fs.readFileSync(prev.data);
   if (sha256(bytes) !== prev.dataSha) throw new Error('上轮失败登记的数据副本指纹不符');
-  const prior = JSON.parse(bytes).findings.filter(isSerious).map(({ id, severity, location, problem }) => ({ id, severity, location, problem }));
+  const external = typeof prev.reviewer === 'string' && prev.reviewer.startsWith(REVIEWER_PREFIX);
+  const prior = JSON.parse(bytes).findings.filter(isSerious).map(({ id, severity, location, problem }) => (external
+    ? { id, severity, location, problem }
+    : { id, severity, note: '上一轮由本地复审者做出，位置和问题原文不外发；按编号对照本次修复差异逐条处置' }));
   checkContextSize(JSON.stringify(prior), '上一轮待处置清单');
-  return prior;
+  return { findings: prior, sha: prev.dataSha };
 }
 
 /**
@@ -785,8 +824,8 @@ export async function runExternalReview(opts) {
   const fork = forkPoint(root, policy.baseRev, headSha);
   const baseSha = opts.base ? gitOk(root, ['rev-parse', '--verify', `${opts.base}^{commit}`], '解析 --base').trim() : (fork ?? policy.baseRev);
 
-  const priorFindings = config.reviewFlow === 'pr' && round === 'followup' ? followupFindings(root, pr, kind) : [];
-  const { request } = buildRequest({ root, baseSha, headSha, kind, round, risk, priorFindings, model, limits, extraExclude: policy.exclude, contextText: opts.contextText ?? null, priorReport: opts.priorReport ?? null });
+  const prior = config.reviewFlow === 'pr' && round === 'followup' ? followupFindings(root, pr, kind, headSha) : { findings: [], sha: null };
+  const { request } = buildRequest({ root, baseSha, headSha, kind, round, risk, priorFindings: prior.findings, priorFailSha: prior.sha, model, limits, extraExclude: policy.exclude, contextText: opts.contextText ?? null, priorReport: opts.priorReport ?? null });
   const requestText = JSON.stringify(request);
   const inputHash = sha256(requestText);
   const runDir = makeRunDir(root, opts.outDir, headSha);
@@ -797,8 +836,9 @@ export async function runExternalReview(opts) {
   try {
     fs.writeFileSync(path.join(runDir, 'request.json'), `${JSON.stringify(request, null, 2)}\n`);
     fs.writeFileSync(path.join(runDir, 'input.sha256'), `${inputHash}  request.json（被审 ${headSha}）\n`);
-    const copied = materialize(root, headSha, copy, { exclude: policy.exclude, maxBytes: limits.maxCopyBytes });
+    fs.mkdirSync(copy, { mode: 0o700 });
     identity = fs.lstatSync(copy);
+    const copied = materialize(root, headSha, copy, { exclude: policy.exclude, maxBytes: limits.maxCopyBytes });
     const copyHash = dirHash(copy);
     const repoBefore = repoState(root);
 
@@ -846,7 +886,7 @@ export async function runExternalReview(opts) {
       reviewData = toReviewData({ request, result, assessmentNotes: assessment.notes });
       assessment.dataSha = fingerprint(reviewData);
       const report = renderReport(reviewData, { reviewer, model: result.provenance.actualModel, keyword: config.reviewKeyword, fingerprint: assessment.dataSha,
-        extraLines: [`请求模型：${model.id}（来源 ${model.source}，由 ${model.chosenBy} 选择）`, `推理强度：${model.effort ?? '执行器默认'}`, `用量：${meta.usageLine}`, `输入哈希：${inputHash}`] });
+        extraLines: [`请求模型：${model.id}（来源 ${model.source}，由 ${model.chosenBy} 选择${model.reason ? `；依据：${model.reason}` : ''}）`, `推理强度：${model.effort ?? '执行器默认'}`, `用量：${meta.usageLine}`, `输入哈希：${inputHash}`] });
       fs.writeFileSync(path.join(runDir, 'review.json'), canonicalJson(reviewData), { flag: 'wx' });
       fs.writeFileSync(path.join(runDir, 'review.sha256'), assessment.dataSha + '\n', { flag: 'wx' });
       fs.writeFileSync(reportPath, report, { flag: 'wx' });

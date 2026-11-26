@@ -339,7 +339,7 @@ function prePushRepo() {
 }
 const prePush = (root, d, extra = {}) => recordReview({ root, verdict: d.verdict, reviewer: 'feature-dev:code-reviewer', reportPath: reviewDataFile(d), summary: 's', ...extra });
 
-test('S5 pre-push 流程：JSON 报告照常登记，不检查 reviewedCommit，记录带 risk、dataSha、findings', () => {
+test('S5 pre-push 流程：JSON 报告照常登记，不给被审范围时不核对覆盖，记录带 risk、dataSha、findings', () => {
   const root = prePushRepo();
   const d = reviewData({ findings: [finding({ id: 'L1', severity: 'low' })] });
   const r = prePush(root, d);
@@ -350,10 +350,69 @@ test('S5 pre-push 流程：JSON 报告照常登记，不检查 reviewedCommit，
   assert.equal(rec.dataSha, fingerprint(d));
   assert.deepEqual(rec.findings, compactFindings(d.findings));
   assert.ok(rec.report && fs.existsSync(rec.report));
-  // 带一个仓库里并不存在的 reviewedCommit：pre-push 不核对
+  // 给了被审范围（外部复审一定给）就核对完整覆盖：仓库里不存在的范围不能登记通过（PR #42 一致性审 M1）
   const root2 = prePushRepo();
   const r2 = prePush(root2, reviewData({ reviewedCommit: 'c'.repeat(40), reviewedBase: 'd'.repeat(40) }));
-  assert.equal(r2.ok, true, r2.message);
+  assert.equal(r2.ok, false, r2.message);
+  assert.match(r2.message, /覆盖/);
+});
+
+test('H7 pre-push 流程：被审范围从 HEAD 之前的中间提交开始（只审后段差异）时不能登记通过；从分叉点开始可以（PR #42 一致性审 M1）', () => {
+  const root = prePushRepo();
+  const fork = git(root, ['merge-base', 'main', 'HEAD']).trim();
+  commitAll(root, 'first half');
+  const mid = git(root, ['rev-parse', 'HEAD']).trim();
+  write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {
+  return [...new Set(items)].sort().reverse();
+}
+`);
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'later');\n");
+  commitAll(root, 'later');
+  const g = runGate({ root });
+  assert.equal(g.ok, true, JSON.stringify(g.problems ?? g.message ?? g));
+  const head = git(root, ['rev-parse', 'HEAD']).trim();
+  const narrow = prePush(root, reviewData({ reviewedCommit: head, reviewedBase: mid }));
+  assert.equal(narrow.ok, false, narrow.message);
+  assert.match(narrow.message, /覆盖/);
+  const full = prePush(root, reviewData({ reviewedCommit: head, reviewedBase: fork }));
+  assert.equal(full.ok, true, full.message);
+});
+
+test('S2 pre-push 流程：发现定位到功能分支上已提交删除的文件（只在分叉点的树里）时照常登记（PR #42 代码复审 M4）', () => {
+  const root = prePushRepo();
+  git(root, ['rm', '-q', '-f', 'src/dedup.ts']);
+  commitAll(root, 'drop dedup');
+  assert.equal(runGate({ root }).ok, true);
+  const r = prePush(root, failingData({ findings: [finding({ files: ['src/dedup.ts'] })] }), { verdict: 'fail' });
+  assert.equal(r.ok, true, r.message);
+});
+
+test('合并入口：代码复审的最新记录与登记历史的最后一条不一致时拒绝合并（上次登记写到一半失败；PR #42 双审 M2/M4）', () => {
+  const { root, main } = prRepo();
+  const head = addCommit(root, 1);
+  for (const kind of ['code', 'consistency']) assert.equal(reg(root, data(head, main, { kind }), { kind }).ok, true);
+  // 模拟：历史追加了一条新的 fail，最新记录没来得及替换
+  const log = path.join(prDir(root), 'log.jsonl');
+  const last = JSON.parse(fs.readFileSync(log, 'utf8').trim().split('\n').filter((l) => JSON.parse(l).kind === 'code').at(-1));
+  fs.appendFileSync(log, `${JSON.stringify({ ...last, verdict: 'fail', at: new Date(Date.now() + 1000).toISOString() })}\n`);
+  const gh = fakeGh(head);
+  const res = mergePr({ root, pr: '7', gh });
+  assert.equal(res.ok, false);
+  assert.ok(res.problems.some((p) => /不一致/.test(p)), res.problems.join(' / '));
+  assert.ok(!gh.calls.some((a) => a[1] === 'merge'));
+});
+
+test('A15 登记锁：持有者进程还活着时，锁目录再旧也不回收；持有者信息没写成且超过十分钟才回收（PR #42 双审 M1/M3）', () => {
+  const { root } = prRepo();
+  const dir = path.join(prDir(root), 'lock');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ pid: process.pid, startedAt: '2000-01-01T00:00:00.000Z' }));
+  const old = new Date(Date.now() - 60 * 60 * 1000);
+  fs.utimesSync(dir, old, old);
+  assert.throws(() => withPrLock(root, '7', () => 1), /登记锁被占用/);
+  fs.rmSync(path.join(dir, 'owner.json'));
+  fs.utimesSync(dir, old, old);
+  assert.equal(withPrLock(root, '7', () => 42), 42);
 });
 
 test('S2 pre-push 流程：数据不合格或是 Markdown 时拒绝且不写记录；pre-push 不做 S7（高风险 fail 后低风险 pass 放行）', () => {

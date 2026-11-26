@@ -37,7 +37,7 @@ import {
   validateResult,
 } from '../gate/external-review.mjs';
 import { recordReview } from '../gate/review.mjs';
-import { commitAll, featureRepo, git, reviewData, tmpDir, write } from './helpers.mjs';
+import { commitAll, failingData, featureRepo, finding, git, reviewData, tmpDir, write } from './helpers.mjs';
 import * as ER from '../gate/external-review.mjs';
 
 /** 外部复审的输出转成 ek-review/1 数据后由 review-data.mjs 校验；模块还没有时（实现前）退成空对象，只让用到它的用例失败，不拖垮整个文件。 */
@@ -122,14 +122,19 @@ function fakeGh(heads) {
   return gh;
 }
 
-/** pr 流程的仓库：主干上允许假执行器、复审者名单含 external:fake；功能分支提交一处改动和几个敏感文件。 */
-function repo({ allow = ['fake'], maxRounds, sections } = {}) {
+/**
+ * pr 流程的仓库：主干上允许假执行器、复审者名单含 external:fake；功能分支提交一处改动和 agent 设置文件。
+ * secrets 为真时另提交几个敏感文件（它们不外发，外部复审因此只算部分覆盖，见 PR #42 双审 H1），只给专门测“不外发”的用例用。
+ */
+function repo({ allow = ['fake'], maxRounds, sections, secrets = false } = {}) {
   const root = featureRepo({ reviewFlow: 'pr', reviewers: ['feature-dev:code-reviewer', 'external:fake'], externalExecutors: allow, ...(maxRounds ? { maxReviewRounds: maxRounds } : {}), ...(sections ? { reviewSections: sections } : {}) });
   write(root, 'src/auth.ts', '// 权限模块：删除记录前校验所有者。\nexport function canDelete() {\n  return true;\n}\n');
-  write(root, '.env', 'API_KEY=should-not-leave\n');
-  write(root, 'keys/server.pem', '-----BEGIN PRIVATE KEY-----\n');
   write(root, '.claude/settings.json', '{"hooks":{}}\n');
-  git(root, ['add', '-f', '.env', 'keys/server.pem']); // 本机的全局 gitignore 可能忽略它们；真实项目里误提交的正是这种文件
+  if (secrets) {
+    write(root, '.env', 'API_KEY=should-not-leave\n');
+    write(root, 'keys/server.pem', '-----BEGIN PRIVATE KEY-----\n');
+    git(root, ['add', '-f', '.env', 'keys/server.pem']); // 本机的全局 gitignore 可能忽略它们；真实项目里误提交的正是这种文件
+  }
   commitAll(root, 'feat');
   return { root, head: git(root, ['rev-parse', 'HEAD']).trim() };
 }
@@ -307,7 +312,7 @@ test('复审者写文件：只读副本哈希变化，不可登记；仓库工�
 });
 
 test('组包：敏感文件不进 diff 和副本；agent 设置只进 diff 不进副本；副本里的文件只读', async () => {
-  const { root, head } = repo();
+  const { root, head } = repo({ secrets: true });
   const res = await run(root, head, 'pass');
   const seen = JSON.parse(fs.readFileSync(path.join(res.runDir, 'raw', 'seen.json'), 'utf8'));
   assert.doesNotMatch(seen.req.target.diff, /should-not-leave|PRIVATE KEY/);
@@ -1373,4 +1378,58 @@ test('S9 命令行：--context、--prior-report 超过 64 KiB 在建运行目录
   const badRisk = spawnSync(process.execPath, [cli, 'run', '--executor', 'fake', '--risk', 'medium'], { cwd: root, encoding: 'utf8', env });
   assert.equal(badRisk.status, 1, badRisk.stdout + badRisk.stderr);
   assert.match(badRisk.stderr, /--risk/);
+});
+
+test('H7 外部复审没外发的改动文件写进数据的 unreviewedFiles，登记时只算部分覆盖：pass 被拒、fail 可登记（PR #42 双审 H1）', async () => {
+  const { root, head } = repo({ secrets: true });
+  const res = await run(root, head, 'pass');
+  assert.equal(res.ok, true, res.message);
+  assert.deepEqual([...dataOf(res).unreviewedFiles].sort(), ['.env', 'keys/server.pem']);
+  const refused = registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh([head]) });
+  assert.equal(refused.ok, false);
+  assert.match(refused.message, /没有交给复审者/);
+  const failed = await run(root, head, 'fail');
+  assert.equal(registerRun({ root, runDir: failed.runDir, summary: 's', gh: fakeGh([head]) }).ok, true);
+});
+
+test('S9 修后复核：上一轮由本地复审者登记时，待处置清单只外发编号和级别，不外发位置和问题原文；任务带上一份数据的指纹，复审数据原样带回（PR #42 代码复审 H2、M3）', async () => {
+  const { root, head } = repo();
+  const local = failingData({ reviewedCommit: head, reviewedBase: git(root, ['merge-base', 'main', head]).trim(), findings: [finding({ problem: '机密文件 vendor/secret.ts 里的算法有缺陷。' })] });
+  const reg = recordReview({ root, verdict: 'fail', reviewer: 'feature-dev:code-reviewer', reviewData: local, summary: 's', pr: '7', kind: 'code', gh: fakeGh([head]) });
+  assert.equal(reg.ok, true, reg.message);
+  const head2 = nextHead(root, 'fix-local');
+  const res = await run(root, head2, 'pass', { gh: fakeGh([head2]), round: 'followup' });
+  assert.equal(res.ok, true, res.message);
+  const request = readJson(path.join(res.runDir, 'request.json'));
+  assert.deepEqual(request.context.priorFindings.map((p) => p.id), ['M1']);
+  assert.doesNotMatch(JSON.stringify(request.context.priorFindings), /vendor\/secret|机密/);
+  assert.equal(request.context.priorFailSha, reg.record.dataSha);
+  assert.equal(dataOf(res).priorFailSha, reg.record.dataSha);
+  assert.equal(registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh([head2]) }).ok, true);
+});
+
+test('S9 协议 2：执行器的测试缺口少了协议必填的 findings、处置少了 evidence 时不出可登记的产物（PR #42 代码复审 M7）', () => {
+  const ok = { version: 2, execution: { status: 'completed' }, provenance: { executor: 'x', actualModel: 'm' }, review: { verdict: 'pass', findings: [], limitations: [], report: 'r', testGaps: null, dispositions: [] } };
+  assert.deepEqual(ER.validateResult(ok), []);
+  const gap = { status: 'verified', note: '有测试。' };
+  const badGaps = { ...ok, review: { ...ok.review, testGaps: { functions: gap, layers: { ...gap, findings: [] }, boundaries: { ...gap, findings: [] } } } };
+  assert.ok(ER.validateResult(badGaps).some((p) => /testGaps.*findings/.test(p)), ER.validateResult(badGaps).join(' / '));
+  const badDisp = { ...ok, review: { ...ok.review, dispositions: [{ id: 'M1', status: 'fixed' }] } };
+  assert.ok(ER.validateResult(badDisp).some((p) => /dispositions.*evidence/.test(p)), ER.validateResult(badDisp).join(' / '));
+});
+
+test('H6 只读副本：materialize 只往本次新建的空目录里写，目录已有文件时拒绝且不动这些文件（PR #42 代码复审 M5）', () => {
+  const { root, head } = repo();
+  const dir = path.join(tmpDir('ekit-mat-'), 'workspace');
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'keep.txt'), 'sentinel');
+  assert.throws(() => ER.materialize(root, head, dir), /空目录/);
+  assert.equal(fs.readFileSync(path.join(dir, 'keep.txt'), 'utf8'), 'sentinel');
+});
+
+test('报告写明模型选择依据（--model-reason）（PR #42 一致性审 L1）', async () => {
+  const { root, head } = repo();
+  const res = await run(root, head, 'pass', { model: 'fake-model-1', modelReason: '跨厂商比不出强弱，按默认档' });
+  assert.equal(res.ok, true, res.message);
+  assert.match(fs.readFileSync(res.reportPath, 'utf8'), /跨厂商比不出强弱/);
 });

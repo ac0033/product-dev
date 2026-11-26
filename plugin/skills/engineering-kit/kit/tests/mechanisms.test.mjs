@@ -750,10 +750,12 @@ test('合并入口：代码复审之后只改了文档时仍认代码复审记�
   const code = mergePr({ root, pr: '7', gh });
   assert.ok(code.problems.some((p) => p.startsWith('代码复审记录已过期')), code.problems.join('\n'));
 
-  // 本地没有记录里的提交：算不出差异，按过期处理
+  // 记录里的提交被改成本地没有的提交：与登记历史的最后一条对不上（PR #42 起先核对这一条），无论哪条原因都不放行
   const rec = JSON.parse(read(root, '.git/engineering-gate/pr/7/code.json'));
   fs.writeFileSync(`${root}/.git/engineering-gate/pr/7/code.json`, JSON.stringify({ ...rec, headSha: 'c'.repeat(40) }));
-  assert.ok(mergePr({ root, pr: '7', gh }).problems.some((p) => p.startsWith('代码复审记录已过期')));
+  const tampered = mergePr({ root, pr: '7', gh });
+  assert.equal(tampered.ok, false);
+  assert.ok(tampered.problems.some((p) => p.startsWith('代码复审记录已过期') || p.startsWith('代码复审的最新记录与登记历史的最后一条不一致')), tampered.problems.join('\n'));
 });
 
 // ---------- 8. 上一个 PR 复审留下的低级问题 ----------
