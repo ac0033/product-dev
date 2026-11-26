@@ -18,14 +18,18 @@ import { loadConfig, readRecord, scopeFiles, treeHash, writeRecord } from '../ga
 import { mergePr } from '../gate/merge.mjs';
 import { recordReview } from '../gate/review.mjs';
 import { verify } from '../gate/verify.mjs';
-import { commitAll, featureRepo, git, reportFile, SRC_HEADER, TEST_CONFIG, tmpRepo, write, tmpDir } from './helpers.mjs';
+import { commitAll, failingData, featureRepo, finding, git, reportFile, reviewData, reviewDataFile, SRC_HEADER, TEST_CONFIG, tmpRepo, write, tmpDir } from './helpers.mjs';
 
 const KIT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-/** 合格的复审报告正文（不含结论），字数够。 */
-const BODY = '范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n已逐条核对改动的 dedup 函数与测试用例，边界条件（空数组、重复项）均有覆盖，调用方也已核对。\n处置：无需处理。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n';
-/** 结论为通过的合格报告。 */
-const PASS_REPORT = `${BODY}结论\n通过\n`;
+/** 合格的复审数据（ek-review/1）的两节文字：合计超过测试配置的最少字数（60 字）。 */
+const SECTIONS = { 范围: '读了 dedup 函数、调用方和对应测试，确认改动范围与说明一致。', 作者的验证: '核对了作者给出的测试输出，边界条件（空数组、重复项）均有覆盖，没有重跑。' };
+
+/** 合格的通过数据：低风险、没有发现。 */
+const goodData = () => reviewData({ sections: SECTIONS });
+
+/** 不通过的数据：一条合格的中级发现。 */
+const failData = () => failingData({ sections: SECTIONS });
 
 /** 在功能分支上做一份能过静态检查的改动（源文件与引用它的测试一起改）。 */
 function passingChange(root, tag = 'sorted') {
@@ -33,9 +37,9 @@ function passingChange(root, tag = 'sorted') {
   write(root, 'test/dedup.test.ts', `import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, '${tag}');\n`);
 }
 
-/** 登记一次 pre-push 复审（pass，合格报告）。 */
-function reviewPass(root, report = PASS_REPORT) {
-  return recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(report), summary: 's' });
+/** 登记一次 pre-push 复审（pass，默认是合格的通过数据）。 */
+function reviewPass(root, data = goodData()) {
+  return recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reviewDataFile(data), summary: 's' });
 }
 
 // ---------- 1. 分支靠改自己的配置豁免自己 ----------
@@ -327,45 +331,40 @@ function gatedRepo(config) {
   return root;
 }
 
-test('漏洞 4：“结论：**未**通过”“结论：有 2 个高级问题，不通过”不能登记为 pass', () => {
-  for (const line of ['结论：**未**通过\n', '结论：有 2 个高级问题，不通过\n', '## 结论\n\n未通过：H1 未修复。\n']) {
-    const root = gatedRepo();
-    const r = reviewPass(root, `${BODY}${line}`);
-    assert.equal(r.ok, false, `${line} → ${r.message}`);
-  }
-});
-
-test('漏洞 4：“结论：未通过的问题已修复，通过”是通过；报告模板的“## 结论”下一行写法照常可用', () => {
-  // 0.6.0 起报告模板的结论一节改成不带括号的示例写法（二选一）；带括号的占位写法“通过（或 不通过）”不再认作通过
-  for (const line of ['结论：未通过的问题已修复，通过\n', '## 结论\n\n通过。一句话理由；无高、中级问题。\n', '> **结论**：**通过**\n', '结论：通过\n']) {
-    const root = gatedRepo();
-    const r = reviewPass(root, `${BODY}${line}`);
-    assert.equal(r.ok, true, `${line} → ${r.message}`);
-  }
-  const placeholder = reviewPass(gatedRepo(), `${BODY}## 结论\n\n通过（或 不通过）。一句话理由；无高、中级问题。\n`);
-  assert.equal(placeholder.ok, false, placeholder.message);
-  assert.match(placeholder.message, /括号/);
-});
-
-test('漏洞 4：登记 fail 要求结论是不通过；找不到明确结论或前后矛盾时拒绝并提示写法', () => {
+test('S1 Markdown 报告不再能登记：旧的结论写法（“结论：通过”“## 结论 / 通过”）不再被识别，传 .md 文本一律被拒并提示 JSON', () => {
   const root = gatedRepo();
-  const f = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(PASS_REPORT), summary: 's' });
-  assert.equal(f.ok, false, f.message);
-  assert.match(f.message, /结论/);
-  const f2 = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(`${BODY}结论：有高级问题，不通过\n`), summary: 's' });
-  assert.equal(f2.ok, true, f2.message);
-  const none = reviewPass(root, `${BODY}结论部分见上面的发现表，整体看起来没有问题。\n`);
-  assert.equal(none.ok, false, none.message);
-  assert.match(none.message, /结论：通过/, '提示正确写法');
-  const both = reviewPass(root, `${BODY}结论：通过\n补充说明若干。\n## 结论\n不通过\n`);
-  assert.equal(both.ok, false, both.message);
+  const body = '范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n';
+  for (const tail of ['结论：通过\n', '## 结论\n\n通过。一句话理由；无高、中级问题。\n', '> **结论**：**通过**\n', '结论：有 2 个高级问题，不通过\n']) {
+    const r = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(`${body}${tail}`), summary: 's' });
+    assert.equal(r.ok, false, tail);
+    assert.match(r.message, /JSON/);
+  }
+  assert.equal(readRecord(root, 'review.json'), null, '拒绝时不写记录');
 });
 
-test('漏洞 4：reviewKeyword 可配置，换了关键词也按同样两种写法判定', () => {
+test('S4 结论与发现一致：pass 却有中级发现、fail 却没有高中级发现都拒绝；有中级发现的 fail 可登记', () => {
+  const root = gatedRepo();
+  const passWithMedium = reviewPass(root, { ...failData(), verdict: 'pass' });
+  assert.equal(passWithMedium.ok, false, passWithMedium.message);
+  assert.match(passWithMedium.message, /M1/);
+  assert.equal(readRecord(root, 'review.json'), null);
+  const failWithoutSerious = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reviewDataFile({ ...goodData(), verdict: 'fail', findings: [finding({ severity: 'low' })] }), summary: 's' });
+  assert.equal(failWithoutSerious.ok, false, failWithoutSerious.message);
+  assert.match(failWithoutSerious.message, /fail|不通过/);
+  const failOk = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reviewDataFile(failData()), summary: 's' });
+  assert.equal(failOk.ok, true, failOk.message);
+  const passAsFail = reviewPass(root, goodData());
+  assert.equal(passAsFail.ok, true, '同一内容上上限未满时重新登记不受限');
+});
+
+test('S5 reviewKeyword 只决定生成的 report.md 里结论一节的标题，闸门判定不读它也不读报告文字', () => {
   const root = gatedRepo({ reviewKeyword: '评审意见' });
-  assert.equal(reviewPass(root, `${BODY}评审意见：通过\n`).ok, true);
-  assert.equal(reviewPass(root, `${BODY}评审意见：不通过\n`).ok, false);
-  assert.equal(reviewPass(root, `${BODY}结论：通过\n`).ok, false, '没有配置的关键词时不认');
+  const r = reviewPass(root);
+  assert.equal(r.ok, true, r.message);
+  assert.match(fs.readFileSync(r.record.report, 'utf8'), /评审意见/);
+  assert.match(r.record.report, /[.]md$/);
+  assert.match(r.record.data, /[.]json$/, '记录里有数据副本的路径');
+  assert.equal(JSON.parse(fs.readFileSync(r.record.data, 'utf8')).verdict, 'pass');
 });
 
 // ---------- 5. 子模块指针 ----------
@@ -510,18 +509,17 @@ test('漏洞 9-1：pre-push 项目的功能分支把 reviewFlow 改成 pr，推�
   assert.match(res.note, /reviewFlow/, '工作区值与生效值不同时给一行提示');
 });
 
-test('漏洞 9-2：分支改 reviewKeyword / reviewers / reviewMinChars 后，登记仍按基准上的值判定', () => {
+test('漏洞 9-2：分支改 reviewers / reviewMinChars 后，登记仍按基准上的值判定', () => {
   const root = featureRepo();
   write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, reviewKeyword: '处置', reviewers: ['me-myself'], reviewMinChars: 5 }, null, 2));
   passingChange(root);
   assert.equal(runGate({ root }).ok, true);
-  const bad = `${BODY}处置：通过\n## 结论\n不通过\n`;
-  const r1 = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(bad), summary: 's' });
-  assert.equal(r1.ok, false, `关键词仍是“结论”，结论为不通过：${r1.message}`);
-  const r2 = recordReview({ root, verdict: 'pass', reviewer: 'me-myself', reportPath: reportFile(PASS_REPORT), summary: 's' });
+  const r1 = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reviewDataFile(failData()), summary: 's' });
+  assert.equal(r1.ok, false, `结论与发现不一致，与分支改的关键词无关：${r1.message}`);
+  const r2 = recordReview({ root, verdict: 'pass', reviewer: 'me-myself', reportPath: reviewDataFile(goodData()), summary: 's' });
   assert.equal(r2.ok, false, r2.message);
   assert.match(r2.message, /复审者/);
-  const r3 = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile('结论：通过\n'), summary: 's' });
+  const r3 = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reviewDataFile(reviewData()), summary: 's' });
   assert.equal(r3.ok, false, r3.message);
   assert.match(r3.message, /不少于 60/);
 });
@@ -553,35 +551,15 @@ test('漏洞 9-4：主干上合法地把 reviewFlow 改成 pr 之后，功能分
   assert.equal(res.ok, true, JSON.stringify(res));
 });
 
-// ---------- 10. 结论判定：标题写法也必须整句恰好是结论词 ----------
-
-test('漏洞 10：“## 结论”下一行只是以“通过”开头（通过前需修复…、通过与否取决于…）不算通过', () => {
-  for (const tail of ['## 结论\n通过前需修复 H1、M2\n', '## 结论\n\n通过与否取决于 H1 的修复情况。\n', '## 结论\nPass\n']) {
-    const root = gatedRepo();
-    const r = reviewPass(root, `${BODY}${tail}`);
-    assert.equal(r.ok, false, `${tail} → ${r.message}`);
-  }
-});
-
-test('漏洞 10：带句号的写法都能认出：“结论：通过。无高、中级问题。”“## 结论 / 通过。理由”“## 结论 / 不通过。理由”', () => {
-  const root = gatedRepo();
-  // 0.6.0 起带括号的模板占位写法不认（见 mechanisms.test.mjs 的结论判定用例），这里换成模板的新写法
-  for (const tail of ['结论：通过。无高、中级问题。\n', '## 结论\n通过。一句话理由；无高、中级问题。\n', '## 结论\n\n通过。一句话理由；高、中级问题的编号清单。\n']) {
-    const r = reviewPass(root, `${BODY}${tail}`);
-    assert.equal(r.ok, true, `${tail} → ${r.message}`);
-  }
-  const f = recordReview({ root, verdict: 'fail', reviewer: 'general-purpose', reportPath: reportFile(`${BODY}## 结论\n不通过。H1 未修复。\n`), summary: 's' });
-  assert.equal(f.ok, true, f.message);
-});
-
-test('漏洞 9-5：分支把 reviewSections 改成 []，登记仍按基准上的值判定，缺节的报告照样被拒', () => {
+test('漏洞 9-5：分支把 reviewSections 改成 []，登记仍按基准上的值判定，缺节的数据照样被拒', () => {
   const root = featureRepo();
   write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, reviewSections: [] }, null, 2));
   passingChange(root);
   assert.equal(runGate({ root }).ok, true);
   assert.deepEqual(loadConfig(root).reviewSections, ['范围', '发现', '作者的验证']);
-  const thin = `${'已逐条核对改动，边界条件均有覆盖。'.repeat(10)}\n## 结论\n通过。没有问题。\n`;
-  const r = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(thin), summary: 's' });
+  const thin = reviewData({ sections: { 概述: '已逐条核对改动，边界条件均有覆盖。'.repeat(10) } });
+  const r = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reviewDataFile(thin), summary: 's' });
   assert.equal(r.ok, false, r.message);
-  assert.match(r.message, /缺少必需的节/);
+  assert.match(r.message, /范围/);
+  assert.match(r.message, /作者的验证/);
 });

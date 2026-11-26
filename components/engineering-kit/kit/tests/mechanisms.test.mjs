@@ -11,14 +11,18 @@ import { ASSERTION_PATTERNS, checkAssertions, countTestCases, hasAssertion } fro
 import { runGate } from '../gate/gate.mjs';
 import { DEPENDENCY_FILES, POLICY_KEYS, loadConfig, parseStatusZ, readRecord, writeRecord } from '../gate/lib.mjs';
 import { mergePr } from '../gate/merge.mjs';
-import { recordReview, reportVerdict } from '../gate/review.mjs';
+import { recordReview } from '../gate/review.mjs';
 import { verify } from '../gate/verify.mjs';
-import { commitAll, featureRepo, git, read, reportFile, SRC_HEADER, TEST_CONFIG, tmpRepo, write } from './helpers.mjs';
+import { commitAll, failingData, featureRepo, git, read, reportFile, reviewData, reviewDataFile, SRC_HEADER, TEST_CONFIG, tmpRepo, write } from './helpers.mjs';
 
-/** 合格的复审报告正文（不含结论），字数够。 */
-const BODY = '范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n已逐条核对改动的 dedup 函数与测试用例，边界条件（空数组、重复项）均有覆盖，调用方也已核对。\n处置：无需处理。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n';
-const PASS_REPORT = `${BODY}## 结论\n通过。无高、中级问题。\n`;
-const FAIL_REPORT = `${BODY}## 结论\n不通过。H1 未修复。\n`;
+/** 合格的复审数据（ek-review/1）的两节文字：合计超过测试配置的最少字数（60 字）。 */
+const SECTIONS = { 范围: '读了 dedup 函数、调用方和对应测试，确认改动范围与说明一致。', 作者的验证: '核对了作者给出的测试输出，边界条件（空数组、重复项）均有覆盖，没有重跑。' };
+
+/** 合格的通过数据：低风险、没有发现。 */
+const passData = (over = {}) => reviewData({ sections: SECTIONS, ...over });
+
+/** 不通过的数据：一条合格的中级发现 M1。 */
+const failData = (over = {}) => failingData({ sections: SECTIONS, ...over });
 
 /** 两个测试分组：dedup（源文件与测试）和 rank（一个目录）。 */
 const GROUPS = [
@@ -238,7 +242,7 @@ test('结果复用：没有配置摘要的旧记录不复用（重跑一次）�
   writeRecord(root, 'tests.json', old);
   assert.ok(!runGate({ root }).messages.some((m) => /沿用/.test(m)));
   writeRecord(root, 'tests.json', old);
-  assert.equal(recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(PASS_REPORT) }).ok, true);
+  assert.equal(recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reviewDataFile(passData()) }).ok, true);
   assert.equal(verify({ root }).ok, true, JSON.stringify(verify({ root }).problems));
 });
 
@@ -249,7 +253,7 @@ test('verify：pre-push 流程推送要求全量记录（affected 时提示跑�
   changeDedup(root, 'v2');
   commitAll(root, 'feat');
   assert.equal(runGate({ root, affected: true }).record.mode, 'affected');
-  const r = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(PASS_REPORT) });
+  const r = recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reviewDataFile(passData()) });
   assert.equal(r.ok, true, r.message);
   const res = verify({ root });
   assert.equal(res.ok, false);
@@ -270,8 +274,8 @@ test('verify：pre-push 流程推送要求全量记录（affected 时提示跑�
 
 /** 登记一次 pre-push 复审。 */
 function prePush(root, verdict, extra = {}) {
-  const report = verdict === 'pass' ? PASS_REPORT : FAIL_REPORT;
-  return recordReview({ root, verdict, reviewer: 'general-purpose', reportPath: reportFile(report), summary: 's', ...extra });
+  const data = verdict === 'pass' ? passData() : failData();
+  return recordReview({ root, verdict, reviewer: 'general-purpose', reportPath: reviewDataFile(data), summary: 's', ...extra });
 }
 
 test('复审轮次（pre-push）：已有 3 个提交登记过 fail 后，在新提交上再登记 pass 或 fail 被拒；带 --user-decision 放行并写进记录；统计行写明轮次', () => {
@@ -319,14 +323,46 @@ function ghFor(state) {
     return { status: 0, stdout: '', stderr: '' };
   };
   gh.calls = calls;
+  gh.state = state;
   return gh;
 }
 
-/** 登记一次 pr 流程审查。 */
+/** 在功能分支上依次提交 n 份代码改动，返回各个提交号（PR 的最终提交依次前进；被审提交必须是本地真实存在的提交）。 */
+function realHeads(root, n) {
+  const heads = [];
+  for (let i = 0; i < n; i++) {
+    changeDedup(root, `h${i}`);
+    commitAll(root, `h${i}`);
+    heads.push(git(root, ['rev-parse', 'HEAD']).trim());
+  }
+  return heads;
+}
+
+/** 与主干的分叉点：完整覆盖时的被审基准；提交不在本地时（假提交号）退回主干顶端。 */
+function forkOf(root, head) {
+  try {
+    return git(root, ['merge-base', 'main', head]).trim();
+  } catch {
+    return git(root, ['rev-parse', 'main']).trim();
+  }
+}
+
+/** 修后复核的处置：同一 PR、同一种审查此前在别的提交上登记的最后一份 fail，其高、中级发现逐条写成“已修”（读历史里记下的发现摘要）。 */
+function fixedDispositions(root, kind, head) {
+  const file = path.join(root, '.git', 'engineering-gate', 'pr', '7', 'log.jsonl');
+  if (!fs.existsSync(file)) return [];
+  const rows = fs.readFileSync(file, 'utf8').split(String.fromCharCode(10)).filter(Boolean).map((l) => JSON.parse(l));
+  const prev = rows.filter((e) => e.kind === kind && e.verdict === 'fail' && e.headSha !== head).at(-1);
+  return (prev?.findings ?? []).filter((f) => f.severity === 'high' || f.severity === 'medium').map((f) => ({ id: f.id, status: 'fixed', evidence: '已按建议修改并补了测试，复核通过。' }));
+}
+
+/** 登记一次 pr 流程审查：数据的被审提交取假 gh 当前返回的最终提交，被审基准取与主干的分叉点（完整覆盖）。 */
 function prReg(root, gh, kind, verdict, extra = {}) {
   if (verdict === 'defer') return recordReview({ root, verdict, pr: '7', kind, gh, reason: '低风险，并入巡检', ...extra });
-  const report = verdict === 'pass' ? PASS_REPORT : FAIL_REPORT;
-  return recordReview({ root, verdict, pr: '7', kind, gh, reviewer: 'general-purpose', reportPath: reportFile(report), summary: 's', ...extra });
+  const head = gh.state.head;
+  const make = verdict === 'pass' ? passData : failData;
+  const data = make({ kind, reviewedCommit: head, reviewedBase: forkOf(root, head), dispositions: fixedDispositions(root, kind, head) });
+  return recordReview({ root, verdict, pr: '7', kind, gh, reviewer: 'general-purpose', reportPath: reviewDataFile(data), summary: 's', ...extra });
 }
 
 test('复审轮次（pr）：每次登记追加 pr/<编号>/log.jsonl，两种 kind 合并计数，上限取基准上的 maxReviewRounds', () => {
@@ -334,17 +370,18 @@ test('复审轮次（pr）：每次登记追加 pr/<编号>/log.jsonl，两种 k
   // 分支把上限改大不生效（判定策略取基准提交上的配置）
   write(root, 'engineering.config.json', JSON.stringify({ ...TEST_CONFIG, reviewFlow: 'pr', maxReviewRounds: 9 }, null, 2));
   assert.equal(loadConfig(root).maxReviewRounds, 2);
-  const state = { head: 'a'.repeat(40) };
+  const [ha, hb, hc] = realHeads(root, 3);
+  const state = { head: ha };
   const gh = ghFor(state);
   assert.equal(prReg(root, gh, 'code', 'fail').ok, true);
-  state.head = 'b'.repeat(40);
+  state.head = hb;
   const second = prReg(root, gh, 'consistency', 'fail');
   assert.equal(second.ok, true, second.message);
   assert.match(second.message.split('\n').at(-1), /第 2 轮.*累计登记 2 次.*2 个不同提交/);
   const d = prReg(root, gh, 'consistency', 'defer');
   assert.equal(d.ok, true, '延期不是审查结论，不受上限拦截');
   // 0.6.1 起按提交计：b 已计入第 2 轮，在 b 上登记不拦；拦截针对新的提交 c
-  state.head = 'c'.repeat(40);
+  state.head = hc;
   const blocked = prReg(root, gh, 'code', 'pass');
   assert.equal(blocked.ok, false);
   assert.match(blocked.message, /已审二轮仍需再审/);
@@ -362,15 +399,16 @@ const lastLine = (res) => res.message.split('\n').at(-1);
 
 test('轮次按提交（pr）：同一提交两种 kind 都 fail 只算一轮；满 3 个提交后，第 3 个提交补登另一种不拦，第 4 个提交要 --user-decision', () => {
   const root = featureRepo({ reviewFlow: 'pr' });
-  const state = { head: 'a'.repeat(40) };
+  const [ha, hb, hc, hd] = realHeads(root, 4);
+  const state = { head: ha };
   const gh = ghFor(state);
   assert.equal(prReg(root, gh, 'code', 'fail').ok, true);
   const c1 = prReg(root, gh, 'consistency', 'fail');
   assert.equal(c1.ok, true, c1.message);
   assert.match(lastLine(c1), /第 1 轮（按提交计/, '同一提交上的第二份 fail 不另算一轮');
-  state.head = 'b'.repeat(40);
+  state.head = hb;
   assert.match(lastLine(prReg(root, gh, 'code', 'fail')), /第 2 轮/);
-  state.head = 'c'.repeat(40);
+  state.head = hc;
   const third = prReg(root, gh, 'code', 'fail');
   assert.match(lastLine(third), /第 3 轮.*累计登记 4 次.*3 个不同提交/);
   // 第 3 轮的提交已计入：这个提交上还没登记过的一致性审首次登记不受拦截；同一 kind 再登记要 --user-decision（L6，0.6.1 复审后改）
@@ -380,7 +418,7 @@ test('轮次按提交（pr）：同一提交两种 kind 都 fail 只算一轮；
   assert.equal(prReg(root, gh, 'consistency', 'pass').ok, false, '满上限后同一提交、同一 kind 重新登记要 --user-decision');
   assert.equal(prReg(root, gh, 'code', 'fail').ok, false, '满上限后同一提交上代码复审重登同样要 --user-decision');
   // 第 4 个提交：pass、fail 都要 --user-decision
-  state.head = 'd'.repeat(40);
+  state.head = hd;
   const blocked = prReg(root, gh, 'code', 'pass');
   assert.equal(blocked.ok, false);
   assert.match(blocked.message, /已审三轮仍需再审/);
@@ -636,8 +674,8 @@ test('pre-push 一致性审：--kind consistency 只写 log 与 review-consisten
   const d = recordReview({ root, verdict: 'defer', kind: 'consistency', reason: '小改动，并入巡检' });
   assert.equal(d.ok, true, d.message);
   assert.equal(readRecord(root, 'review-consistency.json').verdict, 'defer');
-  assert.equal(recordReview({ root, verdict: 'pass', kind: 'tests', reviewer: 'general-purpose', reportPath: reportFile(PASS_REPORT) }).ok, false);
-  assert.match(recordReview({ root, verdict: 'pass', pr: '7', reviewer: 'general-purpose', reportPath: reportFile(PASS_REPORT) }).message, /--pr/);
+  assert.equal(recordReview({ root, verdict: 'pass', kind: 'tests', reviewer: 'general-purpose', reportPath: reviewDataFile(passData()) }).ok, false);
+  assert.match(recordReview({ root, verdict: 'pass', pr: '7', reviewer: 'general-purpose', reportPath: reviewDataFile(passData()) }).message, /--pr/);
   // 推送核对只要求代码复审
   assert.ok(verify({ root }).problems.some((p) => /没有复审记录/.test(p)));
   assert.equal(prePush(root, 'pass').ok, true, '不带 --kind 等同 code（旧用法）');
@@ -655,7 +693,7 @@ test('accept（pre-push）：报告须为不通过、须带 --user-decision；�
   commitAll(root, 'feat');
   assert.equal(runGate({ root }).ok, true);
   for (let i = 0; i < 3; i++) assert.equal(prePush(root, 'fail').ok, true);
-  assert.match(prePush(root, 'accept', { reportPath: reportFile(PASS_REPORT), userDecision: '用户接受' }).message, /不通过/);
+  assert.match(prePush(root, 'accept', { reportPath: reviewDataFile(passData()), userDecision: '用户接受' }).message, /不通过|fail/);
   assert.match(prePush(root, 'accept', { userDecision: ' ' }).message, /--user-decision/);
   const a = prePush(root, 'accept', { userDecision: '用户接受 L1、M2，不再修改（对话 2026-11-11）' });
   assert.equal(a.ok, true, a.message);
@@ -669,7 +707,8 @@ test('accept（pre-push）：报告须为不通过、须带 --user-decision；�
 
 test('accept（pr）：合并入口两种 kind 都认 accept，输出写明按用户决定接受风险放行', () => {
   const root = featureRepo({ reviewFlow: 'pr' });
-  const gh = ghFor({ head: 'a'.repeat(40) });
+  const [ha] = realHeads(root, 1);
+  const gh = ghFor({ head: ha });
   assert.equal(prReg(root, gh, 'code', 'accept', { userDecision: '用户接受 M1（PR 评论）' }).ok, true);
   const c = prReg(root, gh, 'consistency', 'accept', { userDecision: '用户接受重复描述（PR 评论）' });
   assert.equal(c.ok, true, c.message);
@@ -718,18 +757,17 @@ test('合并入口：代码复审之后只改了文档时仍认代码复审记�
 
 // ---------- 8. 上一个 PR 复审留下的低级问题 ----------
 
-test('结论判定：冒号也拆小句；结论词后带括号的不认，提示里说明不要加括号', () => {
-  assert.equal(reportVerdict('结论：不通过：H1 未修复。').verdict, 'fail');
-  assert.equal(reportVerdict('## 结论\n通过：无高、中级问题。').verdict, 'pass');
-  assert.equal(reportVerdict('结论: 通过: 无问题').verdict, 'pass');
-  assert.equal(reportVerdict('结论：通过（待 M2 修复后）').verdict, null);
-  assert.equal(reportVerdict('## 结论\n\n通过（或 不通过）。一句话理由。').verdict, null);
+test('S1 Markdown 报告不再能登记：旧的结论写法（含带括号的结论）都不再被识别，传 .md 文本一律被拒并提示 JSON', () => {
+  const body = '范围：读了 dedup 函数、调用方和对应测试。\n发现：无高、中级问题。\n作者的验证：核对了作者给出的测试输出，没有重跑。\n';
   const root = featureRepo();
   changeDedup(root);
   assert.equal(runGate({ root }).ok, true);
-  const r = prePush(root, 'pass', { reportPath: reportFile(`${BODY}结论：通过（待 M2 修复后）\n`) });
-  assert.equal(r.ok, false);
-  assert.match(r.message, /括号/);
+  for (const tail of ['结论：通过（待 M2 修复后）\n', '## 结论\n\n通过（或 不通过）。一句话理由。\n', '结论：不通过：H1 未修复。\n', '## 结论\n通过：无高、中级问题。\n']) {
+    const r = prePush(root, 'pass', { reportPath: reportFile(`${body}${tail}`) });
+    assert.equal(r.ok, false, tail);
+    assert.match(r.message, /JSON/);
+  }
+  assert.equal(readRecord(root, 'review.json'), null, '拒绝时不写记录');
 });
 
 test('基准分支解析不了时，合并入口抛错：不调用 gh、不合并（不按工作区的判定策略放行）', () => {
@@ -878,7 +916,7 @@ test('改名（status）：已提交的源文件改动之后只暂存 git mv 进
   commitAll(root, 'feat');
   gitMv(root, 'src/dedup.ts', 'docs/04-开发/dedup.md');
   assert.equal(runGate({ root }).ok, true);
-  assert.equal(recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reportFile(PASS_REPORT) }).ok, true);
+  assert.equal(recordReview({ root, verdict: 'pass', reviewer: 'general-purpose', reportPath: reviewDataFile(passData()) }).ok, true);
   const res = verify({ root });
   assert.equal(res.ok, false, JSON.stringify(res));
   assert.ok(res.problems.some((p) => /范围内有未提交的改动[\s\S]*src\/dedup\.ts/.test(p)), res.problems.join('\n'));
