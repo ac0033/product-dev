@@ -937,7 +937,7 @@ export function registerRun({ root, runDir, pr, summary, gh = defaultGh, userDec
  * Codex 复审时关闭的功能：会调用其他模型的（multi_agent 子代理）、会带入本机私有材料的（memories、goals）、
  * 会运行外部代码的（hooks、apps、plugin_discovery_prefetch）、与复审无关的（image_generation），
  * 以及执行工具的宿主（code_mode_host）：Codex 的只读沙箱只挡写入、能读全盘，被审内容里的提示注入可以让模型去读本机的密钥，
- * 所以复审时不给工具，只依据提示里的 diff 审（codex-cli 0.167、0.171 实测：关掉它后所有工具调用失败即关闭；子代理在 0.171 里另有开关，见 CODEX_CONFIG_OVERRIDES）。
+ * 所以复审时不给工具，只依据提示里的 diff 审（codex-cli 0.167、0.171 实测：关掉它后执行类工具 exec 的所有调用失败即关闭；子代理在 0.171 里另有开关，见 CODEX_CONFIG_OVERRIDES）。
  */
 export const CODEX_DISABLED_FEATURES = ['apps', 'code_mode_host', 'goals', 'hooks', 'image_generation', 'memories', 'multi_agent', 'plugin_discovery_prefetch'];
 
