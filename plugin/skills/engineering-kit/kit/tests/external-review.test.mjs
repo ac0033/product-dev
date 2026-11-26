@@ -13,12 +13,9 @@ import { loadConfig } from '../gate/lib.mjs';
 import {
   assess,
   buildPrompt,
-<<<<<<< HEAD
   REVIEW_SCHEMA,
   reviewInstructions,
-=======
   CODEX_CONFIG_OVERRIDES,
->>>>>>> origin/main
   CODEX_VERIFIED,
   codexArgs,
   codexExecutor,
@@ -1285,4 +1282,25 @@ test('补登用核对过指纹的那份正文登记：文件在核对之后被�
   const r = registerReport({ root, headSha: head, kind: 'code', verdict: 'fail', reviewer: 'external:fake', reportPath: swapped, reportText: original, summary: 's', pr: '7', gh: fakeGh([head]) });
   assert.equal(r.ok, true, r.message);
   assert.deepEqual(r.record.findings.highIds, ['H1'], '按核对过的正文登记');
+});
+
+test('命令行成功路径：真实参数分发后，执行器收到 --risk high 与 --context 的内容，报告落盘', () => {
+  const { root } = repo();
+  const cli = fileURLToPath(new URL('../gate/external-review.mjs', import.meta.url));
+  const dir = tmpDir('ekit-cli-');
+  const configFile = path.join(dir, 'external-review.json');
+  fs.writeFileSync(configFile, JSON.stringify({ executors: { fake: { type: 'protocol', command: [process.execPath, fakePath], defaultModel: 'fake-model-1', env: { FAKE_MODE: 'pass' } } } }));
+  const context = path.join(dir, 'context.md');
+  fs.writeFileSync(context, '相关测试：tests/auth.test.ts（单元）；验证：本机相关测试通过');
+  const r = spawnSync(process.execPath, [cli, 'run', '--executor', 'fake', '--risk', 'high', '--context', context, '--out-dir', path.join(dir, 'run')], {
+    cwd: root, encoding: 'utf8', env: { ...process.env, EK_EXTERNAL_REVIEW_CONFIG: configFile },
+  });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const reportPath = /报告：(.+)/.exec(r.stdout)?.[1]?.trim();
+  assert.ok(reportPath && fs.existsSync(reportPath), r.stdout);
+  const seen = JSON.parse(fs.readFileSync(path.join(path.dirname(reportPath), 'raw', 'seen.json'), 'utf8'));
+  assert.equal(seen.req.review.risk, 'high');
+  assert.match(seen.req.context.project, /tests\/auth\.test\.ts/);
+  assert.match(seen.req.context.instructions, /功能是否都有测试/);
+  assert.ok(fs.existsSync(path.join(path.dirname(reportPath), 'report.sha256')));
 });
