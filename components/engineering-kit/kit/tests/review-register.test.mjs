@@ -387,6 +387,60 @@ test('S2 pre-push 流程：发现定位到功能分支上已提交删除的文�
   assert.equal(r.ok, true, r.message);
 });
 
+test('H7 pre-push 流程：被审范围的终点不是当前 HEAD 时不能登记通过；只给基准或只给终点时拒绝；没给范围但列了未交给复审者的文件也只算部分覆盖（PR #42 第 2 轮代码 M3、一致性 M4）', () => {
+  const root = prePushRepo();
+  const fork = git(root, ['merge-base', 'main', 'HEAD']).trim();
+  commitAll(root, 'first half');
+  const mid = git(root, ['rev-parse', 'HEAD']).trim();
+  write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {
+  return [...new Set(items)].sort().reverse();
+}
+`);
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'later');\n");
+  commitAll(root, 'later');
+  assert.equal(runGate({ root }).ok, true);
+  const head = git(root, ['rev-parse', 'HEAD']).trim();
+  const stale = prePush(root, reviewData({ reviewedCommit: mid, reviewedBase: fork }));
+  assert.equal(stale.ok, false, '审的是较早的提交，HEAD 上的后续改动没审');
+  assert.match(stale.message, /HEAD/);
+  const half = prePush(root, reviewData({ reviewedCommit: head, reviewedBase: null }));
+  assert.equal(half.ok, false);
+  assert.match(half.message, /同时给出/);
+  const hidden = prePush(root, reviewData({ unreviewedFiles: ['src/dedup.ts'] }));
+  assert.equal(hidden.ok, false);
+  assert.match(hidden.message, /没有交给复审者/);
+  const full = prePush(root, reviewData({ reviewedCommit: head, reviewedBase: fork }));
+  assert.equal(full.ok, true, full.message);
+});
+
+test('S2 pre-push 流程：发现定位到分叉后新增、又在显式基准之后删除的文件（只在 reviewedBase 的树里）时照常登记（PR #42 第 2 轮代码 M4）', () => {
+  const root = prePushRepo();
+  write(root, 'src/temp.ts', `${SRC_HEADER}export const t = 1;\n`);
+  commitAll(root, 'add temp');
+  const base = git(root, ['rev-parse', 'HEAD']).trim();
+  git(root, ['rm', '-q', '-f', 'src/temp.ts']);
+  commitAll(root, 'drop temp');
+  assert.equal(runGate({ root }).ok, true);
+  const head = git(root, ['rev-parse', 'HEAD']).trim();
+  const r = prePush(root, failingData({ reviewedCommit: head, reviewedBase: base, findings: [finding({ files: ['src/temp.ts'] })] }), { verdict: 'fail' });
+  assert.equal(r.ok, true, r.message);
+});
+
+test('H7 覆盖接续：登记历史里没有结构化数据副本的旧版“完整覆盖”记录不作接续依据，从它起审只算部分覆盖（PR #42 第 2 轮代码 M1、一致性 M3）', () => {
+  const { root, main } = prRepo();
+  const head1 = addCommit(root, 1);
+  assert.equal(reg(root, data(head1, main)).ok, true);
+  // 模拟旧版（0.9.0 之前）的登记：记录里没有数据副本和指纹
+  const log = path.join(prDir(root), 'log.jsonl');
+  const old = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).map(({ dataSha, data: copy, report, ...r }) => r);
+  fs.writeFileSync(log, old.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const head2 = addCommit(root, 2);
+  const chained = reg(root, data(head2, head1));
+  assert.equal(chained.ok, false, '旧记录的完整覆盖无法证明，不能接续');
+  assert.match(chained.message, /缺少同种审查的完整覆盖/);
+  assert.equal(reg(root, data(head2, main)).ok, true, '从分叉点补审可以');
+});
+
 test('合并入口：代码复审的最新记录与登记历史的最后一条不一致时拒绝合并（上次登记写到一半失败；PR #42 双审 M2/M4）', () => {
   const { root, main } = prRepo();
   const head = addCommit(root, 1);
