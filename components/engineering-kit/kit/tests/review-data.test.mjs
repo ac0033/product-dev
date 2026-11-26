@@ -536,3 +536,8 @@ test('S5 renderReport：通过的数据结论写通过；处置与测试缺口�
   assert.ok(md.includes('补了空数组判断。'));
   assert.ok(md.includes('每个功能点都有对应测试。'), '测试缺口说明可见');
 });
+
+test('S2 hasContent：占位词带标点或括号（“无。”“（暂无）”“N/A.”“- 无”）也算没有内容；正常句子不受影响', () => {
+  for (const s of ['无。', '暂无！', '（无）', '“无”', 'N/A.', 'TBD!', '- 无', '待补…', '无；']) assert.equal(hasContent(s), false, JSON.stringify(s));
+  for (const s of ['无法复现。', '无（见 M1）', '没有无', 'none of the callers check it.']) assert.equal(hasContent(s), true, JSON.stringify(s));
+});

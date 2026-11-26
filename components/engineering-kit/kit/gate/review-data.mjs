@@ -15,11 +15,12 @@ const idPattern = /^[HMLI][1-9]\d*$/;
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 export const isSerious = (f) => ['high', 'medium'].includes(f?.severity);
 
-/** 判断文字是否给出了实际内容。 */
+/** 判断文字是否给出了实际内容：去掉不可见字符和 HTML 字符实体后要有文字或数字，去掉标点、符号和空白后也不能只剩占位词（“无。”“（暂无）”同样算没写）。 */
 export function hasContent(s) {
   if (typeof s !== 'string') return false;
   const clean = s.replace(/\p{Cf}|&(?:[A-Za-z][A-Za-z0-9]*|#\d+|#x[0-9a-fA-F]+);/gu, '').trim();
-  return /[\p{L}\p{N}]/u.test(clean) && !PLACEHOLDERS.includes(clean.toLowerCase());
+  const bare = clean.replace(/[\p{P}\p{S}\p{Z}\s]+/gu, '').toLowerCase();
+  return /[\p{L}\p{N}]/u.test(clean) && !PLACEHOLDERS.includes(clean.toLowerCase()) && !PLACEHOLDERS.includes(bare);
 }
 
 /** 检查文本类型、长度、不可见字符及必填内容，每栏报告一个具体问题。 */
