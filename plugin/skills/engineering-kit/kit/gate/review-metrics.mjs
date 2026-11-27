@@ -80,7 +80,7 @@ export function collectMetrics({ commonDir, now = Date.now(), sinceDays = null }
 
 function table({ prs, summary: s, badLines, skippedDirs }) {
   const lines = [`共 ${s.prCount} 个 PR，平均失败轮次 ${s.averageRounds.toFixed(2)}，一轮通过 ${(100 * s.firstPassRate).toFixed(1)}%，后续发现原先漏检 ${s.missedLater} 条，接受风险 ${s.accepts} 次，收口 ${s.closes} 次`,
-    'PR\t失败轮次\t后续漏检\t接受\t关闭\t最后登记时间'];
+    'PR\t失败轮次\t后续漏检\t接受风险\t收口\t最后登记时间'];
   for (const p of prs) lines.push([p.pr, p.rounds, p.missedLater, p.accepts, p.closes, p.lastAt].join('\t'));
   for (const p of prs) for (const missing of p.dataMissing) lines.push(`PR ${p.pr} 第 ${missing.line} 行复审数据缺失：${missing.reason}`);
   for (const bad of badLines) lines.push(`PR ${bad.pr} 第 ${bad.line} 行登记损坏：${bad.reason}`);
