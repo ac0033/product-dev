@@ -53,12 +53,13 @@ function classify({ closure, limit, rounds, latest, finalHead }) {
 }
 
 /**
- * 按首次 fail 的登记顺序计算每轮状态。第 1 到 N 轮（N = limit）各用该提交上的全部登记。
+ * 按首次 fail 的登记顺序计算每轮状态，只用按规则登记的记录（越权登记见下）。第 1 到 N 轮（N = limit）各用该提交上的全部登记。
  * 最后一轮（第 N+1 轮）只用一种口径：第 N 轮收齐之后、最后一轮提交（finalHead）上的有效登记（pass、fail、accept、一致性审 defer）；
  * 收齐之前的任何登记都不计入最后一轮的收齐、风险信号和收口证据。finalHead 是收齐之后第一条落在别的提交上的 pass 或 fail。
  */
 export function roundState({ entries, limit, closure, required = ['code', 'consistency'] }) {
-  const history = entries.filter((e) => required.includes(e.kind) && (counted(e) || e.verdict === 'accept' || (e.kind === 'consistency' && e.verdict === 'defer')));
+  // 越权登记（不带用户决定就会被拒、经用户决定才登记的，登记时标 outOfBand）只留作追溯，轮次计算一律不计
+  const history = entries.filter((e) => !e.outOfBand && required.includes(e.kind) && (counted(e) || e.verdict === 'accept' || (e.kind === 'consistency' && e.verdict === 'defer')));
   const byHead = new Map();
   const firstFail = new Map();
   for (const [i, entry] of history.entries()) {
@@ -178,7 +179,17 @@ export function expectedRiskEntries({ pr, round, failHead, failures }) {
 }
 
 const exactKeys = (v, list) => Object.keys(v).length === list.length && list.every((k) => Object.hasOwn(v, k));
-const validRound = (v) => Number.isInteger(v.round) && v.round >= 1 && Array.isArray(v.fixedIn) && v.fixedIn.every(isRepoPath);
+const validRound = (v) => Number.isInteger(v.round) && v.round >= 1 && Array.isArray(v.fixedIn) && v.fixedIn.every(isRepoPath) && new Set(v.fixedIn).size === v.fixedIn.length;
+
+/**
+ * 显示用的路径：控制字符、格式字符、行分隔符和段落分隔符（如 U+2028、U+2029）及反斜杠转义成 \t、\n、\u2028 这样的可见写法，
+ * 一条路径在终端和报告里只占一行，也不会被误读成另一条诊断。所有面向用户的收口路径都经它。
+ */
+export function displayPath(file) {
+  const named = { '\\': '\\\\', '\t': '\\t', '\n': '\\n', '\r': '\\r' };
+  return String(file).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\\]/gu, (c) => named[c] ?? '\\u' + c.codePointAt(0).toString(16).padStart(4, '0'));
+}
+const shown = (files) => files.map(displayPath).join('、');
 
 /** 解析风险登记的全部非空行，分别返回有效条目（旧格式带 legacy: true）与含物理行号的错误。 */
 export function parseRiskRegister(text) {
@@ -263,13 +274,13 @@ export function closureProblems(facts) {
     const [actual] = matches;
     // 申报的修复路径只认本机登记（risks 在 PR 锁内留下、PR 改不到的那份）：提交里的 fixedIn 必须与它一致
     const declared = facts.declaredFixedIn?.get(riskKey(e));
-    const sameSet = (a, b) => a.length === b.length && a.every((f) => b.includes(f));
+    const sameSet = (a, b) => { const x = new Set(a); const y = new Set(b); return x.size === a.length && y.size === b.length && x.size === y.size && [...x].every((f) => y.has(f)); };
     if (!declared || declared.findingSha !== e.findingSha) {
       problems.push(label + '本机没有 risks 对这条发现的登记（或登记针对的不是同一条发现）：在本机运行 review.mjs risks 生成风险登记，不要手写或改写');
       continue;
     }
     if (!sameSet(actual.fixedIn, declared.fixedIn)) {
-      problems.push(label + '提交里的实际改在（' + (actual.fixedIn.join('、') || '无') + '）与本机 risks 登记的申报（' + (declared.fixedIn.join('、') || '无') + '）不一致：修复路径只能经 review.mjs risks --fixed-in 申报');
+      problems.push(label + '提交里的实际改在（' + (shown(actual.fixedIn) || '无') + '）与本机 risks 登记的申报（' + (shown(declared.fixedIn) || '无') + '）不一致：修复路径只能经 review.mjs risks --fixed-in 申报');
       continue;
     }
     for (const f of declared.fixedIn) allowed.add(f);
@@ -279,14 +290,15 @@ export function closureProblems(facts) {
     const bad = summaryProblem(actual.summary);
     if (bad) problems.push(label + bad);
     const files = e[findingFiles] ?? [];
-    if (!files.some((f) => changed.has(f)) && !(actual.fixedIn.length && actual.fixedIn.every((f) => changed.has(f)))) {
-      problems.push(label + '定位文件 ' + (files.join('、') || '（无）') + ' 和实际改在 ' + (actual.fixedIn.join('、') || '（无）') + ' 都不在修复差异里');
+    // “已修”的证据用本机申报（可信的那份），不用提交里的数组
+    if (!files.some((f) => changed.has(f)) && !(declared.fixedIn.length && declared.fixedIn.every((f) => changed.has(f)))) {
+      problems.push(label + '定位文件 ' + (shown(files) || '（无）') + ' 和实际改在 ' + (shown(declared.fixedIn) || '（无）') + ' 都不在修复差异里');
     }
   }
   const exempt = typeof facts.exempt === 'function' ? facts.exempt : () => false;
   const outside = fixDiff.filter((f) => !allowed.has(f) && !exempt(f));
   if (outside.length) {
-    problems.push('修复差异含白名单外的文件：' + outside.join('、') + '。收口只放行本轮中级发现的定位文件、--fixed-in 申报的路径、测试、文档和风险登记；' +
+    problems.push('修复差异含白名单外的文件：' + shown(outside) + '。收口只放行本轮中级发现的定位文件、--fixed-in 申报的路径、测试、文档和风险登记；' +
       '这些改动没有经过复审，请撤到另一个 PR，或向用户说明后由用户决定对最终提交做普通双审（登记带 --user-decision）');
   }
   return problems;
