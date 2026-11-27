@@ -62,15 +62,24 @@ export function roundState({ entries, limit, closure, required = ['code', 'consi
   // 更早的记录没有这个字段：带用户决定的按当时已有的记录重放一次准入，不带用户决定就会被拒的同样算越权
   const valid = (e) => required.includes(e.kind) && (counted(e) || e.verdict === 'accept' || (e.kind === 'consistency' && e.verdict === 'defer'));
   const kept = [];
+  let replayed = 0;
   for (const e of entries) {
     if (!valid(e) || e.outOfBand === true) continue;
     if (e.outOfBand === undefined && e.verdict !== 'accept' && hasContent(e.userDecision)) {
+      replayed++;
       const then = computeRounds({ history: kept, limit, closure, required });
       if (admitRegistration(then, { verdict: e.verdict, kind: e.kind, head: e.headSha, userDecision: null })) continue;
     }
     kept.push(e);
   }
-  return computeRounds({ history: kept, limit, closure, required });
+  const state = computeRounds({ history: kept, limit, closure, required });
+  state.legacyReplayed = replayed;
+  return state;
+}
+
+/** 按当前策略重放过 0.10.1 之前的越权候选时的提示：当时的轮次上限、收口开关不同，结果可能不同。 */
+export function replayNote(state) {
+  return state?.legacyReplayed ? '注意：有 ' + state.legacyReplayed + ' 条 0.10.1 之前、经用户决定的登记，按当前的轮次上限和收口设置重放判定了是否越权；如果当时的设置不同，判定可能不同，请人工核对这份 PR 的登记历史' : null;
 }
 
 /** roundState 的计算部分：history 已去掉越权登记和无关记录。 */
@@ -172,14 +181,15 @@ export function findingFingerprint(finding) {
 
 /** 可共享摘要的指纹（本机申报里记它，close 与合并核对提交里的摘要没被改过）。 */
 export function summaryFingerprint(summary) {
-  return createHash('sha256').update(String(summary)).digest('hex');
+  // 对 JSON 写法取指纹：孤立的代理码元在 JSON 里写成转义，不会和 U+FFFD 编成同样的字节
+  return createHash('sha256').update(JSON.stringify(String(summary))).digest('hex');
 }
 
 /** 可共享摘要的格式问题，合格返回 null。是否可以共享由作者核对，这里只查形式。 */
 export function summaryProblem(summary) {
   if (typeof summary !== 'string' || !summary.trim()) return '缺少可共享摘要';
   if ([...summary].length > MAX_SUMMARY_CHARS) return '可共享摘要超过 ' + MAX_SUMMARY_CHARS + ' 字';
-  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(summary)) return '可共享摘要含换行、行分隔符、段落分隔符或控制、格式字符';
+  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u.test(summary)) return '可共享摘要含换行、行分隔符、段落分隔符、控制或格式字符，或孤立的代理码元';
   return null;
 }
 
@@ -292,25 +302,29 @@ export function closureProblems(facts) {
       continue;
     }
     const [actual] = matches;
-    // 申报的修复路径只认本机登记（risks 在 PR 锁内留下、PR 改不到的那份）：提交里的 fixedIn 必须与它一致
-    const declared = facts.declaredFixedIn?.get(riskKey(e));
+    // 申报的修复路径和摘要只认本机登记（risks 在 PR 锁内留下、PR 改不到的那份；保留最近两代，见 review.mjs 的 saveDeclaredFixedIn）：
+    // 提交里的条目须与其中一代完全对上（同一条发现、实际改在的集合相同、摘要指纹相同）
     const sameSet = (a, b) => { const x = new Set(a); const y = new Set(b); return x.size === a.length && y.size === b.length && x.size === y.size && [...x].every((f) => y.has(f)); };
-    if (!declared || declared.findingSha !== e.findingSha) {
+    const raw = facts.declaredFixedIn?.get(riskKey(e));
+    const candidates = (Array.isArray(raw) ? raw : raw ? [raw] : []).filter((c) => c.findingSha === e.findingSha);
+    if (!candidates.length) {
       problems.push(label + '本机没有 risks 对这条发现的登记（或登记针对的不是同一条发现）：在本机运行 review.mjs risks 生成风险登记，不要手写或改写');
       continue;
     }
-    if (!sameSet(actual.fixedIn, declared.fixedIn)) {
-      problems.push(label + '提交里的实际改在（' + (shown(actual.fixedIn) || '无') + '）与本机 risks 登记的申报（' + (shown(declared.fixedIn) || '无') + '）不一致：修复路径只能经 review.mjs risks --fixed-in 申报');
+    const sameFix = candidates.filter((c) => sameSet(actual.fixedIn, c.fixedIn));
+    if (!sameFix.length) {
+      problems.push(label + '提交里的实际改在（' + (shown(actual.fixedIn) || '无') + '）与本机 risks 登记的申报（' + (shown(candidates[0].fixedIn) || '无') + '）不一致：修复路径只能经 review.mjs risks --fixed-in 申报');
       continue;
     }
-    for (const f of declared.fixedIn) allowed.add(f);
     for (const k of ['severity', 'status', 'dataSha', 'findingSha']) {
       if (actual[k] !== e[k]) problems.push(label + k + ' 与预期登记内容不一致');
     }
     const bad = summaryProblem(actual.summary);
-    if (bad) problems.push(label + bad);
+    const declared = sameFix.find((c) => c.summarySha === summaryFingerprint(actual.summary));
+    if (bad) { problems.push(label + bad); continue; }
     // 摘要只认 risks 核对后写下的那份：本机申报记着它的指纹，提交里改过的摘要不认
-    else if (declared.summarySha !== summaryFingerprint(actual.summary)) problems.push(label + '可共享摘要与本机 risks 登记的不一致：摘要只能经 review.mjs risks --shared-summary 写');
+    if (!declared) { problems.push(label + '可共享摘要与本机 risks 登记的不一致：摘要只能经 review.mjs risks --shared-summary 写'); continue; }
+    for (const f of declared.fixedIn) allowed.add(f);
     const files = e[findingFiles] ?? [];
     // “已修”的证据用本机申报（可信的那份），不用提交里的数组
     if (!files.some((f) => changed.has(f)) && !(declared.fixedIn.length && declared.fixedIn.every((f) => changed.has(f)))) {

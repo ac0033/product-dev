@@ -2,6 +2,7 @@
 // 配置写在 featureRepo 的初始提交里（基准提交上），roundClosure 为 fix-and-record、maxReviewRounds 为 2、pr 流程；拒绝路径同时断言没有写任何记录。不访问网络。
 // 接口假设（计划里没写函数名）：review.mjs 导出 writeRisks({ root, pr, fixedIn, gh }) 与 closeRound({ root, pr, summary, gh })，返回 { ok, message }（可以是 Promise）。
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -10,7 +11,7 @@ import { POLICY_KEYS, isIgnoredDoc, withLock } from '../gate/lib.mjs';
 import { mergePr } from '../gate/merge.mjs';
 import * as REVIEW from '../gate/review.mjs';
 import { recordReview } from '../gate/review.mjs';
-import { commitAll, featureRepo, finding, git, read, reviewData, reviewDataFile, SRC_HEADER, write } from './helpers.mjs';
+import { commitAll, featureRepo, finding, git, read, reviewData, reviewDataFile, SRC_HEADER, tmpDir, write } from './helpers.mjs';
 
 const NL = String.fromCharCode(10);
 const BACKSLASH = String.fromCharCode(92);
@@ -947,4 +948,63 @@ test('M4 风险登记替换失败、恢复原申报也失败时：保留原错�
   assert.match(msgOf(res), /注入的风险登记写入失败/, '保留原错误');
   assert.match(msgOf(res), /没能恢复/);
   assert.match(msgOf(res), /重跑/);
+});
+
+// ---------- PR #46 第 4 轮（确认复核）的回归 ----------
+
+test('M2 待推送历史里有合并、旧格式原文只在合并进来的侧支上（按路径看历史会被简化掉）：risks 仍点出那个提交（PR #46 第 4 轮代码 M2、一致性 M2）', async () => {
+  const { root } = midRounds();
+  const feature = git(root, ['branch', '--show-current']).trim();
+  git(root, ['checkout', '-q', '-b', 'side']);
+  const legacy = { pr: '3', commit: 'a'.repeat(40), round: 1, kind: 'code', id: 'M5', severity: 'medium', location: 'src/x.ts:1', problem: '侧支上的原文', reason: '理由', fix: '改法', status: '已修、未再复审', fixedIn: [] };
+  write(root, REG, JSON.stringify(legacy) + NL);
+  commitAll(root, 'side legacy');
+  const sideLegacy = headOf(root);
+  fs.rmSync(path.join(root, REG));
+  commitAll(root, 'side cleaned');
+  git(root, ['checkout', '-q', feature]);
+  git(root, ['merge', '-q', '--no-ff', '-m', 'merge side', 'side']);
+  const fix = fixCommit(root, 3);
+  const w = must(await writeRisks(root, fix));
+  assert.ok(msgOf(w).includes(sideLegacy.slice(0, 12)), msgOf(w));
+  assert.ok(!msgOf(w).includes('侧支上的原文'));
+});
+
+test('M3 写完新一代本机申报、还没替换风险登记时进程退出：已提交的上一代风险登记仍能和保留下来的上一代申报对上，照常收口（PR #46 第 4 轮代码 M3）', async () => {
+  const { root } = midRounds();
+  const { head } = await fixAndRecord(root, 3);
+  const mod = new URL('../gate/review.mjs', import.meta.url).href;
+  const script = path.join(tmpDir('ekit-exit-'), 'exit.mjs');
+  fs.writeFileSync(script, [
+    "import fs from 'node:fs';",
+    'import { writeRisks } from ' + JSON.stringify(mod) + ';',
+    'const original = fs.renameSync;',
+    "fs.renameSync = (from, to) => { if (String(to).endsWith('review-risks.jsonl')) process.exit(9); return original(from, to); };",
+    "writeRisks({ root: process.argv[2], pr: '7', fixedIn: ['code:M1=src/other.ts'], sharedSummary: ['code:M1=另一句摘要'] });",
+  ].join(NL));
+  const r = spawnSync(process.execPath, [script, root], { encoding: 'utf8' });
+  assert.equal(r.status, 9, r.stderr);
+  assert.ok(fs.existsSync(path.join(prDir(root), 'risks.prev.json')), '上一代申报落盘保留');
+  must(await closeRound(root, head));
+});
+
+test('M3 清理暂存文件出错不会盖过原来的错误和恢复提示（PR #46 第 4 轮代码 M3）', async () => {
+  const { root } = midRounds();
+  const fix = fixCommit(root, 3);
+  const rename = fs.renameSync;
+  const rm = fs.rmSync;
+  fs.renameSync = (from, to) => {
+    if (String(to).endsWith('review-risks.jsonl')) throw Object.assign(new Error('注入的风险登记写入失败（测试）'), { code: 'EIO' });
+    return rename(from, to);
+  };
+  fs.rmSync = (p, ...rest) => {
+    if (String(p).endsWith('.tmp')) throw Object.assign(new Error('注入的暂存清理失败（测试）'), { code: 'EBUSY' });
+    return rm(p, ...rest);
+  };
+  let res;
+  try { res = await writeRisks(root, fix).catch((e) => ({ ok: false, message: e.message })); }
+  finally { fs.renameSync = rename; fs.rmSync = rm; }
+  assert.equal(res.ok, false);
+  assert.match(msgOf(res), /注入的风险登记写入失败/);
+  assert.doesNotMatch(msgOf(res), /注入的暂存清理失败/);
 });
