@@ -277,3 +277,29 @@ test('C6/D2 没配新键：工作流里没有 coverage、mutation 作业，也�
   assert.equal(nulls, y, 'null 与不传生成同一份工作流');
   assert.match(y, /pull_request:\n\s+types: \[opened, synchronize, reopened, ready_for_review\]/);
 });
+
+// ---------- 首轮复审回归（M1、M9） ----------
+
+test('M1 CI 步骤：测试命令不是 Node（如 pytest）时，为台账加的 Node 安装步骤也要 continue-on-error: true', () => {
+  const y = renderCiWorkflow({ ...WF_BASE, testCommand: 'pytest' });
+  const steps = stepsOf(jobText(y, 'test'));
+  const nodeSteps = steps.filter((s) => /actions\/setup-node/.test(s));
+  assert.ok(nodeSteps.length >= 1, '要有为台账装 Node 的步骤');
+  for (const s of nodeSteps) assert.match(s, /continue-on-error: true/, s);
+  const nodeAt = steps.findIndex((s) => /actions\/setup-node/.test(s));
+  const record = steps.findIndex((s) => s.includes('test-ledger.mjs record'));
+  assert.ok(nodeAt < record, 'Node 安装在记录步骤之前');
+});
+
+test('M9 CI 步骤：coverage 作业的汇总命令带上 --out/--run-id/--os，并上传产物 test-ledger-coverage（if: always()、continue-on-error: true）', () => {
+  const y = renderCiWorkflow({ ...WF_BASE, coverage: COVERAGE });
+  const job = jobText(y, 'coverage');
+  assert.ok(job, '要有 coverage 作业');
+  assert.ok(job.includes('--out test-ledger-coverage.jsonl --run-id ci-${{ github.run_id }}-${{ github.run_attempt }}-coverage --os linux'), job);
+  const upload = stepsOf(job).find((s) => /actions\/upload-artifact@[0-9a-f]{40}/.test(s));
+  assert.ok(upload, '要上传产物');
+  assert.ok(upload.includes('name: test-ledger-coverage') && upload.includes('test-ledger-coverage.jsonl'), upload);
+  assert.match(upload, /if: always\(\)/);
+  assert.match(upload, /continue-on-error: true/);
+  assert.ok(!jobText(y, 'ci-gate').includes('coverage'), '仍不进 ci-gate');
+});

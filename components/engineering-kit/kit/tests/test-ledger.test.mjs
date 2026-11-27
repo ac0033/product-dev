@@ -567,3 +567,204 @@ test('C6 coverage 命令：改动的文件都不在 lcov 里 → 写 本次改�
   assert.match(fs.readFileSync(summary, 'utf8'), /本次改动的文件没有覆盖率数据/);
   assert.match(r.stdout, /本次改动的文件没有覆盖率数据/);
 });
+
+// ---------- 首轮复审回归（H1、H2、M4–M9） ----------
+
+const RUN2 = { databaseId: 201, attempt: 2, status: 'completed', conclusion: 'success', name: 'CI' };
+const covEntry = (over = {}) => ({
+  schema: 'ek-coverage/1', at: NOW, runId: 'ci-201-2-coverage', source: 'ci', commit: 'a'.repeat(40), os: 'linux', file: 'src/a.mjs',
+  lines: { hit: 8, total: 10 }, branches: { hit: 3, total: 4 }, ...over,
+});
+
+test('H1 pull：只接受 schema 合法、source 为 ci、runId 以 ci-<运行号>-<attempt>- 开头、字段类型正确的条目；其余拒绝不写台账，输出 拒绝 N 条', async () => {
+  const { readLedger, ledgerFile } = await lib();
+  const root = repoWithTests();
+  const good = [
+    entry({ runId: 'ci-201-2-linux', file: 'tests/a.test.mjs' }),
+    entry({ runId: 'ci-201-2-windows', os: 'windows', file: null, layer: '未分层', note: '未配置 testReports' }),
+  ];
+  const bad = [
+    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', source: 'local' }),
+    entry({ runId: 'ci-999-2-linux', file: 'tests/b.test.mjs' }),
+    entry({ runId: 'ci-201-1-linux', file: 'tests/b.test.mjs' }),
+    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', at: 'not a time' }),
+    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', result: 'maybe' }),
+    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', tests: -3 }),
+    entry({ runId: 'ci-201-2-linux', file: 12 }),
+  ];
+  const gh = fakeGh({ prHead: 'd'.repeat(40), runs: [RUN2], artifacts: { 201: { 'test-ledger-linux/l.jsonl': lines(...good, ...bad) } } });
+  const r = cli(root, ['pull', '--pr', '7'], gh.env);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const got = readLedger(ledgerFile(root)).entries;
+  assert.deepEqual(got.map((e) => `${e.runId}|${e.file}`).sort(), ['ci-201-2-linux|tests/a.test.mjs', 'ci-201-2-windows|null']);
+  assert.match(r.stdout, /拒绝 7 条/);
+});
+
+test('H2 pull 去重：去重键含 note——同一次运行的两条命令级记录（file 为 null、note 不同）都保留，再拉一次不重复', async () => {
+  const { mergeEntries, readLedger, ledgerFile } = await lib();
+  const cmd = (note) => entry({ runId: 'ci-301-1-linux', file: null, layer: '未分层', result: 'fail', note });
+  const a = cmd('JUnit 解析失败：r1.xml：标签不完整');
+  const b = cmd('JUnit 解析失败：r2.xml：标签不完整');
+  assert.equal(mergeEntries([], [a, b]).length, 2, '同 runId、source、file 但 note 不同：都保留');
+  assert.equal(mergeEntries([a, b], [a, b]).length, 0, '都已存在：不重复');
+  assert.equal(mergeEntries([a], [a, b, b]).length, 1, '本批内同 note 的重复只留一条');
+  const root = repoWithTests();
+  const gh = fakeGh({ prHead: 'd'.repeat(40), runs: [{ databaseId: 301, attempt: 1, status: 'completed', conclusion: 'failure', name: 'CI' }],
+    artifacts: { 301: { 'test-ledger-linux/l.jsonl': lines(a, b) } } });
+  for (let i = 0; i < 2; i++) {
+    const r = cli(root, ['pull', '--pr', '7'], gh.env);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(readLedger(ledgerFile(root)).entries.length, 2, `第 ${i + 1} 次拉取后仍是 2 条`);
+  }
+});
+
+test('M4 report：项目没配 testLayers → 提示 未配置 modules.gate.testLayers', () => {
+  const root = repoWithTests();
+  write(root, 'engineering.config.json', JSON.stringify({ profile: 2, layout: { sourceGlobs: ['src/**/*.mjs'], testGlobs: ['tests/**/*.test.mjs'] } }));
+  commitAll(root, 'cfg');
+  const file = path.join(tmpDir('ekit-rep-'), 'l.jsonl');
+  fs.writeFileSync(file, lines(entry({ runId: 'r1', at: new Date().toISOString() })));
+  const r = cli(root, ['report', '--ledger', file]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes('未配置 modules.gate.testLayers'), r.stdout);
+});
+
+test('M4 report：已跟踪测试文件同时命中多个层级 → 提示 命中多个层级，列出文件名和实际采用的第一个层', () => {
+  const root = repoWithTests();
+  const testLayers = [{ name: 'first-layer', paths: ['tests/**'] }, { name: 'second-layer', paths: ['tests/a.*'] }];
+  write(root, 'engineering.config.json', JSON.stringify({ profile: 2, modules: { gate: { testLayers } }, layout: { sourceGlobs: ['src/**/*.mjs'], testGlobs: ['tests/**/*.test.mjs'] } }));
+  commitAll(root, 'cfg');
+  const file = path.join(tmpDir('ekit-rep-'), 'l.jsonl');
+  fs.writeFileSync(file, lines(entry({ runId: 'r1', file: 'tests/b.test.mjs', layer: 'first-layer', at: new Date().toISOString() })));
+  const r = cli(root, ['report', '--ledger', file]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!r.stdout.includes('未配置 modules.gate.testLayers'), '配了就不再提示未配置');
+  const rows = r.stdout.split('\n');
+  const at = rows.findIndex((l) => l.includes('命中多个层级'));
+  assert.ok(at >= 0, r.stdout);
+  const segment = rows.slice(at, at + 3).join('\n');
+  assert.ok(segment.includes('tests/a.test.mjs'), segment);
+  assert.ok(segment.includes('first-layer'), '实际采用第一个命中的层');
+});
+
+test('M5 报告：时间窗口内没有条目但给了 testFiles → 仍算出 untriggered，formatReport 输出这些文件；整份台账为空且没有 testFiles 仍输出 台账里还没有数据', async () => {
+  const { buildReport, formatReport } = await lib();
+  const es = [
+    entry({ runId: 'o1', file: 'tests/old.test.mjs', at: ago(40) }),
+    entry({ runId: 'o2', file: 'tests/mid.test.mjs', at: ago(20) }),
+  ];
+  const r = buildReport(es, { now: NOW, sinceDays: 7, testFiles: ['tests/old.test.mjs', 'tests/mid.test.mjs', 'tests/never.test.mjs'] });
+  assert.deepEqual(names(r.untriggered).sort(), ['tests/never.test.mjs', 'tests/old.test.mjs']);
+  const text = formatReport(r);
+  assert.ok(text.includes('tests/old.test.mjs') && text.includes('tests/never.test.mjs'), text);
+  assert.match(formatReport(buildReport([], { now: NOW })), /台账里还没有数据/);
+});
+
+test('M6 JUnit：属性值里出现原始 <，或 & 后不是合法实体 / 数字引用 → ok: false；合法数字引用被解码', async () => {
+  const { parseJUnit } = await lib();
+  const root = repoWithTests();
+  const wrap = (attr) => `<testsuites><testsuite name="s"><testcase name="t" ${attr}/></testsuite></testsuites>`;
+  for (const attr of ['classname="a<b"', 'classname="a & b"', 'classname="x&foo;y"', 'classname="x&#xZZ;"', 'classname="x&;"', "classname='x&amp'"]) {
+    const r = parseJUnit(wrap(attr), { root });
+    assert.equal(r.ok, false, attr);
+    assert.ok(typeof r.error === 'string' && r.error.length > 0, attr);
+  }
+  for (const attr of ['classname="a&lt;b&gt;&amp;&quot;&apos;"', 'classname="&#123;&#x7B;"']) assert.equal(parseJUnit(wrap(attr), { root }).ok, true, attr);
+  assert.deepEqual(parseJUnit(wrap('file="tests/&#x61;.test.mjs"'), { root }).files.map((f) => f.file), ['tests/a.test.mjs'], '&#x61; 解码成 a');
+  assert.deepEqual(parseJUnit(wrap('file="tests/&#98;.test.mjs"'), { root }).files.map((f) => f.file), ['tests/b.test.mjs'], '&#98; 解码成 b');
+  assert.deepEqual(parseJUnit(wrap('file="&#x41;"'), { root }).files.map((f) => f.file), ['A']);
+});
+
+test('M7 条目：退出码非 0 且文件级条目都没失败（含全部跳过的文件）→ 补一条命令级 fail', async () => {
+  const { buildEntries } = await lib();
+  const skipOnly = [{ path: 'r.xml', text: junit(tc('tests/c.test.mjs', '<skipped/>')) }];
+  const mixed = [{ path: 'r.xml', text: junit(tc('tests/c.test.mjs', '<skipped/>') + tc('tests/a.test.mjs')) }];
+  for (const reports of [skipOnly, mixed]) {
+    const out = buildEntries({ ...BASE_ARGS, exitCode: 1, reports });
+    const cmd = out.filter((e) => e.file === null);
+    assert.equal(cmd.length, 1, JSON.stringify(out));
+    assert.deepEqual([cmd[0].result, cmd[0].note], ['fail', '测试命令失败，但报告里没有失败用例']);
+  }
+  assert.equal(buildEntries({ ...BASE_ARGS, exitCode: 0, reports: skipOnly }).filter((e) => e.file === null).length, 0, '退出码 0 不补');
+});
+
+test('M7 条目：所有报告都解析成功但一个用例都没有 → 记一条命令级条目，result 按退出码，note 含 没有用例', async () => {
+  const { buildEntries } = await lib();
+  const reports = [{ path: 'r.xml', text: '<testsuites></testsuites>' }, { path: 's.xml', text: '<testsuite name="s"></testsuite>' }];
+  for (const [exitCode, result] of [[0, 'pass'], [2, 'fail']]) {
+    const out = buildEntries({ ...BASE_ARGS, exitCode, reports });
+    assert.equal(out.length, 1, JSON.stringify(out));
+    assert.deepEqual([out[0].file, out[0].result], [null, result]);
+    assert.match(out[0].note, /没有用例/);
+  }
+});
+
+test('M9 台账：readLedger 把 ek-coverage/1 也当合法行读出；其他 schema 仍是坏行', async () => {
+  const { readLedger } = await lib();
+  const file = path.join(tmpDir('ekit-ledger-'), 'l.jsonl');
+  fs.writeFileSync(file, lines(entry({ runId: 'r1' }), covEntry(), { schema: 'ek-coverage/2', file: 'x' }));
+  const got = readLedger(file);
+  assert.deepEqual(got.entries.map((e) => e.schema), ['ek-test-ledger/1', 'ek-coverage/1']);
+  assert.deepEqual(got.bad, [3]);
+});
+
+test('M9 报告：覆盖率条目不影响通过/失败分类与层级统计；formatReport 的 覆盖率 一节列出每个文件最近一次的行覆盖率', async () => {
+  const { buildReport, formatReport } = await lib();
+  const base = [
+    entry({ runId: 'p1', file: 'tests/a.test.mjs', at: ago(2) }),
+    entry({ runId: 'f1', file: 'tests/b.test.mjs', result: 'fail', failures: 1, at: ago(2) }),
+    entry({ runId: 'f2', file: 'tests/b.test.mjs', result: 'pass', at: ago(3) }),
+  ];
+  const cov = [
+    covEntry({ runId: 'ci-1-1-coverage', file: 'src/a.mjs', lines: { hit: 9, total: 10 }, at: ago(1) }),
+    covEntry({ runId: 'ci-0-1-coverage', file: 'src/a.mjs', lines: { hit: 8, total: 10 }, at: ago(5) }),
+    covEntry({ runId: 'ci-1-1-coverage', file: 'src/z.mjs', lines: { hit: 1, total: 4 }, at: ago(1) }),
+  ];
+  const without = buildReport(base, { now: NOW });
+  const withCov = buildReport([...base, ...cov], { now: NOW });
+  for (const key of ['alwaysPass', 'alwaysFail', 'flaky', 'layers']) assert.deepEqual(withCov[key], without[key], key);
+  const text = formatReport(withCov);
+  assert.ok(text.includes('覆盖率'), text);
+  assert.ok(text.includes('src/a.mjs') && text.includes('src/z.mjs'), text);
+  assert.match(text, /90(\.0+)?%/, '最近一次（90%）');
+  assert.match(text, /25(\.0+)?%/);
+  assert.doesNotMatch(text, /80(\.0+)?%/, '较早的一次不显示');
+});
+
+test('M9 coverage 命令：--out/--run-id/--os 给了 → 按改动文件每个追加一条 ek-coverage/1', () => {
+  const root = repoWithTests();
+  write(root, 'src/a.mjs', '// a\n');
+  write(root, 'src/other.mjs', '// o\n');
+  commitAll(root, 'add sources');
+  const base = git(root, ['rev-parse', 'HEAD']).trim();
+  write(root, 'src/a.mjs', '// a changed\n');
+  commitAll(root, 'change a');
+  const dir = tmpDir('ekit-cov-');
+  const lcovFile = path.join(dir, 'lcov.info');
+  fs.writeFileSync(lcovFile, lcov(root));
+  const out = path.join(dir, 'cov.jsonl');
+  const r = cli(root, ['coverage', '--lcov', lcovFile, '--base', base, '--summary', path.join(dir, 's.md'), '--out', out, '--run-id', 'ci-55-1-coverage', '--os', 'linux']);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const rows = readJsonl(out);
+  assert.equal(rows.length, 1, '只有 src/a.mjs 改动了');
+  const [row] = rows;
+  assert.deepEqual([row.schema, row.runId, row.source, row.os, row.file], ['ek-coverage/1', 'ci-55-1-coverage', 'ci', 'linux', 'src/a.mjs']);
+  assert.deepEqual(row.lines, { hit: 8, total: 10 });
+  assert.deepEqual(row.branches, { hit: 3, total: 4 });
+  assert.match(row.commit, /^[0-9a-f]{40}$/);
+  assert.ok(Number.isFinite(Date.parse(row.at)));
+  const noOut = cli(root, ['coverage', '--lcov', lcovFile, '--base', base, '--summary', path.join(dir, 's2.md')]);
+  assert.equal(noOut.status, 0, noOut.stderr);
+  assert.equal(readJsonl(out).length, 1, '不给 --out 不写台账');
+});
+
+test('M9 pull：合法的覆盖率条目导入台账，来源不合法的覆盖率条目拒绝', async () => {
+  const { readLedger, ledgerFile } = await lib();
+  const root = repoWithTests();
+  const gh = fakeGh({ prHead: 'd'.repeat(40), runs: [RUN2],
+    artifacts: { 201: { 'test-ledger-coverage/c.jsonl': lines(covEntry(), covEntry({ file: 'src/b.mjs', source: 'local' })) } } });
+  const r = cli(root, ['pull', '--pr', '7'], gh.env);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.deepEqual(readLedger(ledgerFile(root)).entries.map((e) => `${e.schema}|${e.file}`), ['ek-coverage/1|src/a.mjs']);
+  assert.match(r.stdout, /拒绝 1 条/);
+});

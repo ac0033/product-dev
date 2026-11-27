@@ -121,20 +121,6 @@ test('D2 pull：下载 PR 最终提交上 CI 运行的 mutation-report 产物，
   assert.ok(calls.some((c) => c[1] === 'download' && c.join(' ').includes('mutation-report')), '下载名为 mutation-report 的产物');
 });
 
-test('D2 pull：--out 缺省写系统临时目录下 ek-mutation-<PR>.txt', () => {
-  const { root } = repo();
-  const gh = fakeGh({ prHead: 'b2'.repeat(20), runs: [RUN], artifacts: { 301: { 'mutation-report/mutation-report.txt': 'R\n', 'mutation-report.txt': 'R\n' } } });
-  const expected = path.join(os.tmpdir(), 'ek-mutation-4242.txt');
-  fs.rmSync(expected, { force: true });
-  try {
-    const r = cli(root, ['pull', '--pr', '4242'], gh.env);
-    assert.equal(r.status, 0, r.stderr + r.stdout);
-    assert.equal(fs.readFileSync(expected, 'utf8'), 'R\n');
-  } finally {
-    fs.rmSync(expected, { force: true });
-  }
-});
-
 test('D2 pull：没有产物 → 说明 本 PR 的 CI 没有变异测试产物（没配置、没带风险标签或作业没跑），退出 0', () => {
   const { root } = repo();
   const gh = fakeGh({ prHead: 'c3'.repeat(20), runs: [RUN], artifacts: {} });
@@ -144,4 +130,75 @@ test('D2 pull：没有产物 → 说明 本 PR 的 CI 没有变异测试产物�
   assert.match(r.stdout, /本 PR 的 CI 没有变异测试产物/);
   assert.match(r.stdout, /没配置/);
   assert.match(r.stdout, /风险标签/);
+});
+
+// ---------- 首轮复审回归（M3、M10） ----------
+
+const jobsOf = (...jobs) => jobs.map(([name, conclusion]) => ({ name, conclusion }));
+const MUT_ART = { 'mutation-report/mutation-report.txt': 'MUTANTS SURVIVED: 5\n', 'mutation-report.txt': 'MUTANTS SURVIVED: 5\n' };
+
+test('M3 pull：有产物但变异作业结论不是 success → 输出 变异作业结论：<结论>，写明报告可能不完整，报告仍写出；success 不加警告', () => {
+  const { root } = repo();
+  const out = path.join(tmpDir('ekit-mut-'), 'got.txt');
+  const gh = fakeGh({ prHead: 'd1'.repeat(20), runs: [RUN], artifacts: { 301: MUT_ART }, jobs: { 301: jobsOf(['test (linux)', 'success'], ['mutation', 'failure']) } });
+  const r = cli(root, ['pull', '--pr', '9', '--out', out], gh.env);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /变异作业结论：failure/);
+  assert.match(r.stdout, /不完整/);
+  assert.equal(fs.readFileSync(out, 'utf8'), 'MUTANTS SURVIVED: 5\n');
+  const view = gh.calls().find((c) => c[0] === 'run' && c[1] === 'view');
+  assert.ok(view && view.includes('301') && view.includes('--json') && view.includes('jobs'), JSON.stringify(gh.calls()));
+  const ok = fakeGh({ prHead: 'd2'.repeat(20), runs: [RUN], artifacts: { 301: MUT_ART }, jobs: { 301: jobsOf(['mutation', 'success']) } });
+  const okRun = cli(root, ['pull', '--pr', '9', '--out', path.join(tmpDir('ekit-mut-'), 'ok.txt')], ok.env);
+  assert.equal(okRun.status, 0, okRun.stderr + okRun.stdout);
+  assert.doesNotMatch(okRun.stdout, /不完整/);
+});
+
+test('M3 pull：没有产物且变异作业结论是 failure / cancelled / timed_out → 输出该结论，不再说通用的 没配置、没带风险标签或作业没跑', () => {
+  const { root } = repo();
+  for (const conclusion of ['failure', 'cancelled', 'timed_out']) {
+    const gh = fakeGh({ prHead: 'e1'.repeat(20), runs: [RUN], artifacts: {}, jobs: { 301: jobsOf(['test (linux)', 'failure'], ['mutation', conclusion]) } });
+    const r = cli(root, ['pull', '--pr', '9', '--out', path.join(tmpDir('ekit-mut-'), 'none.txt')], gh.env);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.ok(r.stdout.includes(`变异作业结论：${conclusion}`), r.stdout);
+    assert.doesNotMatch(r.stdout, /没配置/);
+  }
+  const noJob = fakeGh({ prHead: 'e2'.repeat(20), runs: [RUN], artifacts: {}, jobs: { 301: jobsOf(['test (linux)', 'failure']) } });
+  const r = cli(root, ['pull', '--pr', '9', '--out', path.join(tmpDir('ekit-mut-'), 'none2.txt')], noJob.env);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /没配置/, '没有 mutation 作业：仍是通用说明（其他作业失败不算）');
+});
+
+test('M10 pull：不给 --out 时写到每次新建的独占临时目录——两次调用的路径不同，也不是固定的 <tmpdir>/ek-mutation-<PR>.txt', () => {
+  const { root } = repo();
+  const fixed = path.join(os.tmpdir(), 'ek-mutation-4243.txt');
+  fs.rmSync(fixed, { force: true });
+  const paths = [];
+  try {
+    for (let i = 0; i < 2; i++) {
+      const gh = fakeGh({ prHead: 'b2'.repeat(20), runs: [RUN], artifacts: { 301: { 'mutation-report/mutation-report.txt': 'R\n', 'mutation-report.txt': 'R\n' } } });
+      const r = cli(root, ['pull', '--pr', '4243'], gh.env);
+      assert.equal(r.status, 0, r.stderr + r.stdout);
+      const printed = r.stdout.match(/变异测试报告：(.+)/)[1].trim();
+      assert.equal(fs.readFileSync(printed, 'utf8'), 'R\n');
+      paths.push(path.resolve(printed));
+    }
+    assert.notEqual(paths[0], paths[1], '两次调用的路径不同');
+    assert.notEqual(path.dirname(paths[0]), path.dirname(paths[1]), '各用各的新目录');
+    for (const p of paths) {
+      assert.notEqual(p, path.resolve(fixed), '不是固定路径');
+      assert.notEqual(path.resolve(path.dirname(p)), path.resolve(os.tmpdir()), '放在新建的子目录里，不直接放系统临时目录');
+    }
+    assert.equal(fs.existsSync(fixed), false, '固定路径不再被写');
+  } finally {
+    for (const p of paths) {
+      // 只删自己的文件；目录只在它正是系统临时目录下、以 ek-mutation- 开头的独占子目录时才删（只删空目录，不递归），绝不碰别的目录
+      fs.rmSync(p, { force: true });
+      const dir = path.resolve(path.dirname(p));
+      if (path.dirname(dir) === path.resolve(os.tmpdir()) && path.basename(dir).startsWith('ek-mutation-')) {
+        try { fs.rmdirSync(dir); } catch { /* 目录不空或已删：留给系统清理，不扩大删除范围 */ }
+      }
+    }
+    fs.rmSync(fixed, { force: true });
+  }
 });

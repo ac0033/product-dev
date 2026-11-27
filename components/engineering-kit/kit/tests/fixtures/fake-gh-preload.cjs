@@ -1,6 +1,6 @@
 // 假 gh 的预加载脚本（测试支持，不是被测代码）：测试把 node 可执行文件以 gh 的名字放进 PATH，
 // 套件脚本 spawn "gh" 时实际运行的是 node，并由 NODE_OPTIONS 预加载本文件；按 argv0 判断自己是不是被当作 gh 调用，不是就什么都不做。
-// 行为由环境变量 EK_FAKE_GH 指向的 JSON 文件决定：{ prHead, runs, artifacts, failOn, log }。每次调用的参数追加写进 log（JSON 行）。
+// 行为由环境变量 EK_FAKE_GH 指向的 JSON 文件决定：{ prHead, runs, artifacts, jobs, failOn, log }。每次调用的参数追加写进 log（JSON 行）。
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -18,6 +18,10 @@ if (me === 'gh' && process.env.EK_FAKE_GH) {
     process.stdout.write(`${JSON.stringify({ headRefOid: cfg.prHead })}\n`);
   } else if (sub === 'run list') {
     process.stdout.write(`${JSON.stringify(cfg.runs || [])}\n`);
+  } else if (sub === 'run view') {
+    // run view <id> --json jobs：cfg.jobs 形如 { '<运行号>': [{ name, conclusion }] }，没列出的运行返回空作业列表
+    process.stdout.write(`${JSON.stringify({ jobs: (cfg.jobs || {})[String(args[2])] || [] })}
+`);
   } else if (sub === 'run download') {
     const id = String(args[2]);
     const dir = opt('--dir');
