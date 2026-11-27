@@ -62,28 +62,10 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
-      - id: evals
-        run: node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="${{ runner.temp }}/junit-evals.xml" evals/*.test.mjs
-      - id: kit
-        run: node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="${{ runner.temp }}/junit-kit.xml" tests/*.test.mjs
+      - run: node --test evals/*.test.mjs
+      - run: node --test tests/*.test.mjs
         working-directory: components/engineering-kit/kit
         env:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
       - run: node tools/package-release.mjs dist
-      # 测试台账（只报告）：两步测试的 JUnit 报告按测试文件记成 ek-test-ledger/1，作为产物上传；本机用套件的 test-ledger.mjs pull --pr <编号> 拉回。
-      # 本仓库没有 engineering.config.json，记录步骤不读配置，层级记“未分层”。记录失败不影响作业结论。
-      - name: Test ledger
-        if: always() && (steps.evals.outcome == 'success' || steps.evals.outcome == 'failure')
-        continue-on-error: true
-        shell: bash
-        env:
-          OUTCOME: ${{ steps.evals.outcome == 'success' && steps.kit.outcome == 'success' && '0' || '1' }}
-        run: node components/engineering-kit/kit/gate/test-ledger.mjs record --source ci --exit-code "$OUTCOME" --junit "${{ runner.temp }}/junit-evals.xml" --junit "${{ runner.temp }}/junit-kit.xml" --os "${{ runner.os == 'Windows' && 'windows' || runner.os == 'macOS' && 'macos' || 'linux' }}" --run-id "ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}" --mode full --out "${{ runner.temp }}/test-ledger-${{ matrix.os }}.jsonl"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        continue-on-error: true
-        with:
-          name: test-ledger-${{ matrix.os }}
-          path: ${{ runner.temp }}/test-ledger-${{ matrix.os }}.jsonl
-          if-no-files-found: ignore

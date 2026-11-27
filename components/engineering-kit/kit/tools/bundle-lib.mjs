@@ -325,7 +325,7 @@ export function planBundle({ root, bundleRoot, bundle, force = false, hooks = tr
         if (v.fullTests === 'ci') requiredChecks = v.requiredChecks;
       } else {
         const gate = (newCfgRaw.modules || {}).gate || {};
-        const content = renderCiWorkflow({ ciRunner: v.ciRunner, ciFallback: v.ciFallback ?? null, ciOs: v.ciOs || ['linux'], testCommand: gate.testCommand || 'npm test', testEnv: gate.testEnv || {}, reviewIgnore: (newCfgRaw.rules || {}).reviewIgnore || [], coverage: gate.coverage ?? null, mutationCommand: gate.mutationCommand ?? null });
+        const content = renderCiWorkflow({ ciRunner: v.ciRunner, ciFallback: v.ciFallback ?? null, ciOs: v.ciOs || ['linux'], testCommand: gate.testCommand || 'npm test', testEnv: gate.testEnv || {}, reviewIgnore: (newCfgRaw.rules || {}).reviewIgnore || [] });
         ops.push({ rel: CI_WORKFLOW_REL, abs: wfAbs, content, action: 'create' });
         actions.push({ type: 'create', file: CI_WORKFLOW_REL });
         if (v.reviewFlow === 'pr') requiredChecks = [CI_GATE_JOB];

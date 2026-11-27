@@ -1,4 +1,4 @@
-// 测试台账测试（规格 spec-CD 第 2、3 节）：JUnit 解析、台账条目、台账读写合并、报告、record / pull / report / coverage 命令行。
+// 测试台账测试（规格 spec-CD 第 2 节）：JUnit 解析、台账条目、台账读写合并、报告、record / report 命令行。
 // 业务含义：台账是“各测试文件每次运行的结果”的长期记录，用来发现从不失败的测试、不稳定的测试和长期没被触发的测试；
 // 记录失败不能影响测试结论，所以解析、归属、去重这些环节都要有确定的行为。
 // 用动态 import 加载被测模块：实现还没有时每条用例各自失败，而不是整个文件加载失败。
@@ -8,7 +8,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { fakeGh } from './fixtures/fake-gh.mjs';
 import { nodeTestXml, pytestXml, vitestXml } from './fixtures/junit-samples.mjs';
 import { commitAll, git, tmpDir, tmpRepo, write } from './helpers.mjs';
 
@@ -245,20 +244,6 @@ test('C3 台账读写：appendEntries 建目录并逐行追加；readLedger 返�
   assert.deepEqual(got.bad, [4, 5], '坏行用物理行号（从 1 数）');
 });
 
-test('C5 pull 去重：mergeEntries 按 (schema, runId, source, file, note) 去重，只返回要追加的新条目（命令级 file 为 null 同样参与）', async () => {
-  const { mergeEntries } = await lib();
-  const existing = [entry({ runId: 'r1' }), entry({ runId: 'r1', file: null, layer: '未分层', note: 'x' })];
-  const incoming = [
-    entry({ runId: 'r1' }),
-    entry({ runId: 'r1', file: null, layer: '未分层', note: 'x' }),
-    entry({ runId: 'r1', file: 'tests/b.test.mjs' }),
-    entry({ runId: 'r1', source: 'local' }),
-    entry({ runId: 'r2' }),
-  ];
-  const fresh = mergeEntries(existing, incoming);
-  assert.deepEqual(fresh.map((e) => `${e.runId}|${e.source}|${e.file}`), ['r1|ci|tests/b.test.mjs', 'r1|local|tests/a.test.mjs', 'r2|ci|tests/a.test.mjs']);
-});
-
 // ---------- C5 报告 ----------
 
 test('C5 报告：始终通过 / 始终失败 / 不稳定分类，只看文件级条目（命令级与 （未知文件） 不参与）', async () => {
@@ -452,174 +437,9 @@ test('C5 report：--since 过滤旧条目；无配置时不算 untriggered，有
   assert.ok(withCfg.stdout.includes('tests/b.test.mjs'), '已跟踪的测试文件从未出现在台账里');
 });
 
-// ---------- C5 pull 命令行（假 gh） ----------
-
 const lines = (...es) => `${es.map((e) => JSON.stringify(e)).join('\n')}\n`;
 
-test('C5 pull：gh pr view → gh run list → 对每个已完成的运行 gh run download；合并去重后追加；产物不存在的运行跳过并列出；再拉一次不重复', async () => {
-  const { readLedger, ledgerFile } = await lib();
-  const root = repoWithTests();
-  const sha = 'e'.repeat(40);
-  const shared = entry({ runId: 'ci-101-1-linux', file: 'tests/a.test.mjs' });
-  const gh = fakeGh({
-    prHead: sha,
-    runs: [
-      { databaseId: 101, attempt: 1, status: 'completed', conclusion: 'success', name: 'CI' },
-      { databaseId: 102, attempt: 1, status: 'completed', conclusion: 'failure', name: 'CI' },
-      { databaseId: 103, attempt: 1, status: 'in_progress', conclusion: '', name: 'CI' },
-      { databaseId: 104, attempt: 1, status: 'completed', conclusion: 'success', name: 'Other' },
-    ],
-    artifacts: {
-      101: { 'test-ledger-linux/l.jsonl': lines(shared, entry({ runId: 'ci-101-1-linux', file: 'tests/b.test.mjs' })) },
-      102: { 'test-ledger-linux/l.jsonl': lines(shared, entry({ runId: 'ci-102-1-linux', file: 'tests/a.test.mjs', result: 'fail' })), 'test-ledger-windows/l.jsonl': lines(entry({ runId: 'ci-102-1-windows', os: 'windows' })) },
-    },
-  });
-  const r = cli(root, ['pull', '--pr', '7'], gh.env);
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  const got = readLedger(ledgerFile(root)).entries;
-  assert.deepEqual(got.map((e) => `${e.runId}|${e.file}`).sort(), [
-    'ci-101-1-linux|tests/a.test.mjs', 'ci-101-1-linux|tests/b.test.mjs', 'ci-102-1-linux|tests/a.test.mjs', 'ci-102-1-windows|tests/a.test.mjs',
-  ], '重复的 (schema, runId, source, file, note) 只留一条');
-  for (const id of ['101', '102', '104']) assert.ok(r.stdout.includes(id), `输出要提到运行 ${id}（拉回的或跳过的）`);
-  assert.match(r.stdout, /新增/);
-  const calls = gh.calls();
-  const view = calls.find((c) => c[0] === 'pr' && c[1] === 'view');
-  assert.ok(view && view.includes('7') && view.includes('--json') && view.includes('headRefOid'), JSON.stringify(view));
-  const list = calls.find((c) => c[0] === 'run' && c[1] === 'list');
-  assert.ok(list && list.includes('--commit') && list.includes(sha) && list.includes('--json') && list.includes('databaseId,attempt,status,conclusion,name'), JSON.stringify(list));
-  const downloads = calls.filter((c) => c[1] === 'download');
-  assert.deepEqual(downloads.map((c) => c[2]).sort(), ['101', '102', '104'], '只对已完成的运行下载（103 未完成）');
-  assert.ok(downloads.every((c) => c.includes('--pattern') && c[c.indexOf('--pattern') + 1].startsWith('test-ledger') && c.includes('--dir')));
-  const again = cli(root, ['pull', '--pr', '7'], gh.env);
-  assert.equal(again.status, 0, again.stderr);
-  assert.equal(readLedger(ledgerFile(root)).entries.length, 4, '再拉一次不新增');
-});
-
-test('C5 pull：gh 失败 → 报错退出 1，不写台账', async () => {
-  const { ledgerFile } = await lib();
-  const root = repoWithTests();
-  for (const failOn of ['pr view', 'run list']) {
-    const gh = fakeGh({ prHead: 'f'.repeat(40), runs: [{ databaseId: 1, attempt: 1, status: 'completed', conclusion: 'success', name: 'CI' }], artifacts: { 1: { 'test-ledger-linux/l.jsonl': lines(entry()) } }, failOn });
-    const r = cli(root, ['pull', '--pr', '7'], gh.env);
-    assert.equal(r.status, 1, failOn + r.stdout);
-    assert.equal(fs.existsSync(ledgerFile(root)), false, '失败时不写台账');
-  }
-});
-
-// ---------- C6 覆盖率 ----------
-
-/** 一份 lcov：a.mjs 10 行命中 8、4 个分支取到 3；other.mjs 全未覆盖。路径用绝对路径（lcov 常见写法）。 */
-function lcov(root) {
-  const a = path.join(root, 'src', 'a.mjs');
-  const o = path.join(root, 'src', 'other.mjs');
-  const da = (n, hit) => Array.from({ length: n }, (_, i) => `DA:${i + 1},${i < hit ? 1 : 0}`).join('\n');
-  return `TN:\nSF:${a}\n${da(10, 8)}\nBRDA:3,0,0,1\nBRDA:3,0,1,1\nBRDA:5,0,0,1\nBRDA:5,0,1,-\nend_of_record\nSF:${o}\n${da(10, 0)}\nBRDA:1,0,0,0\nBRDA:1,0,1,-\nend_of_record\n`;
-}
-
-test('C6 lcov：parseLcov 把绝对路径转成相对 root；coverageSummary 只统计改动过的文件', async () => {
-  const { parseLcov, coverageSummary } = await lib();
-  const root = repoWithTests();
-  const files = parseLcov(lcov(root), { root });
-  const text = JSON.stringify(files);
-  assert.ok(text.includes('src/a.mjs') && text.includes('src/other.mjs'));
-  assert.ok(!text.includes(slash(root)) && !text.includes(JSON.stringify(root).slice(1, -1)), '绝对路径已转成相对路径');
-  const summary = coverageSummary(files, ['src/a.mjs']);
-  const s = typeof summary === 'string' ? summary : JSON.stringify(summary);
-  assert.ok(s.includes('src/a.mjs') && !s.includes('other.mjs'), '未改动的文件不统计');
-  assert.ok(/80(\.0+)?/.test(s) && /75(\.0+)?/.test(s), `行覆盖率 80%、分支覆盖率 75%：${s}`);
-});
-
-test('C6 coverage 命令：只统计相对 --base 改动的文件，Markdown 表追加写进 --summary 文件并打印到标准输出', () => {
-  const root = repoWithTests();
-  write(root, 'src/a.mjs', '// a\n');
-  write(root, 'src/other.mjs', '// o\n');
-  commitAll(root, 'add sources');
-  const base = git(root, ['rev-parse', 'HEAD']).trim();
-  write(root, 'src/a.mjs', '// a changed\n');
-  commitAll(root, 'change a');
-  const dir = tmpDir('ekit-cov-');
-  const lcovFile = path.join(dir, 'lcov.info');
-  fs.writeFileSync(lcovFile, lcov(root));
-  const summary = path.join(dir, 'summary.md');
-  fs.writeFileSync(summary, '已有内容\n');
-  const r = cli(root, ['coverage', '--lcov', lcovFile, '--base', base, '--summary', summary]);
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  const written = fs.readFileSync(summary, 'utf8');
-  assert.ok(written.startsWith('已有内容\n'), '追加而不是覆盖');
-  for (const text of [written, r.stdout]) {
-    assert.ok(text.includes('src/a.mjs'), text);
-    assert.ok(!text.includes('other.mjs'), '未改动的文件不出现');
-    assert.match(text, /80(\.0+)?%/);
-    assert.match(text, /75(\.0+)?%/);
-    assert.match(text, /\|/, 'Markdown 表');
-  }
-});
-
-test('C6 coverage 命令：改动的文件都不在 lcov 里 → 写 本次改动的文件没有覆盖率数据', () => {
-  const root = repoWithTests();
-  const base = git(root, ['rev-parse', 'HEAD']).trim();
-  write(root, 'docs/only.md', 'x\n');
-  commitAll(root, 'docs only');
-  const dir = tmpDir('ekit-cov-');
-  const lcovFile = path.join(dir, 'lcov.info');
-  fs.writeFileSync(lcovFile, lcov(root));
-  const summary = path.join(dir, 'summary.md');
-  const r = cli(root, ['coverage', '--lcov', lcovFile, '--base', base, '--summary', summary]);
-  assert.equal(r.status, 0, r.stderr);
-  assert.match(fs.readFileSync(summary, 'utf8'), /本次改动的文件没有覆盖率数据/);
-  assert.match(r.stdout, /本次改动的文件没有覆盖率数据/);
-});
-
 // ---------- 首轮复审回归（H1、H2、M4–M9） ----------
-
-const RUN2 = { databaseId: 201, attempt: 2, status: 'completed', conclusion: 'success', name: 'CI' };
-const covEntry = (over = {}) => ({
-  schema: 'ek-coverage/1', at: NOW, runId: 'ci-201-2-coverage', source: 'ci', commit: 'a'.repeat(40), os: 'linux', file: 'src/a.mjs',
-  lines: { hit: 8, total: 10 }, branches: { hit: 3, total: 4 }, ...over,
-});
-
-test('H1 pull：只接受 schema 合法、source 为 ci、runId 以 ci-<运行号>-<attempt>- 开头、字段类型正确的条目；其余拒绝不写台账，输出 拒绝 N 条', async () => {
-  const { readLedger, ledgerFile } = await lib();
-  const root = repoWithTests();
-  const good = [
-    entry({ runId: 'ci-201-2-linux', file: 'tests/a.test.mjs' }),
-    entry({ runId: 'ci-201-2-linux', file: null, layer: '未分层', note: '未配置 testReports' }),
-  ];
-  const bad = [
-    entry({ runId: 'ci-201-2-windows', os: 'windows', file: 'tests/b.test.mjs' }), // linux 产物里自报 windows：按第 10 节拒绝
-    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', source: 'local' }),
-    entry({ runId: 'ci-999-2-linux', file: 'tests/b.test.mjs' }),
-    entry({ runId: 'ci-201-1-linux', file: 'tests/b.test.mjs' }),
-    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', at: 'not a time' }),
-    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', result: 'maybe' }),
-    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', tests: -3 }),
-    entry({ runId: 'ci-201-2-linux', file: 12 }),
-  ];
-  const gh = fakeGh({ prHead: 'd'.repeat(40), runs: [RUN2], artifacts: { 201: { 'test-ledger-linux/l.jsonl': lines(...good, ...bad) } } });
-  const r = cli(root, ['pull', '--pr', '7'], gh.env);
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  const got = readLedger(ledgerFile(root)).entries;
-  assert.deepEqual(got.map((e) => `${e.runId}|${e.file}`).sort(), ['ci-201-2-linux|null', 'ci-201-2-linux|tests/a.test.mjs']);
-  assert.match(r.stdout, /拒绝 8 条/);
-});
-
-test('H2 pull 去重：去重键是 (schema, runId, source, file, note)——同一次运行的两条命令级记录（file 为 null、note 不同）都保留，再拉一次不重复', async () => {
-  const { mergeEntries, readLedger, ledgerFile } = await lib();
-  const cmd = (note) => entry({ runId: 'ci-301-1-linux', file: null, layer: '未分层', result: 'fail', note });
-  const a = cmd('JUnit 解析失败：r1.xml：标签不完整');
-  const b = cmd('JUnit 解析失败：r2.xml：标签不完整');
-  assert.equal(mergeEntries([], [a, b]).length, 2, '同 schema、runId、source、file 但 note 不同：都保留');
-  assert.equal(mergeEntries([a, b], [a, b]).length, 0, '都已存在：不重复');
-  assert.equal(mergeEntries([a], [a, b, b]).length, 1, '本批内同 note 的重复只留一条');
-  const root = repoWithTests();
-  const gh = fakeGh({ prHead: 'd'.repeat(40), runs: [{ databaseId: 301, attempt: 1, status: 'completed', conclusion: 'failure', name: 'CI' }],
-    artifacts: { 301: { 'test-ledger-linux/l.jsonl': lines(a, b) } } });
-  for (let i = 0; i < 2; i++) {
-    const r = cli(root, ['pull', '--pr', '7'], gh.env);
-    assert.equal(r.status, 0, r.stderr + r.stdout);
-    assert.equal(readLedger(ledgerFile(root)).entries.length, 2, `第 ${i + 1} 次拉取后仍是 2 条`);
-  }
-});
 
 test('M4 report：项目没配 testLayers → 提示 未配置 modules.gate.testLayers', () => {
   const root = repoWithTests();
@@ -702,161 +522,7 @@ test('M7 条目：所有报告都解析成功但一个用例都没有 → 记一
   }
 });
 
-test('M9 台账：readLedger 把 ek-coverage/1 也当合法行读出；其他 schema 仍是坏行', async () => {
-  const { readLedger } = await lib();
-  const file = path.join(tmpDir('ekit-ledger-'), 'l.jsonl');
-  fs.writeFileSync(file, lines(entry({ runId: 'r1' }), covEntry(), { schema: 'ek-coverage/2', file: 'x' }));
-  const got = readLedger(file);
-  assert.deepEqual(got.entries.map((e) => e.schema), ['ek-test-ledger/1', 'ek-coverage/1']);
-  assert.deepEqual(got.bad, [3]);
-});
-
-test('M9 报告：覆盖率条目不影响通过/失败分类与层级统计；formatReport 的 覆盖率 一节列出每个文件最近一次的行覆盖率', async () => {
-  const { buildReport, formatReport } = await lib();
-  const base = [
-    entry({ runId: 'p1', file: 'tests/a.test.mjs', at: ago(2) }),
-    entry({ runId: 'f1', file: 'tests/b.test.mjs', result: 'fail', failures: 1, at: ago(2) }),
-    entry({ runId: 'f2', file: 'tests/b.test.mjs', result: 'pass', at: ago(3) }),
-  ];
-  const cov = [
-    covEntry({ runId: 'ci-1-1-coverage', file: 'src/a.mjs', lines: { hit: 9, total: 10 }, at: ago(1) }),
-    covEntry({ runId: 'ci-0-1-coverage', file: 'src/a.mjs', lines: { hit: 8, total: 10 }, at: ago(5) }),
-    covEntry({ runId: 'ci-1-1-coverage', file: 'src/z.mjs', lines: { hit: 1, total: 4 }, at: ago(1) }),
-  ];
-  const without = buildReport(base, { now: NOW });
-  const withCov = buildReport([...base, ...cov], { now: NOW });
-  for (const key of ['alwaysPass', 'alwaysFail', 'flaky', 'layers']) assert.deepEqual(withCov[key], without[key], key);
-  const text = formatReport(withCov);
-  assert.ok(text.includes('覆盖率'), text);
-  assert.ok(text.includes('src/a.mjs') && text.includes('src/z.mjs'), text);
-  assert.match(text, /90(\.0+)?%/, '最近一次（90%）');
-  assert.match(text, /25(\.0+)?%/);
-  assert.doesNotMatch(text, /80(\.0+)?%/, '较早的一次不显示');
-});
-
-test('M9 coverage 命令：--out/--run-id/--os 给了 → 按改动文件每个追加一条 ek-coverage/1', () => {
-  const root = repoWithTests();
-  write(root, 'src/a.mjs', '// a\n');
-  write(root, 'src/other.mjs', '// o\n');
-  commitAll(root, 'add sources');
-  const base = git(root, ['rev-parse', 'HEAD']).trim();
-  write(root, 'src/a.mjs', '// a changed\n');
-  commitAll(root, 'change a');
-  const dir = tmpDir('ekit-cov-');
-  const lcovFile = path.join(dir, 'lcov.info');
-  fs.writeFileSync(lcovFile, lcov(root));
-  const out = path.join(dir, 'cov.jsonl');
-  const r = cli(root, ['coverage', '--lcov', lcovFile, '--base', base, '--summary', path.join(dir, 's.md'), '--out', out, '--run-id', 'ci-55-1-coverage', '--os', 'linux']);
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  const rows = readJsonl(out);
-  assert.equal(rows.length, 1, '只有 src/a.mjs 改动了');
-  const [row] = rows;
-  assert.deepEqual([row.schema, row.runId, row.source, row.os, row.file], ['ek-coverage/1', 'ci-55-1-coverage', 'ci', 'linux', 'src/a.mjs']);
-  assert.deepEqual(row.lines, { hit: 8, total: 10 });
-  assert.deepEqual(row.branches, { hit: 3, total: 4 });
-  assert.match(row.commit, /^[0-9a-f]{40}$/);
-  assert.ok(Number.isFinite(Date.parse(row.at)));
-  const noOut = cli(root, ['coverage', '--lcov', lcovFile, '--base', base, '--summary', path.join(dir, 's2.md')]);
-  assert.equal(noOut.status, 0, noOut.stderr);
-  assert.equal(readJsonl(out).length, 1, '不给 --out 不写台账');
-});
-
-test('M9 pull：合法的覆盖率条目导入台账，来源不合法的覆盖率条目拒绝', async () => {
-  const { readLedger, ledgerFile } = await lib();
-  const root = repoWithTests();
-  const gh = fakeGh({ prHead: 'd'.repeat(40), runs: [RUN2],
-    artifacts: { 201: { 'test-ledger-coverage/c.jsonl': lines(covEntry(), covEntry({ file: 'src/b.mjs', source: 'local' })) } } });
-  const r = cli(root, ['pull', '--pr', '7'], gh.env);
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.deepEqual(readLedger(ledgerFile(root)).entries.map((e) => `${e.schema}|${e.file}`), ['ek-coverage/1|src/a.mjs']);
-  assert.match(r.stdout, /拒绝 1 条/);
-});
-
 // ---------- 第 2 轮复审回归（规格第 10 节） ----------
-
-/** 用假 gh 拉一次 PR（运行 201 第 2 次），返回 { r, entries, gh }。artifacts 是产物内相对路径到文本的映射。 */
-async function pull201(artifacts, prHead = 'd'.repeat(40)) {
-  const { readLedger, ledgerFile } = await lib();
-  const root = repoWithTests();
-  const gh = fakeGh({ prHead, runs: [RUN2], artifacts: { 201: artifacts } });
-  const r = cli(root, ['pull', '--pr', '7'], gh.env);
-  const entries = fs.existsSync(ledgerFile(root)) ? readLedger(ledgerFile(root)).entries : [];
-  return { r, entries, gh };
-}
-
-const GOOD = () => entry({ runId: 'ci-201-2-linux', file: 'tests/a.test.mjs' });
-
-test('R2-1 导入身份：test-ledger-linux 产物里自报 windows 的条目拒绝（产物名后缀决定 os）；windows 产物里自报 windows 的合格', async () => {
-  const { r, entries } = await pull201({
-    'test-ledger-linux/l.jsonl': lines(GOOD(), entry({ runId: 'ci-201-2-windows', os: 'windows', file: 'tests/b.test.mjs' })),
-    'test-ledger-windows/l.jsonl': lines(entry({ runId: 'ci-201-2-windows', os: 'windows', file: 'tests/b.test.mjs' })),
-  });
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.deepEqual(entries.map((e) => `${e.runId}|${e.os}|${e.file}`).sort(), ['ci-201-2-linux|linux|tests/a.test.mjs', 'ci-201-2-windows|windows|tests/b.test.mjs']);
-  assert.match(r.stdout, /拒绝 1 条/);
-});
-
-test('R2-1 导入身份：产物名不认识（other-artifact）整份拒绝；文件不在产物子目录里拒绝', async () => {
-  const unknown = await pull201({ 'other-artifact/x.jsonl': lines(GOOD(), GOOD()) });
-  assert.equal(unknown.r.status, 0, unknown.r.stderr + unknown.r.stdout);
-  assert.equal(unknown.entries.length, 0, '不认识的产物名：整份不导入');
-  assert.match(unknown.r.stdout, /拒绝/);
-  const loose = await pull201({ 'l.jsonl': lines(GOOD()) });
-  assert.equal(loose.r.status, 0, loose.r.stderr + loose.r.stdout);
-  assert.equal(loose.entries.length, 0, '文件不在子目录里：拒绝');
-  assert.match(loose.r.stdout, /拒绝/);
-});
-
-test('R2-1 导入身份：test-ledger-coverage 里出现测试行拒绝；test-ledger-linux 里出现覆盖率行拒绝；各自的合格行仍导入', async () => {
-  const { r, entries } = await pull201({
-    'test-ledger-coverage/c.jsonl': lines(covEntry(), entry({ runId: 'ci-201-2-coverage', file: 'tests/b.test.mjs' })),
-    'test-ledger-linux/l.jsonl': lines(GOOD(), covEntry({ runId: 'ci-201-2-linux', file: 'src/b.mjs' })),
-  });
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.deepEqual(entries.map((e) => `${e.schema}|${e.runId}|${e.file}`).sort(), ['ek-coverage/1|ci-201-2-coverage|src/a.mjs', 'ek-test-ledger/1|ci-201-2-linux|tests/a.test.mjs']);
-  assert.match(r.stdout, /拒绝 2 条/);
-});
-
-test('R2-1 导入身份：runId 只是前缀相同、后缀不同（ci-201-2-linux-x）拒绝', async () => {
-  const { r, entries } = await pull201({ 'test-ledger-linux/l.jsonl': lines(GOOD(), entry({ runId: 'ci-201-2-linux-x', file: 'tests/b.test.mjs' })) });
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.deepEqual(entries.map((e) => e.runId), ['ci-201-2-linux']);
-  assert.match(r.stdout, /拒绝 1 条/);
-});
-
-test('R2-1 导入身份：layer 非字符串、note 非字符串、changed 不是字符串数组、commit 不是 40 位十六进制都拒绝；commit 为 null 的合格', async () => {
-  const bad = [
-    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', layer: 5 }),
-    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', note: 5 }),
-    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', changed: 'src/x.mjs' }),
-    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', changed: ['src/x.mjs', 3] }),
-    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', commit: 'abc123' }),
-    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', commit: 'g'.repeat(40) }),
-  ];
-  const { r, entries } = await pull201({ 'test-ledger-linux/l.jsonl': lines(GOOD(), entry({ runId: 'ci-201-2-linux', file: 'tests/c.test.mjs', commit: null }), ...bad) });
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.deepEqual(entries.map((e) => e.file).sort(), ['tests/a.test.mjs', 'tests/c.test.mjs']);
-  assert.match(r.stdout, /拒绝 6 条/);
-});
-
-test('R2-1 导入身份：产物里的坏 JSON 行和未知 schema 行计入 拒绝 N 条，输出里有产物名和 文件名:行号', async () => {
-  const text = `${JSON.stringify(GOOD())}\nthis is not json\n${JSON.stringify({ schema: 'other/9', file: 'x' })}\n`;
-  const { r, entries } = await pull201({ 'test-ledger-linux/l.jsonl': text });
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.equal(entries.length, 1);
-  assert.match(r.stdout, /拒绝 2 条/);
-  assert.ok(r.stdout.includes('test-ledger-linux'), r.stdout);
-  assert.ok(r.stdout.includes('l.jsonl:2') && r.stdout.includes('l.jsonl:3'), r.stdout);
-});
-
-test('R2-1 导入身份：合格条目入台账后带可信字段 prHead（等于 gh pr view 给的最终提交），commit 原样保留', async () => {
-  const head = '9'.repeat(40);
-  const { r, entries } = await pull201({ 'test-ledger-linux/l.jsonl': lines(GOOD()) }, head);
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.equal(entries.length, 1);
-  assert.equal(entries[0].prHead, head);
-  assert.equal(entries[0].commit, 'a'.repeat(40), 'CI 实际检出的提交原样保留');
-});
 
 test('R2-2 报告空窗口：台账有历史、窗口内没有记录、没给 testFiles → 不是 empty，windowEmpty 为真，formatReport 第一行是 所选时间窗口内没有测试记录；整份台账为空且没给 testFiles 仍是 台账里还没有数据', async () => {
   const { buildReport, formatReport } = await lib();
@@ -885,4 +551,136 @@ test('R2-3 JUnit 数字引用：&#X41;（大写 X）、&#1;、&#xFFFE; 判坏；
   assert.deepEqual(parseJUnit(wrap('file="&#x41;"'), { root }).files.map((f) => f.file), ['A'], '&#x41;');
   assert.deepEqual(parseJUnit(wrap('file="&#65;"'), { root }).files.map((f) => f.file), ['A'], '&#65;');
   assert.deepEqual(parseJUnit(wrap('file="&#x1F600;"'), { root }).files.map((f) => f.file), ['\u{1F600}'], '&#x1F600;');
+});
+
+// ---------- 第 3 轮复审回归 ----------
+
+test('R3-1 追加补换行：末尾没换行先补一个；本来有换行不多空行；空文件与不存在的文件照常写', async () => {
+  const { appendEntries, readLedger } = await lib();
+  const dir = tmpDir('ekit-r31-');
+  // 末尾没有换行
+  const noEol = path.join(dir, 'no-eol.jsonl');
+  fs.writeFileSync(noEol, JSON.stringify(entry({ runId: 'old' })));
+  appendEntries(noEol, [entry({ runId: 'n1' }), entry({ runId: 'n2' })]);
+  const a = readLedger(noEol);
+  assert.deepEqual(a.bad, []);
+  assert.deepEqual(a.entries.map((e) => e.runId), ['old', 'n1', 'n2']);
+  // 本来就以换行结尾
+  const withEol = path.join(dir, 'with-eol.jsonl');
+  fs.writeFileSync(withEol, lines(entry({ runId: 'old' })));
+  appendEntries(withEol, [entry({ runId: 'n1' }), entry({ runId: 'n2' })]);
+  const b = readLedger(withEol);
+  assert.deepEqual(b.bad, []);
+  assert.equal(b.entries.length, 3);
+  assert.ok(!fs.readFileSync(withEol, 'utf8').includes('\n\n'), '不多出空行');
+  // 空文件
+  const empty = path.join(dir, 'empty.jsonl');
+  fs.writeFileSync(empty, '');
+  appendEntries(empty, [entry({ runId: 'n1' })]);
+  assert.equal(readLedger(empty).entries.length, 1);
+  assert.ok(!fs.readFileSync(empty, 'utf8').startsWith('\n'));
+  // 不存在
+  const missing = path.join(dir, 'sub', 'missing.jsonl');
+  appendEntries(missing, [entry({ runId: 'n1' }), entry({ runId: 'n2' })]);
+  const c = readLedger(missing);
+  assert.deepEqual(c.bad, []);
+  assert.equal(c.entries.length, 2);
+});
+
+const BAD_FIELDS = {
+  'at 是数组': { at: ['2026-11-27'] },
+  'at 不可解析': { at: 'not a date' },
+  'source 为 x': { source: 'x' },
+  'commit 为 abc': { commit: 'abc' },
+  'mode 为 x': { mode: 'x' },
+  'layer 为空字符串': { layer: '' },
+  'layer 为数字': { layer: 5 },
+  'result 为 ok': { result: 'ok' },
+  'tests 为 -1': { tests: -1 },
+  'changed 为字符串': { changed: 'a' },
+  'note 为数字': { note: 7 },
+};
+
+test('R3-2 读台账按字段校验：字段不合格的行计入 bad（行号正确）、不进 entries；合格行照常读出；entryProblem 合格返回 null', async () => {
+  const { readLedger, entryProblem } = await lib();
+  const file = path.join(tmpDir('ekit-r32-'), 'l.jsonl');
+  const rows = [JSON.stringify(entry({ runId: 'good-1' }))];
+  const badLines = [];
+  for (const [label, patch] of Object.entries(BAD_FIELDS)) {
+    rows.push(JSON.stringify(entry({ runId: 'x', ...patch })));
+    badLines.push([rows.length, label]);
+  }
+  rows.push('[1]');
+  badLines.push([rows.length, '整行是数组']);
+  rows.push(JSON.stringify(entry({ runId: 'good-2' })));
+  fs.writeFileSync(file, rows.join('\n') + '\n');
+  const r = readLedger(file);
+  assert.deepEqual(r.bad, badLines.map(([n]) => n), badLines.map(([, l]) => l).join('、'));
+  assert.deepEqual(r.entries.map((e) => e.runId), ['good-1', 'good-2']);
+  assert.equal(entryProblem(entry()), null);
+  for (const [label, patch] of Object.entries(BAD_FIELDS)) {
+    const p = entryProblem(entry(patch));
+    assert.ok(typeof p === 'string' && p.length > 0, label);
+  }
+  const arr = entryProblem([1]);
+  assert.ok(typeof arr === 'string' && arr.length > 0, '数组');
+});
+
+test('R3-2 report 命令：台账含字段不合格的行 → 不抛错、退出码 0、先打印 跳过 N 行坏行', () => {
+  const root = repoWithTests();
+  const file = path.join(tmpDir('ekit-r32-'), 'l.jsonl');
+  const at = new Date().toISOString();
+  fs.writeFileSync(file, [
+    JSON.stringify(entry({ runId: 'ok', at })),
+    JSON.stringify(entry({ runId: 'b1', at, source: 'x' })),
+    JSON.stringify(entry({ runId: 'b2', at, tests: -1 })),
+    '[1]',
+  ].join('\n') + '\n');
+  const r = cli(root, ['report', '--ledger', file]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /跳过 3 行坏行/);
+  assert.ok(r.stdout.trimStart().startsWith('跳过 3 行坏行'), '坏行提示在最前');
+});
+
+test('R3-3 JUnit 正文与 CDATA：未转义的 &、正文或属性或 CDATA 里的控制字符判坏；合法实体与 CDATA 里的 & < 合法', async () => {
+  const { parseJUnit } = await lib();
+  const root = repoWithTests();
+  const doc = (body, attr = '') => `<testsuites><testsuite name="s"><testcase name="t" file="tests/a.test.mjs"${attr}>${body}</testcase></testsuite></testsuites>`;
+  const badCases = {
+    '正文里未转义的 &': doc('<failure>a & b</failure>'),
+    '正文里的控制字符': doc('<failure>a\u0001b</failure>'),
+    '属性里的控制字符': doc('', ' classname="a\u0001b"'),
+    'CDATA 里的控制字符': doc('<failure><![CDATA[a\u0001b]]></failure>'),
+  };
+  for (const [label, xml] of Object.entries(badCases)) {
+    const r = parseJUnit(xml, { root });
+    assert.equal(r.ok, false, label);
+    assert.ok(typeof r.error === 'string' && r.error.length > 0, label);
+  }
+  const goodCases = {
+    '合法实体': doc('<failure>&lt; &amp; &#65;</failure>'),
+    'CDATA 里的 & 和 <': doc('<failure><![CDATA[a & b < c]]></failure>'),
+  };
+  for (const [label, xml] of Object.entries(goodCases)) {
+    const r = parseJUnit(xml, { root });
+    assert.equal(r.ok, true, `${label}：${JSON.stringify(r)}`);
+    assert.equal(r.files.length, 1, label);
+    assert.deepEqual([r.files[0].file, r.files[0].tests, r.files[0].failures], ['tests/a.test.mjs', 1, 1], label);
+  }
+});
+
+test('R3-4 report 提示：没配 testReports → 提示 未配置 modules.gate.testReports；配了就不出现', () => {
+  const at = new Date().toISOString();
+  const run = (gate) => {
+    const root = repoWithTests();
+    write(root, 'engineering.config.json', JSON.stringify({ profile: 2, modules: { gate }, layout: { sourceGlobs: ['src/**/*.mjs'], testGlobs: ['tests/**/*.test.mjs'] } }));
+    commitAll(root, 'cfg');
+    const file = path.join(tmpDir('ekit-rep-'), 'l.jsonl');
+    fs.writeFileSync(file, lines(entry({ runId: 'r1', at })));
+    const r = cli(root, ['report', '--ledger', file]);
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout;
+  };
+  assert.ok(run({}).includes('未配置 modules.gate.testReports'));
+  assert.ok(!run({ testReports: ['reports/*.xml'] }).includes('未配置 modules.gate.testReports'));
 });

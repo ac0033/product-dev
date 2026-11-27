@@ -333,10 +333,9 @@ function stackSetup(testCommand) {
  * 生成 CI 工作流（GitHub Actions）。业务含义：把“降低 CI 频率”和“全量测试交给 CI”落成一份可用的工作流——
  * 草稿 PR 不跑（转为可审阅时才跑）；只改免审文档（reviewIgnore）的 PR 跳过测试，但汇总检查 ci-gate 仍成功，
  * 所以 pr 流程的合并入口不会因为必需检查被跳过而拦住；同一 PR 的新提交取消上一次未完成的运行；推送到 main 总是全量。
- * coverage 与 mutationCommand 分别启用只报告的作业；台账跟随测试矩阵上传。生成后由项目维护。
+ * 参数：ciRunner、ciFallback、ciOs、testCommand、reviewIgnore。生成后由项目维护，同步不覆盖。
  */
-export function renderCiWorkflow({ ciRunner, ciFallback = null, ciOs = ['linux'], testCommand, testEnv = {}, reviewIgnore = [],
-  coverage = null, mutationCommand = null }) {
+export function renderCiWorkflow({ ciRunner, ciFallback = null, ciOs = ['linux'], testCommand, testEnv = {}, reviewIgnore = [] }) {
   const linux = linuxRunner({ ciRunner, ciFallback });
   const matrix = ciOs
     .map((o) => `          - os: ${o}\n            runner: ${o === 'linux' ? linux : o === 'windows' ? 'windows-latest' : 'macos-latest'}`)
@@ -353,71 +352,13 @@ export function renderCiWorkflow({ ciRunner, ciFallback = null, ciOs = ['linux']
       ].join('\n');
   const envBlock = reviewIgnore.length === 0 ? '' : `          IGNORE: ${yamlSingle(JSON.stringify(reviewIgnore))}\n          ALWAYS: ${yamlSingle(JSON.stringify(ALWAYS_CODE))}\n`;
   const testEnvBlock = Object.keys(testEnv).length === 0 ? '' : `        env:\n${Object.entries(testEnv).map(([k, v]) => `          ${k}: ${JSON.stringify(String(v))}`).join('\n')}\n`;
-  const upload = 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4';
-  // 台账只记真正跑过的测试：测试步骤成功或失败才记，被跳过、取消（前面的准备步骤失败）时不记
-  const ran = "always() && (steps.tests.outcome == 'success' || steps.tests.outcome == 'failure')";
-  // 台账脚本要 Node 22 起才有的 fs.globSync：测试命令不是 Node 时（如 pytest）在记录步骤前另装 Node 24，不依赖 runner 预装的版本
-  const nodeSetup = stackSetup('node');
-  const ledgerNode = stackSetup(testCommand) === nodeSetup ? '' : nodeSetup.replace('      - uses:', `      - if: ${ran}\n        continue-on-error: true\n        uses:`);
-  // 报告型作业（覆盖率、变异测试）只报告、不拦截：合并入口对 PR 上任何失败的检查都会拦，所以作业里每一步都 continue-on-error，
-  // 超时放在步骤级，作业本身总是成功；真实结果写进产物（覆盖率进台账，变异测试写 mutation-status.json），由 pull 读出
-  const soft = (steps) => steps.replace(/^( {6}- [^\n]*\n)/gm, '$1        continue-on-error: true\n');
-  const reportSetup = soft(`      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-${stackSetup('node')}${/^\s*(python|pytest|py)\b/.test(testCommand) ? stackSetup(testCommand) : ''}`);
-  const prCode = "needs.changes.outputs.code == 'true' && github.event_name == 'pull_request'";
-  let reportJobs = '';
-  if (coverage) {
-    // 简单命令沿用单行写法；多行或含特殊字符的命令不写 YAML 块标量（首行缩进不同会让块标量断开），
-    // 改为经环境变量传入：JSON 字符串是合法的 YAML 双引号标量，换行、引号都原样保留
-    const simpleCommand = /^[\w./-][\w./ -]*$/.test(coverage.command); // 首个字符不能是空白：首行缩进的命令也走环境变量
-    const runCommand = simpleCommand ? `      - run: ${coverage.command}\n`
-      : `      - run: bash -eo pipefail -c "$EK_COVERAGE_COMMAND"\n        env:\n          EK_COVERAGE_COMMAND: ${JSON.stringify(coverage.command)}\n`;
-    const simplePath = /^[\w./-]+$/.test(coverage.lcov);
-    const lcov = simplePath ? coverage.lcov : '"$EK_LCOV"';
-    reportJobs += `
-  coverage:
-    needs: changes
-    if: ${prCode}
-    runs-on: ${linux}
-    steps:
-${reportSetup}${soft(`${runCommand}      - run: node scripts/engineering/gate/test-ledger.mjs coverage --lcov ${lcov} --base \${{ github.event.pull_request.base.sha }} --summary "$GITHUB_STEP_SUMMARY" --out test-ledger-coverage.jsonl --run-id ci-\${{ github.run_id }}-\${{ github.run_attempt }}-coverage --os linux
-${simplePath ? '' : `        env:\n          EK_LCOV: ${yamlSingle(coverage.lcov)}\n`}      - uses: ${upload}
-        if: always()
-        with:
-          name: test-ledger-coverage
-          path: test-ledger-coverage.jsonl
-          if-no-files-found: ignore
-`)}`;
-  }
-  if (mutationCommand) {
-    reportJobs += `
-  mutation:
-    needs: changes
-    if: ${prCode} && (contains(github.event.pull_request.labels.*.name, 'risk:medium') || contains(github.event.pull_request.labels.*.name, 'risk:high'))
-    runs-on: ${linux}
-    steps:
-${reportSetup}${soft(`      - run: node scripts/engineering/gate/mutation.mjs run --base \${{ github.event.pull_request.base.sha }} --out mutation-report.txt
-        timeout-minutes: 60
-      - uses: ${upload}
-        if: always()
-        with:
-          name: mutation-report
-          path: |
-            mutation-report.txt
-            mutation-status.json
-          if-no-files-found: ignore
-`)}`;
-  }
   return `# 由 engineering-kit 按项目选定的执行位置生成（modules.gate.fullTests、ciRunner、modules.environment.ciOs）；生成后由项目维护，同步不覆盖。
 # 降低 CI 频率：草稿 PR 不跑；只改免审文档（reviewIgnore）的 PR 跳过测试，汇总检查 ${CI_GATE_JOB} 仍成功；同一 PR 的新提交取消上一次未完成的运行。
 ${ciFallback ? `# 后备切换：在仓库设置里把变量 CI_RUNNER 设成 ${ciFallback}（改回删除变量或设成 ${ciRunner}），不用改本文件。自托管 runner 只用于 Linux，带 self-hosted、linux 标签。\n` : ''}${ciRunner === 'self-hosted' || ciFallback === 'self-hosted' ? '# 安全：不要把自托管 runner 用在接受外部 PR 的公开仓库；这里让 fork 来的 PR 走 GitHub 托管 runner 只是第二道防线（PR 能改工作流本身），不是安全边界；公开仓库请不要用自托管 runner。testCommand 与 testEnv 是安装时写入的，之后改了它们要同步改本文件。\n' : ''}name: CI
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review${mutationCommand ? ', labeled' : ''}]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -464,18 +405,7 @@ ${matrix}
         with:
           persist-credentials: false
 ${stackSetup(testCommand)}      - run: ${testCommand}
-${testEnvBlock}        id: tests
-${ledgerNode}      - if: ${ran}
-        continue-on-error: true
-        run: node scripts/engineering/gate/test-ledger.mjs record --source ci --exit-code \${{ steps.tests.outcome == 'success' && '0' || '1' }} --os \${{ matrix.os }} --run-id ci-\${{ github.run_id }}-\${{ github.run_attempt }}-\${{ matrix.os }} --mode full --out test-ledger-\${{ matrix.os }}.jsonl
-      - uses: ${upload}
-        if: always()
-        continue-on-error: true
-        with:
-          name: test-ledger-\${{ matrix.os }}
-          path: test-ledger-\${{ matrix.os }}.jsonl
-          if-no-files-found: ignore
-${reportJobs}
+${testEnvBlock}
   ${CI_GATE_JOB}:
     name: ${CI_GATE_JOB}
     needs: [changes, test]
