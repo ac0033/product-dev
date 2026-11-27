@@ -1,6 +1,7 @@
 // PR 复审的轮次、登记资格和收口证据。所有判定只使用调用方提供的事实。
 import { isRepoPath } from './config.mjs';
-import { hasContent, isSerious } from './review-data.mjs';
+import { createHash } from 'node:crypto';
+import { canonicalJson, hasContent, isSerious } from './review-data.mjs';
 
 export const FINAL_ROUND_TEXT = '这是最后一轮复审，务必全面、彻底；中高风险逐条列清理由和彻底解决办法；确实无法彻底解决的，unresolvable 写 true 并说明原因。';
 const STATUS = '已修、未再复审';
@@ -51,9 +52,38 @@ function classify({ closure, limit, rounds, latest, finalHead }) {
   return ['stop', ['本轮超出允许的最后一轮']];
 }
 
-/** 按首次 fail 的登记顺序计算每轮状态，同时保留最后一轮提交上已经登记 pass、fail 的种类。 */
+/**
+ * 按首次 fail 的登记顺序计算每轮状态，只用按规则登记的记录（越权登记见下）。第 1 到 N 轮（N = limit）各用该提交上的全部登记。
+ * 最后一轮（第 N+1 轮）只用一种口径：第 N 轮收齐之后、最后一轮提交（finalHead）上的有效登记（pass、fail、accept、一致性审 defer）；
+ * 收齐之前的任何登记都不计入最后一轮的收齐、风险信号和收口证据。finalHead 是收齐之后第一条落在别的提交上的 pass 或 fail。
+ */
 export function roundState({ entries, limit, closure, required = ['code', 'consistency'] }) {
-  const history = entries.filter((e) => required.includes(e.kind) && (counted(e) || e.verdict === 'accept' || (e.kind === 'consistency' && e.verdict === 'defer')));
+  // 越权登记（不带用户决定就会被拒、经用户决定才登记的）只留作追溯，轮次计算一律不计。0.10.1 起登记时写明 outOfBand；
+  // 更早的记录没有这个字段：带用户决定的按当时已有的记录重放一次准入，不带用户决定就会被拒的同样算越权
+  const valid = (e) => required.includes(e.kind) && (counted(e) || e.verdict === 'accept' || (e.kind === 'consistency' && e.verdict === 'defer'));
+  const kept = [];
+  let replayed = 0;
+  for (const e of entries) {
+    if (!valid(e) || e.outOfBand === true) continue;
+    if (e.outOfBand === undefined && e.verdict !== 'accept' && hasContent(e.userDecision)) {
+      replayed++;
+      const then = computeRounds({ history: kept, limit, closure, required });
+      if (admitRegistration(then, { verdict: e.verdict, kind: e.kind, head: e.headSha, userDecision: null })) continue;
+    }
+    kept.push(e);
+  }
+  const state = computeRounds({ history: kept, limit, closure, required });
+  state.legacyReplayed = replayed;
+  return state;
+}
+
+/** 按当前策略重放过 0.10.1 之前的越权候选时的提示：当时的轮次上限、收口开关不同，结果可能不同。 */
+export function replayNote(state) {
+  return state?.legacyReplayed ? '注意：有 ' + state.legacyReplayed + ' 条 0.10.1 之前、经用户决定的登记，按当前的轮次上限和收口设置重放判定了是否越权；如果当时的设置不同，判定可能不同，请人工核对这份 PR 的登记历史' : null;
+}
+
+/** roundState 的计算部分：history 已去掉越权登记和无关记录。 */
+function computeRounds({ history, limit, closure, required }) {
   const byHead = new Map();
   const firstFail = new Map();
   for (const [i, entry] of history.entries()) {
@@ -61,14 +91,17 @@ export function roundState({ entries, limit, closure, required = ['code', 'consi
     byHead.get(entry.headSha).push(entry);
     if (entry.verdict === 'fail' && !firstFail.has(entry.headSha)) firstFail.set(entry.headSha, i);
   }
+  const failHeads = [...firstFail.keys()];
   const rounds = [];
-  for (const head of firstFail.keys()) rounds.push(summarize(head, rounds.length + 1, byHead.get(head), required, rounds.at(-1)));
+  for (const head of failHeads.slice(0, limit)) rounds.push(summarize(head, rounds.length + 1, byHead.get(head), required, rounds.at(-1)));
   const lastAllowed = rounds[limit - 1];
   let finalHead = null;
   let finalKinds = [];
+  let finalEntries = [];
+  // 超出允许轮次的不通过：默认是第 N 轮之后的全部；开放最后一轮时只算第 N 轮收齐之后的（与最后一轮同一个时间截点）
+  let extraFrom = 0;
   if (lastAllowed?.collected && lastAllowed.high && !lastAllowed.unresolvable && !lastAllowed.systemic) {
-    // 最后一轮从第 N 轮收齐之后算起。收齐位置以该提交首次不通过为下界（之前在该提交上的登记照算进收齐），
-    // 收齐前（经用户同意）在别的提交上的登记既不占用最后一轮，也不算最后一轮已登记的审查
+    // 收齐位置以第 N 轮提交首次不通过为下界（之前在该提交上的登记照算进收齐）
     const start = firstFail.get(lastAllowed.head);
     const seen = new Set(history.slice(0, start).filter((e) => e.headSha === lastAllowed.head).map((e) => e.kind));
     let collectedAt = -1;
@@ -76,13 +109,30 @@ export function roundState({ entries, limit, closure, required = ['code', 'consi
       if (history[i].headSha === lastAllowed.head) seen.add(history[i].kind);
       if (required.every((k) => seen.has(k))) collectedAt = i;
     }
-    const after = history.slice(collectedAt + 1);
+    extraFrom = collectedAt + 1;
+    const after = history.slice(extraFrom);
     finalHead = after.find((e) => e.headSha !== lastAllowed.head && counted(e))?.headSha ?? null;
-    finalKinds = [...new Set(after.filter((e) => e.headSha === finalHead && counted(e)).map((e) => e.kind))];
+    finalEntries = finalHead ? after.filter((e) => e.headSha === finalHead) : [];
+    finalKinds = [...new Set(finalEntries.map((e) => e.kind))];
+    if (finalEntries.some((e) => e.verdict === 'fail')) rounds.push(summarize(finalHead, limit + 1, finalEntries, required, lastAllowed));
+  }
+  // 超出允许轮次的提交：收齐之前（经用户决定）在别的提交上的不通过只留作追溯，不占轮次；最后一轮提交另算
+  const allowed = new Set(rounds.map((r) => r.head));
+  const extraHeads = [...new Set(history.slice(extraFrom).filter((e) => e.verdict === 'fail' && !allowed.has(e.headSha) && e.headSha !== finalHead).map((e) => e.headSha))];
+  for (const head of extraHeads) {
+    const own = history.slice(extraFrom).filter((e) => e.headSha === head);
+    rounds.push(summarize(head, rounds.length + 1, own, required, rounds.at(-1)));
   }
   const state = { closure, limit, rounds, latest: rounds.at(-1) ?? null, finalHead, finalKinds };
   const [phase, reasons] = classify(state);
   return { ...state, phase, reasons };
+}
+
+/** 对 head 的复审是否算最后一轮：final-next 尚未绑定时的新提交，或已绑定的最后一轮提交（不论阶段）。登记准入另由 admitRegistration 判定。 */
+export function finalRoundTarget(state, head) {
+  if (!state?.latest || state.phase === 'off') return false;
+  if (state.finalHead) return head === state.finalHead;
+  return state.phase === 'final-next' && head !== state.latest.head;
 }
 
 /** 核对本次登记，放行返回 null，否则返回包含下一步的原因。 */
@@ -113,26 +163,65 @@ export function nextHint(state) {
   return null;
 }
 
-const textKeys = ['pr', 'commit', 'kind', 'id', 'severity', 'location', 'problem', 'reason', 'fix', 'status'];
+// 风险登记是 git 跟踪的文件，会随 PR 推送：只存编号、提交、指纹和作者核对后写的可共享摘要。
+// 发现的位置、问题、理由、建议改法原文只留在本地的复审数据副本里（本地复审者看得到不外发的内容），close 按指纹核对。
+const textKeys = ['pr', 'commit', 'kind', 'id', 'severity', 'status', 'dataSha', 'findingSha', 'summary'];
 const keys = [...textKeys, 'round', 'fixedIn'];
-// 原始定位仅用于核对“已修”的证据，不属于写入 JSON Lines 的登记字段。
+// 0.10.0 的旧格式逐字写了原文：仍能解析（legacy），不能作收口证据，重跑 risks 时改写成新格式
+const legacyText = ['pr', 'commit', 'kind', 'id', 'severity', 'location', 'problem', 'reason', 'fix', 'status'];
+const legacyKeys = [...legacyText, 'round', 'fixedIn'];
+export const MAX_SUMMARY_CHARS = 300;
+// 原始定位仅用于核对“已修”的证据和修复差异白名单，不属于写入 JSON Lines 的登记字段。
 const findingFiles = Symbol('发现定位文件');
 
-/** 从核对过指纹的完整发现生成中级风险条目。同号的不同审查各保留一条。 */
+/** 一条完整发现的指纹：规范 JSON 的 sha256。 */
+export function findingFingerprint(finding) {
+  return createHash('sha256').update(canonicalJson(finding)).digest('hex');
+}
+
+/** 可共享摘要的指纹（本机申报里记它，close 与合并核对提交里的摘要没被改过）。 */
+export function summaryFingerprint(summary) {
+  // 对 JSON 写法取指纹：孤立的代理码元在 JSON 里写成转义，不会和 U+FFFD 编成同样的字节
+  return createHash('sha256').update(JSON.stringify(String(summary))).digest('hex');
+}
+
+/** 可共享摘要的格式问题，合格返回 null。是否可以共享由作者核对，这里只查形式。 */
+export function summaryProblem(summary) {
+  if (typeof summary !== 'string' || !summary.trim()) return '缺少可共享摘要';
+  if ([...summary].length > MAX_SUMMARY_CHARS) return '可共享摘要超过 ' + MAX_SUMMARY_CHARS + ' 字';
+  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u.test(summary)) return '可共享摘要含换行、行分隔符、段落分隔符、控制或格式字符，或孤立的代理码元';
+  return null;
+}
+
+/** 从核对过指纹的完整发现生成中级风险条目（摘要待作者填写）。同号的不同审查各保留一条。 */
 export function expectedRiskEntries({ pr, round, failHead, failures }) {
   const entries = [];
-  for (const { kind, findings } of failures) {
-    for (const { id, severity, location, problem, reason, fix, files } of findings) {
-      if (severity !== 'medium') continue;
-      const entry = { pr, commit: failHead, round, kind, id, severity, location, problem, reason, fix, status: STATUS, fixedIn: [] };
-      Object.defineProperty(entry, findingFiles, { value: files ?? [] });
+  for (const { kind, findings, dataSha } of failures) {
+    for (const finding of findings) {
+      if (finding.severity !== 'medium') continue;
+      const entry = { pr, commit: failHead, round, kind, id: finding.id, severity: finding.severity, status: STATUS, fixedIn: [],
+        dataSha: dataSha ?? null, findingSha: findingFingerprint(finding), summary: null };
+      Object.defineProperty(entry, findingFiles, { value: finding.files ?? [] });
       entries.push(entry);
     }
   }
   return entries;
 }
 
-/** 解析风险登记的全部非空行，分别返回有效条目与含物理行号的错误。 */
+const exactKeys = (v, list) => Object.keys(v).length === list.length && list.every((k) => Object.hasOwn(v, k));
+const validRound = (v) => Number.isInteger(v.round) && v.round >= 1 && Array.isArray(v.fixedIn) && v.fixedIn.every(isRepoPath) && new Set(v.fixedIn).size === v.fixedIn.length;
+
+/**
+ * 显示用的路径：控制字符、格式字符、行分隔符和段落分隔符（如 U+2028、U+2029）及反斜杠转义成 \t、\n、\u2028 这样的可见写法，
+ * 一条路径在终端和报告里只占一行，也不会被误读成另一条诊断。所有面向用户的收口路径都经它。
+ */
+export function displayPath(file) {
+  const named = { '\\': '\\\\', '\t': '\\t', '\n': '\\n', '\r': '\\r' };
+  return String(file).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\\]/gu, (c) => named[c] ?? '\\u' + c.codePointAt(0).toString(16).padStart(4, '0'));
+}
+const shown = (files) => files.map(displayPath).join('、');
+
+/** 解析风险登记的全部非空行，分别返回有效条目（旧格式带 legacy: true）与含物理行号的错误。 */
 export function parseRiskRegister(text) {
   const entries = [];
   const problems = [];
@@ -141,9 +230,13 @@ export function parseRiskRegister(text) {
     try {
       const v = JSON.parse(line);
       if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('须为 JSON 对象');
-      if (Object.keys(v).some((k) => !keys.includes(k)) || keys.some((k) => !Object.hasOwn(v, k))) throw new Error('字段缺失或有额外字段');
-      if (!textKeys.every((k) => typeof v[k] === 'string') || !Number.isInteger(v.round) || v.round < 1 ||
-          !Array.isArray(v.fixedIn) || !v.fixedIn.every(isRepoPath)) throw new Error('字段类型、轮次或实际改在的路径不合法');
+      if (exactKeys(v, legacyKeys)) {
+        if (!legacyText.every((k) => typeof v[k] === 'string') || !validRound(v)) throw new Error('字段类型、轮次或实际改在的路径不合法');
+        entries.push({ ...v, legacy: true });
+        continue;
+      }
+      if (!exactKeys(v, keys)) throw new Error('字段缺失或有额外字段');
+      if (!textKeys.every((k) => typeof v[k] === 'string') || !validRound(v)) throw new Error('字段类型、轮次或实际改在的路径不合法');
       entries.push(v);
     } catch (e) {
       problems.push('风险登记第 ' + (i + 1) + ' 行：' + (e instanceof SyntaxError ? '不是合法 JSON' : e.message));
@@ -192,21 +285,57 @@ export function closureProblems(facts) {
     if (!byKey.has(key)) byKey.set(key, []);
     byKey.get(key).push(e);
   }
+  // 修复差异只放行白名单：本轮中级发现的定位文件、申报的实际修复路径、风险登记，以及 exempt 认定的测试和文档
+  const allowed = new Set([registerPath]);
   for (const e of expected) {
     const label = e.kind + ' ' + e.id + '：';
-    const matches = (byKey.get(riskKey(e)) ?? []).filter((v) => v.round === e.round);
+    const same = byKey.get(riskKey(e)) ?? [];
+    const matches = same.filter((v) => !v.legacy && v.round === e.round);
+    for (const f of e[findingFiles] ?? []) allowed.add(f);
+    // 同一条发现还留着旧格式行（逐字写了复审原文）时不收口：新旧并存说明原文还在要推送的文件里
+    if (same.some((v) => v.legacy)) {
+      problems.push(label + '风险登记里还有这条发现的旧格式行（0.10.0，逐字写了复审原文）：重新运行 review.mjs risks 改写成新格式并提交（已推送过的历史里仍有原文，按项目规则另行处理）');
+      continue;
+    }
     if (matches.length !== 1) {
       problems.push(label + (matches.length ? '风险登记条目重复' : '缺少风险登记条目'));
       continue;
     }
     const [actual] = matches;
-    for (const k of ['severity', 'location', 'problem', 'reason', 'fix', 'status']) {
+    // 申报的修复路径和摘要只认本机登记（risks 在 PR 锁内留下、PR 改不到的那份；保留最近两代，见 review.mjs 的 saveDeclaredFixedIn）：
+    // 提交里的条目须与其中一代完全对上（同一条发现、实际改在的集合相同、摘要指纹相同）
+    const sameSet = (a, b) => { const x = new Set(a); const y = new Set(b); return x.size === a.length && y.size === b.length && x.size === y.size && [...x].every((f) => y.has(f)); };
+    const raw = facts.declaredFixedIn?.get(riskKey(e));
+    const candidates = (Array.isArray(raw) ? raw : raw ? [raw] : []).filter((c) => c.findingSha === e.findingSha);
+    if (!candidates.length) {
+      problems.push(label + '本机没有 risks 对这条发现的登记（或登记针对的不是同一条发现）：在本机运行 review.mjs risks 生成风险登记，不要手写或改写');
+      continue;
+    }
+    const sameFix = candidates.filter((c) => sameSet(actual.fixedIn, c.fixedIn));
+    if (!sameFix.length) {
+      problems.push(label + '提交里的实际改在（' + (shown(actual.fixedIn) || '无') + '）与本机 risks 登记的申报（' + (shown(candidates[0].fixedIn) || '无') + '）不一致：修复路径只能经 review.mjs risks --fixed-in 申报');
+      continue;
+    }
+    for (const k of ['severity', 'status', 'dataSha', 'findingSha']) {
       if (actual[k] !== e[k]) problems.push(label + k + ' 与预期登记内容不一致');
     }
+    const bad = summaryProblem(actual.summary);
+    const declared = sameFix.find((c) => c.summarySha === summaryFingerprint(actual.summary));
+    if (bad) { problems.push(label + bad); continue; }
+    // 摘要只认 risks 核对后写下的那份：本机申报记着它的指纹，提交里改过的摘要不认
+    if (!declared) { problems.push(label + '可共享摘要与本机 risks 登记的不一致：摘要只能经 review.mjs risks --shared-summary 写'); continue; }
+    for (const f of declared.fixedIn) allowed.add(f);
     const files = e[findingFiles] ?? [];
-    if (!files.some((f) => changed.has(f)) && !(actual.fixedIn.length && actual.fixedIn.every((f) => changed.has(f)))) {
-      problems.push(label + '定位文件 ' + (files.join('、') || '（无）') + ' 和实际改在 ' + (actual.fixedIn.join('、') || '（无）') + ' 都不在修复差异里');
+    // “已修”的证据用本机申报（可信的那份），不用提交里的数组
+    if (!files.some((f) => changed.has(f)) && !(declared.fixedIn.length && declared.fixedIn.every((f) => changed.has(f)))) {
+      problems.push(label + '定位文件 ' + (shown(files) || '（无）') + ' 和实际改在 ' + (shown(declared.fixedIn) || '（无）') + ' 都不在修复差异里');
     }
+  }
+  const exempt = typeof facts.exempt === 'function' ? facts.exempt : () => false;
+  const outside = fixDiff.filter((f) => !allowed.has(f) && !exempt(f));
+  if (outside.length) {
+    problems.push('修复差异含白名单外的文件：' + shown(outside) + '。收口只放行本轮中级发现的定位文件、--fixed-in 申报的路径、测试、文档和风险登记；' +
+      '这些改动没有经过复审，请撤到另一个 PR，或向用户说明后由用户决定对最终提交做普通双审（登记带 --user-decision）');
   }
   return problems;
 }
