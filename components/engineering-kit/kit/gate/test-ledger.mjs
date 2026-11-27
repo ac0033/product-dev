@@ -433,7 +433,7 @@ function layerHints(root, config) {
   const tracked = git(root, ['ls-files', '-z']);
   if (!tracked.ok) return [];
   const overlaps = [];
-  for (const file of tracked.out.split(' ').filter(Boolean)) {
+  for (const file of tracked.out.split('\0').filter(Boolean)) {
     const hit = config.testLayers.filter((layer) => matchesAny(file, layer.paths)).map((layer) => layer.name);
     if (hit.length > 1) overlaps.push(`  ${file}：命中 ${hit.join('、')}，采用 ${hit[0]}`);
   }
