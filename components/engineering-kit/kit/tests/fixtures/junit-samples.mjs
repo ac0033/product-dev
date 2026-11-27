@@ -2,11 +2,11 @@
 // 所以同一份样例在 Linux 与 Windows 上都能用（Windows 反斜杠的专门用例在测试里另造）。
 const decl = '<?xml version="1.0" encoding="utf-8"?>\n';
 
-/** node --test 的真实写法：顶层 testsuites 下直接出现 testcase（带 file 与 classname="test"），testsuite 内用例的失败既有 failure 属性也有 failure 子元素，另有 "<!-- tests 3 -->" 这类注释。 */
+/** node --test 的真实写法：顶层 testsuites 下直接出现 testcase（带 file 与 classname="test"），testsuite 内用例的失败既有 failure 属性也有 failure 子元素，另有 "<!-- tests 4 -->" 这类注释。 */
 export function nodeTestXml({ a, b }) {
   return `${decl}<testsuites>
-<!-- tests 3 -->
-<!-- pass 2 -->
+<!-- tests 4 -->
+<!-- pass 3 -->
 <!-- fail 1 -->
 <testcase name="top level ok" time="0.250" classname="test" file="${a}"/>
 <testcase name="top level second" time="0.500" classname="test" file="${a}"/>
