@@ -33,7 +33,7 @@
 | `modules.review.reviewers` | 确认名单里有 `product-dev:code-reviewer`，否则用它做的复审登记不了。套件 0.5.0 起新装的项目默认已有；更早安装的项目同步时不改项目配置，要手动加（见 [review.md](review.md) 第 1 节）；名单按基准提交上的配置判定，在功能分支里加要合入主干后才生效 |
 | `modules.gate.requiredChecks` | `pr` 流程的必需检查名，为空时每一项检查都算必需；CI 有按条件跳过的检查时列出必需的那几项。写检查名，不是 PR 页面上显示的“工作流名 / job 名 (事件)”。写法、判定口径、查名字的命令和改名顺序见 [套件流程文档](../../engineering-kit/references/process.md) 第 4 节“套件闸门的两种流程”；它是判定策略字段，合入主干后才生效 |
 | `modules.gate.testLayers` | 可选。测试层级，每项 `{ name, paths }`（如 `unit`、`integration`、`e2e`），按顺序取第一个命中的层。测试台账、功能契约场景表的“层级”一栏和巡检按它归层；没配时一律记“未分层”，巡检会提示补配 |
-| `modules.gate.testReports` | 可选。测试命令产出的 JUnit XML 的 glob（node --test、vitest、jest、pytest 都能产出，要在 `testCommand` 里打开对应的报告选项）。配了，测试台账按测试文件记结果；没配只记整条命令通过或失败 |
+| `modules.gate.testReports` | 可选。测试命令产出的 JUnit XML 的 glob（node --test、vitest、jest、pytest 都能产出，要在 `testCommand` 里打开对应的报告选项）。配了，测试台账按测试文件记结果；没配只记整条命令通过或失败。只许相对仓库根的 glob；报告的输出目录要加进 `.gitignore`，否则闸门会把它当作测试期间新出现的文件，判这次记录作废、也不记台账 |
 | `modules.gate.reviewFlow` | 默认 `pre-push`；有 GitHub 远程、已登录的 `gh` 且 PR 上有 CI 检查的项目可以改成 `pr`（建议项，由用户决定或按授权采用推荐）；闸门按基准提交上的配置判定，改动合入主干后才生效 |
 
 同一步还要定两件事，都由用户决定：要不要建远程仓库和 CI（建远程仓库是外部动作，先得到批准；不建的话“PR 与 CI”一步做不了，要如实写未执行）；`pre-push` 流程下由谁、经哪个入口合并，定了就写进项目的 AGENTS.md。安装时没加 `--profile` 的项目没有脚手架，包清单、测试框架等按选定的技术栈自己建，默认的测试命令也要相应改掉。
@@ -56,5 +56,5 @@
 | 最终提交 | PR 的最终提交；`pre-push` 流程的最终推送 | CI 在最终提交上跑全量；`pre-push` 流程最终推送前须有一次全量 `gate.mjs` 的通过记录（`fullTests` 为 `ci` 的项目没有 `pre-push` 流程，本机不要求测试记录） | CI 结果；推送核对通过 |
 
 - 变异检查反转后相关测试仍然全过，说明缺用例：先补上能拦住它的测试再进复审，不留给复审者去发现。
-- 测试台账：闸门每次真正跑了测试就按测试文件记一笔（git 公共目录的 `engineering-gate/test-ledger.jsonl`）；`node scripts/engineering/gate/test-ledger.mjs report` 列出一直失败、时过时不过、长期没运行过的测试和各层级的失败率，每周巡检时看。CI 上的全量结果不进台账，仍看各 PR 的 CI。
+- 测试台账：闸门每次真正跑了测试就按测试文件记一笔（git 公共目录的 `engineering-gate/test-ledger.jsonl`；测试期间代码变了就不记）；`node scripts/engineering/gate/test-ledger.mjs report` 列出一直失败、时过时不过、长期没运行过的测试和各层级的失败率，每周巡检时看。默认不自动拉回 CI 结果，全量仍看各 PR 的 CI；用 `record` 手工写进同一台账的记录也会被统计。
 - 复审者不重跑全量测试：闸门记录和 CI 结果是共用的测试证据，能运行命令的复审者可以做针对性的复现（单个测试、单个场景），不能运行的只核对证据并在报告里写明没有复现。

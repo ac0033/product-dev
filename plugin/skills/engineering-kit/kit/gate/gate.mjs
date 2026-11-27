@@ -271,6 +271,9 @@ function runChecks({ root, config, affected = false, force = false, full = false
       messages.push(`按影响范围测试：全量记录（${plan.full.treeHash.slice(0, 12)}）之后改动 ${plan.changed.length} 个文件，运行分组 ${plan.groups.map((g) => g.name).join('、')}`);
     }
     const startedAt = Date.now();
+    // 台账记的是测试开始时的提交：运行期间别人推进 HEAD 也不会把结果挂到新提交上
+    const head = git(root, ['rev-parse', '--verify', '--quiet', 'HEAD']);
+    const startCommit = head.ok ? head.out.trim() : null;
     const r = runCommands(root, config, commands);
     fs.writeFileSync(logFile, r.log);
     const after = gateScope(root, config);
@@ -306,12 +309,17 @@ function runChecks({ root, config, affected = false, force = false, full = false
           : '测试运行期间代码发生了变化，记录作废：请在闸门运行时不要修改代码，然后重跑。',
       );
     }
-    try {
-      const entries = recordTests({ root, config, startedAt, exitCode: r.status, mode: plan.mode, changed: plan.changed ?? changed });
-      const filesCount = entries.filter((e) => e.file !== null).length;
-      messages.push(`测试台账：新增 ${entries.length} 条（文件级 ${filesCount}、命令级 ${entries.length - filesCount}）`);
-    } catch (error) {
-      messages.push(`警告：测试台账没写进去：${error.message}`);
+    if (changedDuringRun) {
+      // 这次的结果对应的是运行期间变化着的代码，不能当作哪个提交的历史数据
+      messages.push('测试台账：测试运行期间代码发生了变化，本次不记台账');
+    } else {
+      try {
+        const entries = recordTests({ root, config, startedAt, exitCode: r.status, mode: plan.mode, changed: plan.changed ?? changed, commit: startCommit });
+        const filesCount = entries.filter((e) => e.file !== null).length;
+        messages.push(`测试台账：新增 ${entries.length} 条（文件级 ${filesCount}、命令级 ${entries.length - filesCount}）`);
+      } catch (error) {
+        messages.push(`警告：测试台账没写进去：${error.message}`);
+      }
     }
     const what = plan.mode === 'full' ? '全量' : `分组 ${record.groups.join('、')}`;
     messages.push(

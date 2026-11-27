@@ -4,7 +4,7 @@
 // 只报告、不拦截：写台账失败由调用方降为警告。CI 产物的拉回、覆盖率与变异测试在后续版本另做（见 PR #47 的范围说明）。
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { normalizeConfig } from './config.mjs';
 import { CONFIG_FILE, diffNames, git, gitCommonDir, headInfo, isMain, matchesAny, repoRoot, withLock } from './lib.mjs';
@@ -97,7 +97,17 @@ export function parseJUnit(xml, { root = process.cwd() } = {}) {
       if (!match) throw new Error('标签不完整');
       offset = token.lastIndex;
       const raw = match[0];
-      if (raw.startsWith('<!--') || raw.startsWith('<?')) continue;
+      if (raw.startsWith('<!--')) {
+        // XML 注释里不许出现 --，也不许以 - 结尾；内容同样只许 XML 字符
+        const body = raw.slice(4, -3);
+        if (body.includes('--') || body.endsWith('-')) throw new Error('注释里有 --');
+        checkChars(body, '注释');
+        continue;
+      }
+      if (raw.startsWith('<?')) {
+        checkChars(raw, '处理指令');
+        continue;
+      }
       if (raw.startsWith('<![CDATA[')) {
         if (!stack.length) throw new Error('根元素外有 CDATA');
         checkChars(raw.slice(9, -3), 'CDATA');
@@ -105,6 +115,7 @@ export function parseJUnit(xml, { root = process.cwd() } = {}) {
       }
       if (!raw.startsWith('<')) {
         if (!stack.length && raw.trim()) throw new Error('根元素外有文本');
+        if (raw.includes(']]>')) throw new Error('正文里有 ]]>（只能作 CDATA 的结束标记）');
         decodeValue(raw, '正文');
         continue;
       }
@@ -129,6 +140,7 @@ export function parseJUnit(xml, { root = process.cwd() } = {}) {
         counts.tests++;
         const seconds = Number(attrs.time);
         if (Number.isFinite(seconds) && seconds >= 0) counts.durationMs += seconds * 1000;
+        if (!Number.isFinite(counts.durationMs)) throw new Error('用例耗时累加后无法表示');
         current = { counts, failed: Object.hasOwn(attrs, 'failure'), skipped: false };
         if (current.failed) counts.failures++;
       } else if (parent?.name === 'testcase') {
@@ -165,6 +177,10 @@ export function buildEntries({ reports, exitCode, source, commit, mode, os, chan
   const entries = [];
   const files = new Map();
   for (const report of reports) {
+    if (report.error) {
+      entries.push(command(`JUnit 报告读不出：${report.path}：${report.error}`));
+      continue;
+    }
     const parsed = parseJUnit(report.text, { root });
     if (!parsed.ok) {
       entries.push(command(`JUnit 解析失败：${report.path}：${parsed.error}`));
@@ -177,6 +193,7 @@ export function buildEntries({ reports, exitCode, source, commit, mode, os, chan
     }
   }
   for (const counts of files.values()) {
+    if (!Number.isFinite(counts.durationMs)) counts.durationMs = 0; // 几份报告合计后溢出：耗时记 0，其余照记
     const result = counts.failures ? 'fail' : counts.skipped === counts.tests ? 'skip' : 'pass';
     entries.push({ ...common, ...counts, layer: layerOf(counts.file, testLayers), result, note: null });
   }
@@ -305,35 +322,66 @@ export function formatReport(report) {
   return lines.join('\n');
 }
 
-/** 收集与 glob 或字面路径匹配的 JUnit 文件。闸门可用 startedAt 排除旧报告。 */
-export function readReports(root, patterns, startedAt = -Infinity) {
+/**
+ * 收集与 glob 或字面路径匹配的 JUnit 文件。闸门可用 startedAt 排除旧报告。confine 为 true（报告路径来自项目配置）时，
+ * 只收真实路径在仓库根之内的文件（不跟着符号链接读到仓库外）；命令行显式给的 --junit 不受此限。
+ * 返回 [{ path, text }]；匹配到但读不出的返回 { path, error }（错误码），读的过程中消失的文件当作没找到。
+ */
+export function readReports(root, patterns, startedAt = -Infinity, { confine = false } = {}) {
   const files = new Set();
+  const realRoot = confine ? fs.realpathSync(root) : null;
+  const inside = (file) => {
+    const rel = path.relative(realRoot, file);
+    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  };
   for (const pattern of patterns) {
     const normalized = pattern.replaceAll('\\', '/');
     const candidates = /[*?[\]{}]|[!+@]\(/.test(normalized) ? fs.globSync(normalized, { cwd: root }) : [normalized];
     for (const candidate of candidates) {
       const file = path.resolve(root, candidate);
       const stat = fs.statSync(file, { throwIfNoEntry: false });
-      if (stat?.isFile() && stat.mtimeMs >= startedAt) files.add(file);
+      if (!stat?.isFile() || stat.mtimeMs < startedAt) continue;
+      if (confine) {
+        let real;
+        try { real = fs.realpathSync(file); } catch { continue; }
+        if (!inside(real)) continue;
+      }
+      files.add(file);
     }
   }
-  return [...files].sort().map((file) => ({ path: file, text: fs.readFileSync(file, 'utf8') }));
+  const out = [];
+  for (const file of [...files].sort()) {
+    try {
+      out.push({ path: file, text: fs.readFileSync(file, 'utf8') });
+    } catch (error) {
+      if (error.code !== 'ENOENT') out.push({ path: file, error: error.code ?? error.message });
+    }
+  }
+  return out;
 }
 
 /**
- * 记录一次实际运行，返回条目供调用方显示计数。写共享台账（没给 out）时持 test-ledger 锁（各工作树共用），
- * 锁被占用时报错由调用方处理（闸门降为警告）。
+ * 记录一次实际运行，返回条目供调用方显示计数。写入前逐条校验；写入时按目标文件持锁（各工作树共用），
+ * 锁被占用或条目不合格时报错，由调用方处理（闸门降为警告）。commit 由调用方给出测试开始时的提交，不给时取当前 HEAD。
  */
 export function recordTests({ root, config, patterns = config.testReports, startedAt, exitCode, source = 'local',
   commit, mode = 'full', os: system = { linux: 'linux', win32: 'windows', darwin: 'macos' }[process.platform] ?? null,
   changed = [], runId, out }) {
   const defaultId = source === 'ci' && process.env.GITHUB_RUN_ID
     ? `ci-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? 1}-${system}` : `${source}-${randomUUID()}`;
-  const entries = buildEntries({ root, reports: readReports(root, patterns, startedAt), testReportsConfigured: patterns.length > 0,
+  const confine = patterns === config.testReports;
+  const entries = buildEntries({ root, reports: readReports(root, patterns, startedAt, { confine }), testReportsConfigured: patterns.length > 0,
     testLayers: config.testLayers, exitCode, source, commit: commit === undefined ? headInfo(root).headSha : commit, mode,
     os: system, changed, at: new Date().toISOString(), runId: runId ?? defaultId });
-  if (out) appendEntries(out, entries);
-  else withLock(root, 'test-ledger', () => appendEntries(ledgerFile(root), entries), '测试台账的写入锁');
+  // 写入端与读取端用同一套字段校验：写得进去的行，report 一定读得出
+  for (const entry of entries) {
+    const why = entryProblem(entry);
+    if (why) throw new Error(`台账条目不合格（${why}），本次不写`);
+  }
+  // 检查文件末尾和追加放在同一把锁里（锁按实际目标文件区分，显式 --out 指向同一文件时也互斥）
+  const target = path.resolve(out ?? ledgerFile(root));
+  const lockName = 'test-ledger-' + createHash('sha256').update(target.toLowerCase()).digest('hex').slice(0, 16);
+  withLock(root, lockName, () => appendEntries(target, entries), '测试台账的写入锁');
   return entries;
 }
 
@@ -392,6 +440,7 @@ function main([command, ...args]) {
     if (v.mode !== undefined && !['full', 'affected'].includes(v.mode)) throw new Error('--mode 须为 full 或 affected');
     if (v.os !== undefined && !['linux', 'windows', 'macos'].includes(v.os)) throw new Error('--os 须为 linux、windows 或 macos');
     if (v.commit !== undefined && !/^[a-f0-9]{40}$/i.test(v.commit)) throw new Error('--commit 须为 40 位提交号');
+    if (v['run-id'] !== undefined && !v['run-id'].trim()) throw new Error('--run-id 不能为空');
     const commit = v.commit ?? headInfo(root).headSha;
     const changed = v['changed-from'] === undefined ? [] : changedBetween(root, v['changed-from'], commit);
     recordTests({ root, config: metricsConfig(root), patterns: v.junit, exitCode: Number(v['exit-code']), commit, changed,

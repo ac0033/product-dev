@@ -224,7 +224,8 @@ function checkTestMetrics({ testLayers, testReports }) {
     || new Set(testLayers.map((layer) => layer.name)).size !== testLayers.length) {
     invalid('testLayers', testLayers, '须为层级数组，层名不重复且无首尾空白，每层 paths 至少包含一个 glob');
   }
-  if (!strings(testReports)) invalid('testReports', testReports, '须为非空字符串组成的数组');
+  // 项目配置只许相对仓库根的 glob（不许绝对路径、.. 段和反斜杠）：报告读取不能被配置引到仓库之外；命令行的 record --junit 另行允许绝对路径
+  if (!strings(testReports) || !testReports.every(isRepoPath)) invalid('testReports', testReports, '须为相对仓库根的 glob 组成的数组（不许绝对路径、.. 段和反斜杠）');
 }
 
 /**

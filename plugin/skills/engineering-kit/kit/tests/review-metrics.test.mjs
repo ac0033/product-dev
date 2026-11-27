@@ -249,3 +249,46 @@ test('R2-7 指标：kind、verdict、headSha 值不合法的行归入 badLines�
   const bad = JSON.stringify(result.badLines);
   assert.ok(bad && bad !== '[]' && bad !== '{}' && bad !== 'null', 'badLines 里要有这些行');
 });
+
+// ---------- 第 4 轮复审回归 ----------
+
+test('R4-6 指标读 data 的校验：第 2 轮起的 fail 登记里 data 为整数、相对路径、目录时，都记入该 PR 的 dataMissing，汇总照常、不抛错', async () => {
+  const { collectMetrics } = await import('../gate/review-metrics.mjs');
+  const { commonDir } = repo();
+  const dir = tmpDir('ekit-r46-');
+  writeLog(commonDir, 8801, [
+    rec({ headSha: sha('1'), at: ago(9) }),
+    rec({ headSha: sha('2'), at: ago(8), data: 3 }),
+    rec({ headSha: sha('3'), at: ago(7), data: 'x.json' }),
+    rec({ headSha: sha('4'), at: ago(6), data: dir }),
+  ]);
+  let result;
+  assert.doesNotThrow(() => { result = collectMetrics({ commonDir, now: NOW, sinceDays: null }); });
+  const { prs, summary } = split(result);
+  assert.equal(prs.length, 1);
+  assert.equal(prs[0].rounds, 4);
+  assert.equal(prs[0].dataMissing.length, 3, JSON.stringify(prs[0].dataMissing));
+  assert.deepEqual(prs[0].dataMissing.map((m) => m.line), [2, 3, 4]);
+  assert.equal(summary.prCount, 1);
+  assert.equal(summary.missedLater, 0);
+});
+
+test('R4-7 一轮通过的口径：没有 fail 登记，且同一 headSha 上代码复审 pass/accept、一致性审 pass/defer/accept 才计入分子；中文输出含 一轮通过', async () => {
+  const { collectMetrics } = await import('../gate/review-metrics.mjs');
+  const { root, commonDir } = repo();
+  // 计入：A 两种审都 pass；C 代码 accept、一致性 defer；F 代码 pass、一致性 accept
+  writeLog(commonDir, 1, [rec({ kind: 'code', verdict: 'pass', headSha: sha('1') }), rec({ kind: 'consistency', verdict: 'pass', headSha: sha('1') })]);
+  writeLog(commonDir, 3, [rec({ kind: 'code', verdict: 'accept', headSha: sha('3') }), rec({ kind: 'consistency', verdict: 'defer', headSha: sha('3') })]);
+  writeLog(commonDir, 6, [rec({ kind: 'code', verdict: 'pass', headSha: sha('6') }), rec({ kind: 'consistency', verdict: 'accept', headSha: sha('6') })]);
+  // 不计入：B 只有代码复审 pass；D 有过 fail；E 两种审登记在不同 headSha 上；G 只有一致性审
+  writeLog(commonDir, 2, [rec({ kind: 'code', verdict: 'pass', headSha: sha('2') })]);
+  writeLog(commonDir, 4, [rec({ verdict: 'fail', headSha: sha('4') }), rec({ kind: 'code', verdict: 'pass', headSha: sha('5') }), rec({ kind: 'consistency', verdict: 'pass', headSha: sha('5') })]);
+  writeLog(commonDir, 5, [rec({ kind: 'code', verdict: 'pass', headSha: sha('7') }), rec({ kind: 'consistency', verdict: 'pass', headSha: sha('8') })]);
+  writeLog(commonDir, 7, [rec({ kind: 'consistency', verdict: 'pass', headSha: sha('9') })]);
+  const { summary } = split(collectMetrics({ commonDir, now: NOW, sinceDays: null }));
+  assert.equal(summary.prCount, 7);
+  assert.equal(summary.firstPassRate, 3 / 7);
+  const table = spawnSync(process.execPath, [CLI], { cwd: root, encoding: 'utf8' });
+  assert.equal(table.status, 0, table.stderr);
+  assert.ok(table.stdout.includes('一轮通过'), table.stdout);
+});

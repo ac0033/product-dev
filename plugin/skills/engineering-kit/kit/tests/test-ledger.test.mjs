@@ -684,3 +684,117 @@ test('R3-4 report 提示：没配 testReports → 提示 未配置 modules.gate.
   assert.ok(run({}).includes('未配置 modules.gate.testReports'));
   assert.ok(!run({ testReports: ['reports/*.xml'] }).includes('未配置 modules.gate.testReports'));
 });
+
+// ---------- 第 4 轮复审回归 ----------
+
+test('R4-1 读取不越界：配置的 testReports 匹配到指向仓库外的符号链接时不读，按未找到报告记；显式 --junit 给仓库外绝对路径仍能读', (t) => {
+  const root = repoWithTests();
+  write(root, 'engineering.config.json', JSON.stringify({ profile: 2, modules: { gate: { testReports: ['reports/*.xml'] } }, layout: { sourceGlobs: ['src/**/*.mjs'], testGlobs: ['tests/**/*.test.mjs'] } }));
+  commitAll(root, 'cfg');
+  const outside = junitDir({ 'outside.xml': vitestXml('tests/foo.test.ts') });
+  fs.mkdirSync(path.join(root, 'reports'), { recursive: true });
+  try {
+    fs.symlinkSync(path.join(outside, 'outside.xml'), path.join(root, 'reports', 'link.xml'), 'file');
+  } catch (error) {
+    t.skip(`此平台建不了符号链接：${error.code}`);
+    return;
+  }
+  const out = path.join(tmpDir('ekit-r41-'), 'l.jsonl');
+  const r = cli(root, ['record', '--exit-code', '1', '--source', 'local', '--out', out]);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const es = readJsonl(out);
+  assert.equal(es.length, 1, JSON.stringify(es));
+  assert.deepEqual([es[0].file, es[0].result, es[0].note], [null, 'fail', '未找到 JUnit 报告']);
+  const out2 = path.join(tmpDir('ekit-r41-'), 'l.jsonl');
+  const r2 = cli(root, ['record', '--exit-code', '1', '--source', 'local', '--junit', `${slash(outside)}/outside.xml`, '--out', out2]);
+  assert.equal(r2.status, 0, r2.stderr + r2.stdout);
+  assert.deepEqual(readJsonl(out2).map((e) => e.file), ['tests/foo.test.ts'], '显式 --junit 照旧可读仓库外的报告');
+});
+
+test('R4-2 报告读不出不中止整批：读不出的那份记一条命令级条目（note 含 读不出），正常的照常出文件级条目', async () => {
+  const { buildEntries } = await lib();
+  const reports = [{ path: 'bad.xml', error: 'EACCES' }, { path: 'ok.xml', text: junit(tc('tests/a.test.mjs')) }];
+  const out = buildEntries({ ...BASE_ARGS, reports });
+  const files = out.filter((e) => e.file !== null);
+  assert.deepEqual(files.map((e) => [e.file, e.result]), [['tests/a.test.mjs', 'pass']]);
+  const cmd = out.filter((e) => e.file === null);
+  assert.equal(cmd.length, 1, JSON.stringify(out));
+  assert.match(cmd[0].note, /读不出/);
+});
+
+test('R4-3 JUnit XML 注释与 ]]>：注释里的 --、注释或处理指令里的控制字符、正文里的 ]]> 判坏；正常注释与 CDATA 里的 ]] 不受影响', async () => {
+  const { parseJUnit } = await lib();
+  const root = repoWithTests();
+  const doc = (body, head = '') => `<?xml version="1.0"?>${head}<testsuites><testsuite name="s"><testcase name="t" file="tests/a.test.mjs">${body}</testcase></testsuite></testsuites>`;
+  const badCases = {
+    '注释里含 --': doc('', '<!-- a -- b -->'),
+    '注释里含控制字符': doc('', '<!-- a\u0001b -->'),
+    '处理指令里含控制字符': doc('', '<?xml-stylesheet a\u0001b?>'),
+    '正文里出现 ]]>': doc('<failure>a ]]> b</failure>'),
+  };
+  for (const [label, xml] of Object.entries(badCases)) {
+    const r = parseJUnit(xml, { root });
+    assert.equal(r.ok, false, label);
+    assert.ok(typeof r.error === 'string' && r.error.length > 0, label);
+  }
+  const goodCases = {
+    '正常注释': doc('', '<!-- a - b -->'),
+    'CDATA 里的 ]]': doc('<failure><![CDATA[a ]] b]]></failure>'),
+  };
+  for (const [label, xml] of Object.entries(goodCases)) {
+    const r = parseJUnit(xml, { root });
+    assert.equal(r.ok, true, `${label}：${JSON.stringify(r)}`);
+    assert.deepEqual(r.files.map((f) => f.file), ['tests/a.test.mjs'], label);
+  }
+});
+
+test('R4-4 写入前守住格式：--run-id 为空串退出码 1 且不写台账；耗时累加后不可表示的 JUnit 判坏', async () => {
+  const { parseJUnit } = await lib();
+  const root = repoWithTests();
+  const out = path.join(tmpDir('ekit-r44-'), 'l.jsonl');
+  const r = cli(root, ['record', '--exit-code', '0', '--source', 'local', '--run-id', '', '--out', out]);
+  assert.equal(r.status, 1, r.stderr + r.stdout);
+  assert.equal(fs.existsSync(out), false, '参数不合格不写台账');
+  const xml = '<testsuites><testsuite name="s"><testcase name="a" file="tests/a.test.mjs" time="1e308"/><testcase name="b" file="tests/a.test.mjs" time="1e308"/></testsuite></testsuites>';
+  const p = parseJUnit(xml, { root });
+  assert.equal(p.ok, false, JSON.stringify(p));
+  assert.ok(typeof p.error === 'string' && p.error.length > 0);
+});
+
+test('R4-8 显式 --out 也加锁：两次 record 写同一个末尾没有换行的文件，条数正确、没有坏行', async () => {
+  const { readLedger } = await lib();
+  const root = repoWithTests();
+  const out = path.join(tmpDir('ekit-r48-'), 'l.jsonl');
+  fs.writeFileSync(out, JSON.stringify(entry({ runId: 'old' })));
+  for (const code of ['0', '1']) {
+    const r = cli(root, ['record', '--exit-code', code, '--source', 'local', '--out', out]);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+  }
+  const got = readLedger(out);
+  assert.deepEqual(got.bad, []);
+  assert.equal(got.entries.length, 3);
+});
+
+test('R4-9 真实 node:test 的 JUnit 输出：两个文件各一条文件级条目，file 为仓库相对路径，结果分别是 pass 和 fail，计数正确', (t) => {
+  const root = tmpRepo();
+  write(root, 'tests/pass.test.mjs', "import { test } from 'node:test';\ntest('a', () => {});\ntest('b', () => {});\n");
+  write(root, 'tests/fail.test.mjs', "import { test } from 'node:test';\ntest('c', () => {});\ntest('d', () => { throw new Error('boom'); });\n");
+  commitAll(root, 'base');
+  const dir = tmpDir('ekit-r49-');
+  const report = path.join(dir, 'junit.xml');
+  const run = spawnSync(process.execPath, ['--test', '--test-reporter=junit', `--test-reporter-destination=${report}`, 'tests/pass.test.mjs', 'tests/fail.test.mjs'], { cwd: root, encoding: 'utf8', env: { ...process.env, NODE_TEST_CONTEXT: undefined } });
+  if (!fs.existsSync(report)) {
+    t.skip(`此 Node 版本没生成 JUnit 报告：${run.stderr}`);
+    return;
+  }
+  assert.notEqual(run.status, 0, '有一条失败，node --test 退出码非 0');
+  const out = path.join(dir, 'ledger.jsonl');
+  const r = cli(root, ['record', '--junit', slash(report), '--exit-code', String(run.status), '--source', 'local', '--out', out]);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const es = readJsonl(out).filter((e) => e.file !== null);
+  const by = Object.fromEntries(es.map((e) => [e.file, e]));
+  assert.deepEqual(Object.keys(by).sort(), ['tests/fail.test.mjs', 'tests/pass.test.mjs'], JSON.stringify(es));
+  assert.equal(es.length, 2, '每个文件一条');
+  assert.deepEqual([by['tests/pass.test.mjs'].result, by['tests/pass.test.mjs'].tests, by['tests/pass.test.mjs'].failures], ['pass', 2, 0]);
+  assert.deepEqual([by['tests/fail.test.mjs'].result, by['tests/fail.test.mjs'].tests, by['tests/fail.test.mjs'].failures], ['fail', 2, 1]);
+});

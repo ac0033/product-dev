@@ -54,7 +54,7 @@ test('扁平 ⇄ profile 互转：字段不丢失', () => {
     externalExecutors: ['codex'], externalExclude: ['config/*.secrets.yaml'],
     // 执行位置与环境选项：全量测试在哪跑、CI 放哪、CI 跑在哪些系统、会话与并行偏好
     fullTests: 'ci', ciRunner: 'github-hosted', ciFallback: 'self-hosted', ciOs: ['linux', 'windows'], session: 'cloud', parallel: 'parallel',
-    // 测试度量新增的四个键（C2）：测试分层、JUnit 报告 glob、覆盖率、变异测试命令
+    // 测试度量新增的两个键（C2）：测试分层、JUnit 报告 glob
     testLayers: [{ name: 'unit', paths: ['tests/unit/**'] }], testReports: ['reports/*.xml'],
   };
   const prof = toProfile(flat);
@@ -192,7 +192,7 @@ test('C2 合法取值原样展开（profile 的 modules.gate 与旧扁平结构�
   }
 });
 
-test('C2 不是判定策略字段：四个键不在 POLICY_KEYS 里（取工作区的值，不取基准提交上的）', () => {
+test('C2 不是判定策略字段：testLayers、testReports 两个键不在 POLICY_KEYS 里（取工作区的值，不取基准提交上的）', () => {
   for (const k of ['testLayers', 'testReports']) assert.ok(!POLICY_KEYS.includes(k), `${k} 不应是判定策略字段`);
 });
 
@@ -229,7 +229,7 @@ test('C2 testReports 校验：非空字符串数组；报错写出完整路径�
   assert.doesNotThrow(() => normalizeConfig(gateCfg({ testReports: ['a/*.xml'] })));
 });
 
-test('C2 互转：profile ⇄ 扁平带上四个键，值不丢', () => {
+test('C2 互转：profile ⇄ 扁平带上 testLayers、testReports 两个键，值不丢', () => {
   const values = { testLayers: [{ name: 'unit', paths: ['tests/unit/**'] }], testReports: ['reports/*.xml'] };
   const prof = toProfile({ base: 'main', sourceGlobs: ['src/**/*.ts'], testGlobs: ['tests/**/*.ts'], ...values });
   for (const [k, v] of Object.entries(values)) assert.deepEqual(prof.modules.gate[k], v, `${k} 写进 profile 的 modules.gate`);
@@ -239,7 +239,7 @@ test('C2 互转：profile ⇄ 扁平带上四个键，值不丢', () => {
   for (const [k, v] of Object.entries(values)) assert.deepEqual(again[k], v, `${k} 来回一圈不变`);
 });
 
-test('C2 模板：_说明 里写了四个键的用途，但模板的 modules.gate 里不写这四个键', () => {
+test('C2 模板：_说明 里写了 testLayers、testReports 的用途，但模板的 modules.gate 里不写这两个键', () => {
   const raw = JSON.parse(readFileSync(TEMPLATE, 'utf8'));
   const notes = [];
   const walk = (v) => { if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) { if (k === '_说明') notes.push(typeof x === 'string' ? x : JSON.stringify(x)); walk(x); } };
@@ -250,4 +250,15 @@ test('C2 模板：_说明 里写了四个键的用途，但模板的 modules.gat
     assert.equal(Object.hasOwn(raw.modules.gate, k), false, `模板不写 ${k} 的值`);
   }
   assert.doesNotThrow(() => normalizeConfig(raw), '模板仍是合法配置');
+});
+
+test('R4-1 testReports 只许仓库相对 glob：绝对路径、含 .. 段、含反斜杠的项抛错；相对 glob 合法', () => {
+  for (const bad of [['/tmp/x.xml'], ['C:/x.xml'], ['../x.xml'], ['reports/../../x.xml'], ['reports\\x.xml'], ['reports/*.xml', '/tmp/x.xml']]) {
+    for (const cfg of [gateCfg({ testReports: bad }), { base: 'main', testReports: bad }]) {
+      assert.throws(() => normalizeConfig(cfg), (e) => /modules\.gate\.testReports/.test(e.message), JSON.stringify(bad));
+    }
+  }
+  for (const good of [['reports/*.xml'], ['out/**/junit-*.xml'], ['reports/*.xml', 'out/**/junit-*.xml']]) {
+    assert.doesNotThrow(() => normalizeConfig(gateCfg({ testReports: good })), JSON.stringify(good));
+  }
 });
