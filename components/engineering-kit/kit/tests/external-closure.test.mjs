@@ -82,7 +82,7 @@ test('A7 final-next（第 1 轮有高级，上限 1）：新提交上的外部�
   const request = requestOf(r.res);
   assert.equal(request.review.finalRound, true);
   assert.ok(request.context.instructions.includes(FINAL_ROUND_TEXT), '提示词含最后一轮的要求');
-  const shown = ['report.md', 'review.json', 'assessment.json'].map((f) => path.join(r.res.runDir, f)).filter((f) => fs.existsSync(f)).map((f) => fs.readFileSync(f, 'utf8')).join(NL);
+  const shown = ['report.md', 'review.json', 'assessment.json'].map((f) => path.join(r.res.runDir, 'result', f)).filter((f) => fs.existsSync(f)).map((f) => fs.readFileSync(f, 'utf8')).join(NL);
   assert.match(shown, /最后一轮/, '报告元信息写明最后一轮');
 });
 
@@ -144,4 +144,55 @@ test('A7 最后一轮的第一份审查登记为不通过后，同一提交上�
   assert.equal(r.ok, true, r.message);
   assert.equal(requestOf(r.res).review.finalRound, true);
   assert.ok(requestOf(r.res).context.instructions.includes(FINAL_ROUND_TEXT));
+});
+
+// ---------- 0.10.1：外部复审启动前的准入（代码 M6、一致性 M3） ----------
+
+const FIX = [{ id: 'H1', status: 'fixed', evidence: '已修并补了测试。' }];
+
+test('E1 final-next 且 finalHead 未定：对原失败提交跑外部复审、不带用户决定，启动前被拒，写明 --user-decision，没有建运行目录（0.10.1 代码 M6、一致性 M3）', async () => {
+  const { root, head, main } = repo();
+  firstRound(root, main, head, [finding({ id: 'H1', severity: 'high' }), finding({ id: 'M1' })]);
+  const out = freshOut();
+  const r = await run(root, head, out);
+  assert.equal(r.ok, false, '对已登记失败的提交再跑外部复审是旧提交上的登记');
+  assert.match(r.message, /--user-decision/);
+  assert.equal(fs.existsSync(out), false, '被拒时没有建运行目录，执行器没有启动');
+});
+
+test('E2 finalHead 已定为 C：对另一个提交 D 跑外部复审被拒，写明 C 的前 12 位，没有建运行目录（0.10.1 代码 M6、一致性 M3）', async () => {
+  const { root, head, main } = repo();
+  firstRound(root, main, head, [finding({ id: 'H1', severity: 'high' })]);
+  const c = nextHead(root, 'fix1');
+  reg(root, main, 'code', 'pass', c, [], FIX);
+  const d = nextHead(root, 'fix2');
+  const out = freshOut();
+  const r = await run(root, d, out);
+  assert.equal(r.ok, false);
+  assert.ok(r.message.includes(c.slice(0, 12)), `写明只认 ${c.slice(0, 12)}：${r.message}`);
+  assert.equal(fs.existsSync(out), false, '被拒时没有建运行目录');
+});
+
+test('E3 finalHead C 上已登记代码复审：再跑外部代码复审被拒、没有建运行目录；同提交上的外部一致性审放行且带最后一轮标记（0.10.1 代码 M6、一致性 M3）', async () => {
+  const { root, head, main } = repo();
+  firstRound(root, main, head, [finding({ id: 'H1', severity: 'high' })]);
+  const c = nextHead(root, 'fix1');
+  reg(root, main, 'code', 'pass', c, [], FIX);
+  const out = freshOut();
+  const dup = await run(root, c, out, { kind: 'code' });
+  assert.equal(dup.ok, false, '最后一轮的代码复审已登记过');
+  assert.equal(fs.existsSync(out), false, '被拒时没有建运行目录');
+  const cons = await run(root, c, freshOut(), { kind: 'consistency' });
+  assert.equal(cons.ok, true, cons.message);
+  assert.equal(requestOf(cons.res).review.finalRound, true);
+  assert.ok(requestOf(cons.res).context.instructions.includes(FINAL_ROUND_TEXT));
+});
+
+test('E4 带用户决定时同样的运行放行，但那不是最后一轮：请求里没有 finalRound 标记、提示词不含最后一轮要求（0.10.1 代码 M6、一致性 M3）', async () => {
+  const { root, head, main } = repo();
+  firstRound(root, main, head, [finding({ id: 'H1', severity: 'high' }), finding({ id: 'M1' })]);
+  const r = await run(root, head, freshOut(), { userDecision: '用户 2026-11-27 同意对该提交再做一次外部复审（测试）' });
+  assert.equal(r.ok, true, r.message);
+  assert.notEqual(requestOf(r.res).review.finalRound, true);
+  assert.ok(!requestOf(r.res).context.instructions.includes(FINAL_ROUND_TEXT));
 });
