@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DEFAULTS, normalizeConfig, toFlat, toProfile, FLAT_KEYS } from '../gate/config.mjs';
+import { POLICY_KEYS } from '../gate/lib.mjs';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,6 +54,8 @@ test('扁平 ⇄ profile 互转：字段不丢失', () => {
     externalExecutors: ['codex'], externalExclude: ['config/*.secrets.yaml'],
     // 执行位置与环境选项：全量测试在哪跑、CI 放哪、CI 跑在哪些系统、会话与并行偏好
     fullTests: 'ci', ciRunner: 'github-hosted', ciFallback: 'self-hosted', ciOs: ['linux', 'windows'], session: 'cloud', parallel: 'parallel',
+    // 测试度量新增的四个键（C2）：测试分层、JUnit 报告 glob、覆盖率、变异测试命令
+    testLayers: [{ name: 'unit', paths: ['tests/unit/**'] }], testReports: ['reports/*.xml'], coverage: { command: 'npm run cov', lcov: 'coverage/lcov.info' }, mutationCommand: 'npx stryker run',
   };
   const prof = toProfile(flat);
   assert.equal(prof.profile, 2);
@@ -167,4 +170,117 @@ test('类型校验（新旧结构共用）：写错类型的字段报错，不�
   ]) assert.throws(() => normalizeConfig(raw), why, JSON.stringify(raw));
   assert.doesNotThrow(() => normalizeConfig({ profile: 2 }));
   assert.doesNotThrow(() => normalizeConfig({}));
+});
+// ---------- C2 测试度量新增的四个配置键（规格 spec-CD 第 1 节） ----------
+
+const gateCfg = (gate) => ({ profile: 2, modules: { gate } });
+
+test('C2 缺省：testLayers [] / testReports [] / coverage null / mutationCommand null；旧配置没有这些键行为不变', () => {
+  for (const k of ['testLayers', 'testReports', 'coverage', 'mutationCommand']) assert.ok(FLAT_KEYS.includes(k), `${k} 要在 FLAT_KEYS 里`);
+  assert.deepEqual([DEFAULTS.testLayers, DEFAULTS.testReports, DEFAULTS.coverage, DEFAULTS.mutationCommand], [[], [], null, null]);
+  const eff = normalizeConfig({ profile: 2 });
+  assert.deepEqual([eff.testLayers, eff.testReports, eff.coverage, eff.mutationCommand], [[], [], null, null]);
+  const flat = normalizeConfig({ base: 'main', sourceGlobs: ['src/**/*.py'] });
+  assert.deepEqual([flat.testLayers, flat.testReports, flat.coverage, flat.mutationCommand], [[], [], null, null], '旧的扁平配置同样取缺省');
+});
+
+test('C2 合法取值原样展开（profile 的 modules.gate 与旧扁平结构两种写法）', () => {
+  const gate = { testLayers: [{ name: 'unit', paths: ['tests/unit/**'] }, { name: 'e2e', paths: ['e2e/**', 'tests/e2e/**'] }], testReports: ['reports/*.xml', 'out/junit-*.xml'], coverage: { command: 'npm run cov', lcov: 'coverage/lcov.info' }, mutationCommand: 'npx stryker run' };
+  for (const eff of [normalizeConfig(gateCfg(gate)), normalizeConfig({ base: 'main', ...gate })]) {
+    assert.deepEqual(eff.testLayers, gate.testLayers);
+    assert.deepEqual(eff.testReports, gate.testReports);
+    assert.deepEqual(eff.coverage, gate.coverage);
+    assert.equal(eff.mutationCommand, gate.mutationCommand);
+  }
+});
+
+test('C2 不是判定策略字段：四个键不在 POLICY_KEYS 里（取工作区的值，不取基准提交上的）', () => {
+  for (const k of ['testLayers', 'testReports', 'coverage', 'mutationCommand']) assert.ok(!POLICY_KEYS.includes(k), `${k} 不应是判定策略字段`);
+});
+
+test('C2 testLayers 校验：每项 { name, paths }；name 非空、无首尾空白、不重复；paths 非空 glob 字符串数组；报错写出键的完整路径和当前值', () => {
+  const bads = [
+    'unit',
+    {},
+    [null],
+    ['unit'],
+    [{ paths: ['a/**'] }],
+    [{ name: '', paths: ['a/**'] }],
+    [{ name: '  ', paths: ['a/**'] }],
+    [{ name: ' unit', paths: ['a/**'] }],
+    [{ name: 'unit ', paths: ['a/**'] }],
+    [{ name: 5, paths: ['a/**'] }],
+    [{ name: 'unit', paths: ['a/**'] }, { name: 'unit', paths: ['b/**'] }],
+    [{ name: 'unit' }],
+    [{ name: 'unit', paths: [] }],
+    [{ name: 'unit', paths: 'a/**' }],
+    [{ name: 'unit', paths: [''] }],
+    [{ name: 'unit', paths: [3] }],
+  ];
+  for (const bad of bads) {
+    assert.throws(() => normalizeConfig(gateCfg({ testLayers: bad })), (e) => /modules\.gate\.testLayers/.test(e.message) && e.message.includes(JSON.stringify(bad)), JSON.stringify(bad));
+  }
+  assert.doesNotThrow(() => normalizeConfig(gateCfg({ testLayers: [] })));
+  assert.throws(() => normalizeConfig({ base: 'main', testLayers: 'x' }), /testLayers/, '旧扁平结构同样校验');
+});
+
+test('C2 testReports 校验：非空字符串数组；报错写出完整路径和当前值', () => {
+  for (const bad of ['reports/*.xml', [''], ['ok', '  '], [1], [null], {}]) {
+    assert.throws(() => normalizeConfig(gateCfg({ testReports: bad })), (e) => /modules\.gate\.testReports/.test(e.message) && e.message.includes(JSON.stringify(bad)), JSON.stringify(bad));
+  }
+  assert.doesNotThrow(() => normalizeConfig(gateCfg({ testReports: ['a/*.xml'] })));
+});
+
+test('C2 coverage 校验：null 或 { command, lcov }；command 非空字符串；lcov 是仓库相对路径（isRepoPath）', () => {
+  const ok = { command: 'npm run cov', lcov: 'coverage/lcov.info' };
+  assert.doesNotThrow(() => normalizeConfig(gateCfg({ coverage: ok })));
+  assert.equal(normalizeConfig(gateCfg({ coverage: null })).coverage, null, '写 null 等于不写');
+  const bads = [
+    'npm run cov', [], 5,
+    { lcov: 'coverage/lcov.info' },
+    { command: '', lcov: 'coverage/lcov.info' },
+    { command: 5, lcov: 'coverage/lcov.info' },
+    { command: 'npm run cov' },
+    { command: 'npm run cov', lcov: '' },
+    { command: 'npm run cov', lcov: 'coverage\\lcov.info' },
+    { command: 'npm run cov', lcov: '/abs/lcov.info' },
+    { command: 'npm run cov', lcov: 'C:/abs/lcov.info' },
+    { command: 'npm run cov', lcov: '../lcov.info' },
+    { command: 'npm run cov', lcov: 'a/./lcov.info' },
+    { command: 'npm run cov', lcov: 7 },
+  ];
+  for (const bad of bads) {
+    assert.throws(() => normalizeConfig(gateCfg({ coverage: bad })), (e) => /modules\.gate\.coverage/.test(e.message) && e.message.includes(JSON.stringify(bad)), JSON.stringify(bad));
+  }
+});
+
+test('C2 mutationCommand 校验：null 或非空字符串；报错写出完整路径和当前值', () => {
+  assert.equal(normalizeConfig(gateCfg({ mutationCommand: null })).mutationCommand, null);
+  assert.equal(normalizeConfig(gateCfg({ mutationCommand: 'npx stryker run' })).mutationCommand, 'npx stryker run');
+  for (const bad of ['', '   ', 5, [], {}, true]) {
+    assert.throws(() => normalizeConfig(gateCfg({ mutationCommand: bad })), (e) => /modules\.gate\.mutationCommand/.test(e.message) && e.message.includes(JSON.stringify(bad)), JSON.stringify(bad));
+  }
+});
+
+test('C2 互转：profile ⇄ 扁平带上四个键，值不丢', () => {
+  const values = { testLayers: [{ name: 'unit', paths: ['tests/unit/**'] }], testReports: ['reports/*.xml'], coverage: { command: 'npm run cov', lcov: 'coverage/lcov.info' }, mutationCommand: 'npx stryker run' };
+  const prof = toProfile({ base: 'main', sourceGlobs: ['src/**/*.ts'], testGlobs: ['tests/**/*.ts'], ...values });
+  for (const [k, v] of Object.entries(values)) assert.deepEqual(prof.modules.gate[k], v, `${k} 写进 profile 的 modules.gate`);
+  const flat = toFlat(prof);
+  for (const [k, v] of Object.entries(values)) assert.deepEqual(flat[k], v, `${k} 回滚到扁平结构后仍在`);
+  const again = normalizeConfig(toProfile(flat));
+  for (const [k, v] of Object.entries(values)) assert.deepEqual(again[k], v, `${k} 来回一圈不变`);
+});
+
+test('C2 模板：_说明 里写了四个键的用途，但模板的 modules.gate 里不写这四个键', () => {
+  const raw = JSON.parse(readFileSync(TEMPLATE, 'utf8'));
+  const notes = [];
+  const walk = (v) => { if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) { if (k === '_说明') notes.push(typeof x === 'string' ? x : JSON.stringify(x)); walk(x); } };
+  walk(raw);
+  const text = notes.join('\n');
+  for (const k of ['testLayers', 'testReports', 'coverage', 'mutationCommand']) {
+    assert.ok(text.includes(k), `_说明 要提到 ${k}`);
+    assert.equal(Object.hasOwn(raw.modules.gate, k), false, `模板不写 ${k} 的值`);
+  }
+  assert.doesNotThrow(() => normalizeConfig(raw), '模板仍是合法配置');
 });
