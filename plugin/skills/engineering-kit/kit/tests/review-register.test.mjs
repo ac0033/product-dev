@@ -1,4 +1,4 @@
-// 复审登记集成测试：真实 git 临时仓库加假 gh，覆盖 S1–S10、H3、H7、A15（登记锁）与合并入口对覆盖的要求。
+// 复审登记集成测试：真实 git 临时仓库加假 gh，覆盖 S1–S10、H3、H7、A15（登记锁）、0.10.1 的 L1–L6（锁争用与残留）、C1–C6（新旧锁兼容）、S1–S4（pre-push 从被审提交取快照）与合并入口对覆盖的要求。
 // 复审者交回的是 ek-review/1 JSON；拒绝路径一律断言没有写任何记录（PR 的 log.jsonl 与 <kind>.json）。不访问网络。
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -6,7 +6,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { runGate } from '../gate/gate.mjs';
-import { readRecord, withPrLock } from '../gate/lib.mjs';
+import * as LIB from '../gate/lib.mjs';
+import { gateScope, loadConfig, readRecord, treeHash, withLock, withPrLock } from '../gate/lib.mjs';
 import { mergePr } from '../gate/merge.mjs';
 import { compactFindings, fingerprint } from '../gate/review-data.mjs';
 import { recordReview } from '../gate/review.mjs';
@@ -519,18 +520,18 @@ function setLock(root, name, owner) {
 const lockRef = (root, name) => spawnSync('git', ['rev-parse', '--verify', '--quiet', `refs/engineering-gate/locks/${name}`], { cwd: root, encoding: 'utf8' }).stdout.trim();
 const deadPid = () => spawnSync(process.execPath, ['-e', '']).pid;
 
-test('A15 登记锁：持有者进程还活着时不回收；已不在时回收；持有者信息读不出时不回收并提示手动删除；释放后引用删除（PR #42 双审 M1/M3、PR #43 代码 H2）', () => {
+test('L4 登记锁：错误带 code：持有者活着是 EK_LOCK_BUSY，读不出是 EK_LOCK_BROKEN（0.10.1 代码 M4、一致性 M4；原 A15）。持有者进程还活着时不回收；已不在时回收；持有者信息读不出时不回收并提示手动删除；释放后引用删除（PR #42 双审 M1/M3、PR #43 代码 H2）', () => {
   const { root } = prRepo();
   setLock(root, 'pr-7', JSON.stringify({ pid: process.pid, startedAt: '2000-01-01T00:00:00.000Z', token: 'live' }));
-  assert.throws(() => withPrLock(root, '7', () => 1), /登记锁被占用/);
+  assert.throws(() => withPrLock(root, '7', () => 1), (e) => /登记锁被占用/.test(e.message) && e.code === 'EK_LOCK_BUSY');
   setLock(root, 'pr-7', JSON.stringify({ pid: deadPid(), startedAt: '2000-01-01T00:00:00.000Z', token: 'dead' }));
   assert.equal(withPrLock(root, '7', () => 42), 42);
   assert.equal(lockRef(root, 'pr-7'), '', '释放后引用删除');
   setLock(root, 'pr-7', 'not json');
-  assert.throws(() => withPrLock(root, '7', () => 1), /登记锁被占用[\s\S]*update-ref -d/);
+  assert.throws(() => withPrLock(root, '7', () => 1), (e) => /登记锁被占用[\s\S]*update-ref -d/.test(e.message) && e.code === 'EK_LOCK_BROKEN');
 });
 
-test('A15 登记锁：多个进程同时取锁（开始时留着一把失效锁要回收）时临界区不重叠（PR #43 代码 H2、一致性 M7）', async () => {
+test('L5 登记锁：四个进程同时取锁（开始时留着一把失效锁要回收），只有 code 为 EK_LOCK_BUSY 或 EK_LOCK_CONTENDED 的错误算正常争用，其余重抛；临界区不重叠、全部退出码 0（0.10.1 代码 M4、一致性 M4；原 A15 多进程）', async () => {
   const { root } = prRepo();
   setLock(root, 'pr-7', JSON.stringify({ pid: deadPid(), startedAt: '2000-01-01T00:00:00.000Z', token: 'old' }));
   const dir = tmpDir('ekit-lock-');
@@ -551,7 +552,7 @@ test('A15 登记锁：多个进程同时取锁（开始时留着一把失效锁�
     '      fs.appendFileSync(log, "X " + id + "\\n");',
     '      held++;',
     '    });',
-    '  } catch (e) { if (!/占用/.test(e.message)) throw e; }',
+    '  } catch (e) { if (e.code !== "EK_LOCK_BUSY" && e.code !== "EK_LOCK_CONTENDED") throw e; }',
     '}',
     'process.stdout.write(String(held));',
   ].join('\n'));
@@ -575,24 +576,291 @@ test('A15 登记锁：多个进程同时取锁（开始时留着一把失效锁�
   assert.equal(lockRef(root, 'pr-7'), '', '全部结束后锁已释放');
 });
 
-test('A15 登记锁：git 自己的引用锁文件残留时说明原因和处理办法；释放失败时写警告，不静默（PR #43 第 2 轮代码 M3、一致性 M3）', () => {
+const commonDir = (root) => path.resolve(root, git(root, ['rev-parse', '--git-common-dir']).trim());
+/** git 自己的引用锁文件：<引用>.lock。 */
+const refLockFile = (root, name) => path.join(commonDir(root), 'refs', 'engineering-gate', 'locks', `${name}.lock`);
+const touchRefLock = (root, name) => {
+  const file = refLockFile(root, name);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '');
+  return file;
+};
+const hoursAgo = (n) => new Date(Date.now() - n * 3600 * 1000);
+
+test('L1 git 的引用锁文件 pr-7.lock 刚建、还不到 staleMs：在 retryMs 内取不到，抛 EK_LOCK_CONTENDED，信息含“暂时取不到”和锁文件路径，且不删除这个文件（0.10.1 代码 M4、一致性 M4）', () => {
   const { root } = prRepo();
-  const common = path.resolve(root, git(root, ['rev-parse', '--git-common-dir']).trim());
-  const leftover = path.join(common, 'refs', 'engineering-gate', 'locks', 'pr-7.lock');
-  fs.mkdirSync(path.dirname(leftover), { recursive: true });
-  fs.writeFileSync(leftover, '');
-  assert.throws(() => withPrLock(root, '7', () => 1), (e) => /残留/.test(e.message) && e.message.includes('pr-7.lock'));
-  fs.rmSync(leftover);
-  assert.equal(withPrLock(root, '7', () => 2), 2, '删掉残留后照常取锁');
-  // 临界区里别的进程留下了引用锁文件：释放失败要写警告
+  const file = touchRefLock(root, 'pr-7');
+  assert.throws(() => withPrLock(root, '7', () => 1, { retryMs: 200 }), (e) => e.code === 'EK_LOCK_CONTENDED' && /暂时取不到/.test(e.message) && e.message.includes('pr-7.lock'));
+  assert.ok(fs.existsSync(file), '没到失效时间的锁文件不删');
+});
+
+test('L2 引用锁文件超过 staleMs（mtime 在 1 小时前）：自动回收后照常取锁，fn 执行，锁文件已不在，释放后锁引用删除（0.10.1 代码 M4、一致性 M4）', () => {
+  const { root } = prRepo();
+  const file = touchRefLock(root, 'pr-7');
+  fs.utimesSync(file, hoursAgo(1), hoursAgo(1));
+  let ran = false;
+  const out = withPrLock(root, '7', () => {
+    ran = true;
+    assert.equal(fs.existsSync(file), false, '临界区里残留的锁文件已被回收');
+    return 5;
+  }, { staleMs: 1000 });
+  assert.equal(out, 5);
+  assert.equal(ran, true);
+  assert.equal(fs.existsSync(file), false);
+  assert.equal(lockRef(root, 'pr-7'), '', '释放后锁引用删除');
+});
+
+test('L3 残留的引用锁文件被回收后，真实登记和合并都不受影响（0.10.1 代码 M4、一致性 M4）', () => {
+  const { root, main } = prRepo();
+  const head = addCommit(root, 1);
+  const stale = () => {
+    const file = touchRefLock(root, 'pr-7');
+    fs.utimesSync(file, hoursAgo(1), hoursAgo(1));
+  };
+  stale();
+  assert.equal(reg(root, data(head, main)).ok, true, '残留被回收后登记成功');
+  assert.equal(reg(root, data(head, main, { kind: 'consistency' }), { kind: 'consistency' }).ok, true);
+  stale();
+  const gh = fakeGh(head);
+  const m = mergePr({ root, pr: '7', gh });
+  assert.equal(m.ok, true, JSON.stringify(m.problems));
+  assert.deepEqual(gh.calls.at(-1), ['pr', 'merge', '7', '--squash', '--match-head-commit', head, '--delete-branch']);
+});
+
+test('L6 临界区里别的进程建了新的 pr-7.lock、释放不了：有界重试后写 stderr 警告（含“没有释放”），fn 的返回值照常返回（0.10.1 代码 M4、一致性 M4）', () => {
+  const { root } = prRepo();
   const warnings = [];
-  const write = process.stderr.write;
-  process.stderr.write = (s, ...rest) => { warnings.push(String(s)); return true; };
+  const original = process.stderr.write;
+  process.stderr.write = (chunk) => { warnings.push(String(chunk)); return true; };
+  let out;
   try {
-    assert.equal(withPrLock(root, '7', () => { fs.writeFileSync(leftover, ''); return 3; }), 3);
+    out = withPrLock(root, '7', () => { touchRefLock(root, 'pr-7'); return 3; }, { retryMs: 200 });
   } finally {
-    process.stderr.write = write;
+    process.stderr.write = original;
   }
+  assert.equal(out, 3);
   assert.match(warnings.join(''), /没有释放/);
-  fs.rmSync(leftover);
+  fs.rmSync(refLockFile(root, 'pr-7'), { force: true });
+});
+
+// ---------- 0.10.1：新旧版本的锁兼容（代码 M7） ----------
+
+/** 0.9.x 的 PR 锁：目录 <git 公共目录>/engineering-gate/pr/<编号>/lock，里面 owner.json 写 { pid, startedAt, token }。 */
+const dirLockOf = (root, pr = '7') => path.join(commonDir(root), 'engineering-gate', 'pr', String(pr), 'lock');
+function makeDirLock(root, owner) {
+  const dir = dirLockOf(root);
+  fs.mkdirSync(dir, { recursive: true });
+  if (owner) fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify(owner));
+  return dir;
+}
+/** 一个活着的外部进程（持有旧版目录锁的“别的进程”）。 */
+function liveChild() {
+  return spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+}
+
+test('C1 旧版目录锁存在且 owner.json 的 pid 是活着的进程：withPrLock 抛 EK_LOCK_BUSY（含“被占用”），并释放已取到的引用锁（0.10.1 代码 M7）', () => {
+  const { root } = prRepo();
+  const child = liveChild();
+  try {
+    const dir = makeDirLock(root, { pid: child.pid, startedAt: new Date().toISOString(), token: 'old' });
+    assert.throws(() => withPrLock(root, '7', () => 1), (e) => e.code === 'EK_LOCK_BUSY' && /被占用/.test(e.message));
+    assert.equal(lockRef(root, 'pr-7'), '', '引用锁已释放');
+    assert.ok(fs.existsSync(dir), '别人持有的目录锁不动');
+  } finally {
+    child.kill();
+  }
+});
+
+test('C2 旧版目录锁的持有进程已不在：回收后 fn 执行；结束后目录锁和引用锁都不在（0.10.1 代码 M7）', () => {
+  const { root } = prRepo();
+  const dir = makeDirLock(root, { pid: deadPid(), startedAt: '2000-01-01T00:00:00.000Z', token: 'dead' });
+  assert.equal(withPrLock(root, '7', () => 'ran'), 'ran');
+  assert.equal(fs.existsSync(dir), false, '目录锁已释放');
+  assert.equal(lockRef(root, 'pr-7'), '', '引用锁已释放');
+});
+
+test('C3 临界区内两把锁都持有：旧版目录锁存在且 owner.json 的 pid 是本进程（0.10.1 代码 M7）', () => {
+  const { root } = prRepo();
+  let seen = null;
+  withPrLock(root, '7', () => {
+    const dir = dirLockOf(root);
+    seen = { exists: fs.existsSync(dir), pid: JSON.parse(fs.readFileSync(path.join(dir, 'owner.json'), 'utf8')).pid, ref: lockRef(root, 'pr-7') };
+  });
+  assert.equal(seen.exists, true);
+  assert.equal(seen.pid, process.pid);
+  assert.notEqual(seen.ref, '', '引用锁也在');
+});
+
+test('C4 旧版目录锁没有 owner.json：目录 mtime 是现在时算占用（EK_LOCK_BUSY），改到 11 分钟前时回收（0.10.1 代码 M7）', () => {
+  const { root } = prRepo();
+  const dir = makeDirLock(root, null);
+  assert.throws(() => withPrLock(root, '7', () => 1), (e) => e.code === 'EK_LOCK_BUSY' && /被占用/.test(e.message));
+  assert.equal(lockRef(root, 'pr-7'), '');
+  const old = new Date(Date.now() - 11 * 60 * 1000);
+  fs.utimesSync(dir, old, old);
+  assert.equal(withPrLock(root, '7', () => 'ran'), 'ran');
+  assert.equal(fs.existsSync(dir), false);
+});
+
+test('C6 风险登记锁（withLock risk-register）不建旧版目录锁：fn 内 pr 目录下没有 lock（0.10.1 代码 M7）', () => {
+  const { root } = prRepo();
+  let found = null;
+  withLock(root, 'risk-register', () => {
+    const prRoot = path.join(commonDir(root), 'engineering-gate', 'pr');
+    found = fs.existsSync(prRoot) ? fs.readdirSync(prRoot).filter((n) => fs.existsSync(path.join(prRoot, n, 'lock'))) : [];
+  });
+  assert.deepEqual(found, []);
+  assert.equal(fs.existsSync(dirLockOf(root)), false);
+});
+
+test('C5 四个进程争用同一个 PR 锁：两个用新版 withPrLock，两个用测试里内嵌的 0.9.x 目录锁算法，写同一份出入日志，临界区不重叠、全部退出码 0（0.10.1 代码 M7）', async () => {
+  const { root } = prRepo();
+  const common = commonDir(root);
+  const dir = tmpDir('ekit-lock-');
+  const log = path.join(dir, 'log.txt');
+  const lib = new URL('../gate/lib.mjs', import.meta.url).href;
+  const newWorker = path.join(dir, 'new.mjs');
+  fs.writeFileSync(newWorker, [
+    "import fs from 'node:fs';",
+    `import { withPrLock } from ${JSON.stringify(lib)};`,
+    'const [root, log, id] = process.argv.slice(2);',
+    'const until = Date.now() + 3000;',
+    'let held = 0;',
+    'while (Date.now() < until) {',
+    '  try {',
+    '    withPrLock(root, "7", () => {',
+    '      fs.appendFileSync(log, "E " + id + "\\n");',
+    '      const t = Date.now() + 15; while (Date.now() < t) {}',
+    '      fs.appendFileSync(log, "X " + id + "\\n");',
+    '      held++;',
+    '    });',
+    '  } catch (e) { if (e.code !== "EK_LOCK_BUSY" && e.code !== "EK_LOCK_CONTENDED") throw e; }',
+    '  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);',
+    '}',
+    'process.stdout.write(String(held));',
+  ].join('\n'));
+  // 0.9.x 的目录锁：mkdir 建 lock、里面 owner.json；失效 = pid 已不在，或没写成 owner.json 且目录超过 10 分钟；回收用同级 reclaim 目录互斥
+  const oldWorker = path.join(dir, 'old.mjs');
+  fs.writeFileSync(oldWorker, [
+    "import fs from 'node:fs';",
+    "import path from 'node:path';",
+    'const [common, log, id] = process.argv.slice(2);',
+    "const base = path.join(common, 'engineering-gate', 'pr', '7');",
+    "const lock = path.join(base, 'lock');",
+    "const reclaim = path.join(base, 'reclaim');",
+    'const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } };',
+    'const stale = () => {',
+    '  try { return !alive(JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")).pid); }',
+    '  catch { try { return Date.now() - fs.statSync(lock).mtimeMs > 600000; } catch { return false; } }',
+    '};',
+    'function acquire() {',
+    '  fs.mkdirSync(base, { recursive: true });',
+    '  for (let i = 0; i < 2; i++) {',
+    '    try {',
+    '      fs.mkdirSync(lock);',
+    '      fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token: id }));',
+    '      return true;',
+    '    } catch (e) { if (e.code !== "EEXIST") throw e; }',
+    '    if (!stale()) return false;',
+    '    try { fs.mkdirSync(reclaim); } catch (e) { if (e.code === "EEXIST") return false; throw e; }',
+    '    try { if (stale()) fs.rmSync(lock, { recursive: true, force: true }); } finally { fs.rmSync(reclaim, { recursive: true, force: true }); }',
+    '  }',
+    '  return false;',
+    '}',
+    'const until = Date.now() + 3000;',
+    'let held = 0;',
+    'while (Date.now() < until) {',
+    '  if (acquire()) {',
+    '    fs.appendFileSync(log, "E " + id + "\\n");',
+    '    const t = Date.now() + 15; while (Date.now() < t) {}',
+    '    fs.appendFileSync(log, "X " + id + "\\n");',
+    '    held++;',
+    '    fs.rmSync(lock, { recursive: true, force: true });',
+    '  }',
+    '  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);',
+    '}',
+    'process.stdout.write(String(held));',
+  ].join('\n'));
+  const jobs = [[newWorker, root, 'n0'], [newWorker, root, 'n1'], [oldWorker, common, 'o0'], [oldWorker, common, 'o1']];
+  const runs = await Promise.all(jobs.map(([script, where, id]) => new Promise((resolve) => {
+    const p = spawn(process.execPath, [script, where, log, id]);
+    let out = '';
+    let err = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.stderr.on('data', (d) => { err += d; });
+    p.on('close', (code) => resolve({ code, out, err }));
+  })));
+  for (const r of runs) assert.equal(r.code, 0, r.err);
+  assert.ok(runs.reduce((n, r) => n + Number(r.out), 0) > 0, '至少有一次取到锁');
+  let inside = null;
+  for (const line of fs.readFileSync(log, 'utf8').split('\n').filter(Boolean)) {
+    const [op, id] = line.split(' ');
+    if (op === 'E') { assert.equal(inside, null, `进程 ${id} 进入时 ${inside} 还在临界区里`); inside = id; }
+    else { assert.equal(inside, id); inside = null; }
+  }
+  assert.equal(lockRef(root, 'pr-7'), '', '全部结束后引用锁已释放');
+});
+
+// ---------- 0.10.1：pre-push 登记从被审提交取快照（代码 M1） ----------
+
+const Y_BODY = `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`;
+const X_BODY = `${SRC_HEADER}export function dedup(items: string[]) {\n  return items;\n}\n`;
+const TEST_BODY = "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n";
+/** pre-push 仓库：提交 Y（改了源码和测试），返回 { root, y, fork }；工作区干净。 */
+function snapshotRepo() {
+  const root = featureRepo({ reviewMinChars: 0 });
+  write(root, 'src/dedup.ts', Y_BODY);
+  write(root, 'test/dedup.test.ts', TEST_BODY);
+  commitAll(root, 'Y');
+  return { root, y: git(root, ['rev-parse', 'HEAD']).trim(), fork: git(root, ['merge-base', 'main', 'HEAD']).trim() };
+}
+
+test('S1 pre-push：提交 Y 之后工作区文件改成 X 并用 assume-unchanged 藏起来，对 X 跑闸门得到测试记录；登记被审提交 Y 的 pass 被拒（测试记录与被审提交不一致），不写 review.json（0.10.1 代码 M1）', () => {
+  const { root, y, fork } = snapshotRepo();
+  write(root, 'src/dedup.ts', X_BODY);
+  git(root, ['update-index', '--assume-unchanged', 'src/dedup.ts']);
+  assert.equal(git(root, ['status', '--porcelain']).trim(), '', 'git status 看不出工作区被改过');
+  const g = runGate({ root });
+  assert.equal(g.ok, true, JSON.stringify(g.problems ?? g.messages ?? g));
+  const r = prePush(root, reviewData({ reviewedCommit: y, reviewedBase: fork }));
+  assert.equal(r.ok, false, '测试记录是对 X 跑的，不是被审的 Y');
+  assert.match(r.message, /测试记录/);
+  assert.equal(readRecord(root, 'review.json'), null, '拒绝时不写记录');
+});
+
+test('S2 恢复文件、去掉 assume-unchanged，对 Y 跑闸门后登记成功；记录的树哈希与文档哈希等于 treeHashAt(root, Y, 范围)（0.10.1 代码 M1）', () => {
+  const { root, y, fork } = snapshotRepo();
+  write(root, 'src/dedup.ts', X_BODY);
+  git(root, ['update-index', '--assume-unchanged', 'src/dedup.ts']);
+  write(root, 'src/dedup.ts', Y_BODY);
+  git(root, ['update-index', '--no-assume-unchanged', 'src/dedup.ts']);
+  assert.equal(git(root, ['status', '--porcelain']).trim(), '');
+  assert.equal(runGate({ root }).ok, true);
+  const r = prePush(root, reviewData({ reviewedCommit: y, reviewedBase: fork }));
+  assert.equal(r.ok, true, r.message);
+  assert.equal(typeof LIB.treeHashAt, 'function', 'lib.mjs 应导出 treeHashAt');
+  const { scope, docs } = gateScope(root, loadConfig(root));
+  const rec = readRecord(root, 'review.json');
+  assert.equal(rec.treeHash, LIB.treeHashAt(root, y, scope));
+  assert.equal(rec.docHash, LIB.treeHashAt(root, y, docs));
+});
+
+test('S3 treeHashAt(root, rev, files) 与干净工作区上的 treeHash 相同；含被删除或 rev 里没有的文件时同样相同（记为 deleted）（0.10.1 代码 M1）', () => {
+  assert.equal(typeof LIB.treeHashAt, 'function', 'lib.mjs 应导出 treeHashAt');
+  const { root } = snapshotRepo();
+  const files = ['src/dedup.ts', 'test/dedup.test.ts'];
+  assert.equal(LIB.treeHashAt(root, 'HEAD', files), treeHash(root, files));
+  assert.notEqual(LIB.treeHashAt(root, 'main', files), LIB.treeHashAt(root, 'HEAD', files), '不同的提交内容不同');
+  git(root, ['rm', '-q', '-f', 'src/dedup.ts']);
+  commitAll(root, 'drop');
+  assert.equal(LIB.treeHashAt(root, 'HEAD', files), treeHash(root, files), '已删除的文件');
+  assert.equal(LIB.treeHashAt(root, 'HEAD', ['no/such.ts']), treeHash(root, ['no/such.ts']), 'rev 里没有的文件');
+});
+
+test('S4 不给被审范围的 pre-push 登记行为不变：仍用工作区（未提交的改动也按工作区算）（0.10.1 代码 M1）', () => {
+  const root = prePushRepo();
+  const r = prePush(root, reviewData());
+  assert.equal(r.ok, true, r.message);
+  const { scope } = gateScope(root, loadConfig(root));
+  assert.equal(readRecord(root, 'review.json').treeHash, treeHash(root, scope));
 });

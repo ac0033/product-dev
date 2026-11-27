@@ -358,6 +358,22 @@ export function gateScope(root, config) {
   return { baseRev: rev, changed, reviewIgnore, scope, docs };
 }
 
+/**
+ * 某个提交上的闸门范围：与 gateScope 同一口径（基准提交同为 baseRevision），只是改动取基准提交到该提交的差异，不看工作区。
+ * 给了被审范围的复审登记用它：绑定的内容来自不可变的提交，与工作区在两次读取之间的变化无关。读不出差异时抛错。
+ */
+export function gateScopeAt(root, config, commit) {
+  assertPolicy(config);
+  const { rev } = baseRevision(root, config.base);
+  const r = diffNames(root, [rev, commit]);
+  if (!r.ok) throw new Error(`无法读取基准提交到 ${String(commit).slice(0, 12)} 的差异：${r.err.trim()}`);
+  const { reviewIgnore } = config;
+  const changed = r.files;
+  const scope = changed.filter((f) => !isIgnoredDoc(f, reviewIgnore, config.riskRegister));
+  const docs = changed.filter((f) => isIgnoredDoc(f, reviewIgnore, config.riskRegister));
+  return { baseRev: rev, changed, reviewIgnore, scope, docs };
+}
+
 /** 参与闸门记录绑定的文件：gateScope 的 scope（纯文档改动不使记录失效）。 */
 export function scopeFiles(root, config) {
   return gateScope(root, config).scope;
@@ -445,6 +461,28 @@ export function hashOfFiles(map) {
  */
 export function treeHash(root, files) {
   return hashOfFiles(fileHashes(root, files));
+}
+
+/**
+ * 某个提交里这些文件的代码树哈希，口径同 treeHash：提交里的对象名就是 git add 清洗后的内容摘要（与 hash-object 相同），
+ * 子模块记 gitlink:<提交号>，提交里没有的记 deleted。所以干净工作区上两者相等。读不出提交的树时抛错。
+ */
+export function treeHashAt(root, rev, files) {
+  const r = git(root, ['ls-tree', '-r', '-z', '--full-tree', rev]);
+  if (!r.ok) throw new Error(`无法读取提交 ${String(rev).slice(0, 12)} 的树：${r.err.trim()}`);
+  const entries = new Map();
+  for (const row of r.out.split('\0')) {
+    const m = /^(\d+) (\w+) ([0-9a-f]+)\t(.+)$/s.exec(row);
+    if (m) entries.set(m[4], m[1] === '160000' ? `gitlink:${m[3]}` : m[3]);
+  }
+  const out = {};
+  for (const f of [...new Set(files)].sort()) out[f] = entries.get(f) ?? 'deleted';
+  return hashOfFiles(out);
+}
+
+/** 某个提交上的项目配置（展开后）；该提交上没有配置文件时返回 null，不合法时抛错。 */
+export function configAtRev(root, rev) {
+  return configAt(root, rev, `提交 ${String(rev).slice(0, 12)} `);
 }
 
 /** 记录目录：当前工作树自己的 git 目录下的 engineering-gate/（多个工作树各用各的，不互相覆盖）。 */
@@ -633,55 +671,163 @@ export function forkPoint(root, baseRef, commit) {
   return r.ok ? r.out.trim() : null;
 }
 
+/** 取锁的默认参数：staleMs 之后仍在的 git 引用锁文件当作异常退出的残留回收；retryMs 内对暂态争用重试。 */
+export const LOCK_DEFAULTS = { staleMs: 30000, retryMs: 3000 };
+/** git 自己等待引用锁文件的时间（core.filesRefLockTimeout）：另一个 git 进程正在改同一个引用（几毫秒）时由 git 等过去。 */
+const GIT_REF_LOCK_WAIT_MS = 200;
+
+const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const lockError = (code, message) => Object.assign(new Error(message), { code });
+
 /**
- * 互斥锁（不等待，被占用就报错）。用 git 引用的比较交换实现：`git update-ref <引用> <新值> <旧值>` 在 git 自己的独占锁文件下核对旧值再改，是原子的。
- * 引用 refs/engineering-gate/locks/<name> 指向一个记着持有者（pid、开始时间、随机令牌）的对象；引用在仓库的公共目录里，各工作树共用。
- * 取锁：引用不存在时创建（旧值写空，已存在就失败）；存在而持有者进程已不在时，从判定失效的那个对象比较交换成自己的，期间别人先换掉了就失败。
- * 所以回收只替换判定失效的那一代，不会删掉后继持有者的锁。持有者还活着、或持有者信息读不出时报占用（读不出的要人确认后手动删）。
- * 释放：只在引用仍指向自己的对象时删除。持锁多久都不回收活着的持有者（慢请求、进程暂停）。
+ * 回收一个已判定为残留的 git 引用锁文件。同一个残留文件（按设备、inode、创建时间、修改时间、大小认定）只允许一个进程回收：
+ * 先在公共目录的 lock-recovery/ 下独占创建以这个身份命名的标记，抢到标记的才改名移走再删除。git 自己独占创建引用锁文件，
+ * 残留文件在被移走前不会有新的锁文件出现，所以移走的就是判定过的那一个，不会删掉活跃 git 进程的锁。返回是否回收。
  */
-export function withLock(root, name, fn, label = `锁 ${name}`) {
+function recoverStaleRefLock(common, gitLock, stat) {
+  const dir = path.join(common, 'engineering-gate', 'lock-recovery');
+  fs.mkdirSync(dir, { recursive: true });
+  const id = crypto.createHash('sha256').update([stat.dev, stat.ino, stat.birthtimeNs, stat.mtimeNs, stat.size, gitLock].join(':')).digest('hex').slice(0, 32);
+  try { fs.writeFileSync(path.join(dir, id), JSON.stringify({ pid: process.pid, file: gitLock, at: new Date().toISOString() }), { flag: 'wx' }); }
+  catch (e) { if (e.code === 'EEXIST') return false; throw e; }
+  const tomb = `${gitLock}.stale-${crypto.randomUUID()}`;
+  try { fs.renameSync(gitLock, tomb); }
+  catch (e) { if (e.code === 'ENOENT') return false; throw e; }
+  fs.rmSync(tomb, { force: true });
+  process.stderr.write(`提示：回收了 git 的残留引用锁文件 ${gitLock}（判定为 git 进程异常退出留下的）\n`);
+  // 一小时以前的标记不会再被用到（它们对应的文件早已移走），顺手清掉
+  for (const name of fs.readdirSync(dir)) {
+    const p = path.join(dir, name);
+    try { if (Date.now() - fs.statSync(p).mtimeMs > 3600000) fs.rmSync(p, { force: true }); } catch { /* 别的进程同时在清 */ }
+  }
+  return true;
+}
+
+/**
+ * 互斥锁（不等待活着的持有者，被占用就报错）。用 git 引用的比较交换实现：`git update-ref <引用> <新值> <旧值>` 在 git 自己的独占锁文件下核对旧值再改，是原子的。
+ * 引用 refs/engineering-gate/locks/<name> 指向一个记着持有者（pid、开始时间、随机令牌）的对象；引用在仓库的公共目录里，各工作树共用。
+ * 取锁：引用不存在时创建（旧值写空）；存在而持有者进程已不在时，从判定失效的那个对象比较交换成自己的。换成之后再读一次，引用确实指向自己的对象才算取到。
+ * 拿不到时的错误带 code，调用方按它区分：
+ *   EK_LOCK_BUSY       持有者还活着（持锁多久都不回收：慢请求、进程暂停）
+ *   EK_LOCK_BROKEN     持有者信息读不出，要人确认后手动删除引用
+ *   EK_LOCK_CONTENDED  retryMs 内一直没换成：别的 git 进程正在改这个引用，或 git 的引用锁文件 <引用>.lock 还不到 staleMs。
+ *                      正常争用先由 git 自己等（core.filesRefLockTimeout），再由这里有界重试；超过 staleMs 的锁文件按残留回收后重试。
+ * 释放：只在引用仍指向自己的对象时删除，失败时有界重试；仍失败写警告（进程退出后这把锁可以按“持有者已不在”回收），不改变 fn 的结果。
+ * opts：{ staleMs, retryMs }，缺省见 LOCK_DEFAULTS。
+ */
+export function withLock(root, name, fn, label = `锁 ${name}`, opts = {}) {
+  const { staleMs, retryMs } = { ...LOCK_DEFAULTS, ...opts };
   const ref = `refs/engineering-gate/locks/${name}`;
   const run = (args, input) => spawnSync('git', args, { cwd: root, encoding: 'utf8', input });
-  const me = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token: crypto.randomUUID() });
-  const made = run(['hash-object', '-w', '--stdin'], me);
+  const update = (args) => run(['-c', `core.filesRefLockTimeout=${GIT_REF_LOCK_WAIT_MS}`, 'update-ref', ...args]);
+  const read = () => run(['rev-parse', '--verify', '--quiet', ref]).stdout?.trim() ?? '';
+  const made = run(['hash-object', '-w', '--stdin'], JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token: crypto.randomUUID() }));
   if (made.status !== 0) throw new Error(`${label}：写不出持有者信息（git hash-object 失败）：${String(made.stderr).trim()}`);
   const mine = made.stdout.trim();
   const holder = (sha) => (sha ? run(['cat-file', '-p', sha]).stdout ?? '' : '');
-  const current = run(['rev-parse', '--verify', '--quiet', ref]).stdout.trim();
-  let expected = '';
-  if (current) {
-    const text = holder(current);
-    let pid = null;
-    try { pid = JSON.parse(text).pid; } catch { pid = null; }
-    if (!Number.isInteger(pid)) throw new Error(`${label}被占用：持有者信息读不出（${ref}）；确认没有进程在用后运行 git update-ref -d ${ref} 删除`);
-    if (!ownerGone(text)) throw new Error(`${label}被占用：${text.trim()}`);
-    expected = current;
-  }
-  const swapped = run(['update-ref', ref, mine, expected]);
-  if (swapped.status !== 0) {
-    // git 改引用时自己先独占建 <引用>.lock；上次 git 进程异常退出会留下它，之后的比较交换都会失败，和“有人持锁”不是一回事
-    const common = run(['rev-parse', '--git-common-dir']).stdout.trim();
-    const gitLock = common ? path.join(path.resolve(root, common), ...ref.split('/')) + '.lock' : null;
-    if (gitLock && fs.existsSync(gitLock)) {
-      throw new Error(`${label}暂时取不到：git 的引用锁文件 ${gitLock} 残留（另一个 git 进程正在改这个引用，或上次异常退出）；确认没有 git 进程在运行后删除它再重试`);
+  const common = path.resolve(root, run(['rev-parse', '--git-common-dir']).stdout.trim());
+  const gitLock = path.join(common, ...ref.split('/')) + '.lock';
+
+  /** 比较交换没成时，判断 git 的引用锁文件：残留的回收并返回 null（立即重试），否则返回说明。 */
+  const blocked = (stderr) => {
+    const stat = fs.statSync(gitLock, { throwIfNoEntry: false, bigint: true });
+    if (!stat) return String(stderr ?? '').trim() || '引用在比较交换时被别的进程改动';
+    const age = Date.now() - Number(stat.mtimeMs);
+    if (age >= staleMs) {
+      if (recoverStaleRefLock(common, gitLock, stat)) return null;
+      return `git 的引用锁文件 ${gitLock} 是残留，另一个进程正在回收它（回收中断时标记留在 ${path.join(common, 'engineering-gate', 'lock-recovery')}：确认没有进程在用后删除该锁文件）`;
     }
-    const now = run(['rev-parse', '--verify', '--quiet', ref]).stdout.trim();
-    throw new Error(`${label}被占用：${holder(now).trim() || String(swapped.stderr).trim()}`);
+    return `git 的引用锁文件 ${gitLock} 已存在 ${Math.round(age / 1000)} 秒（另一个 git 进程正在改这个引用；超过 ${Math.round(staleMs / 1000)} 秒仍在的按异常退出的残留自动回收）`;
+  };
+
+  const deadline = Date.now() + retryMs;
+  for (;;) {
+    const current = read();
+    if (current === mine) break;
+    let expected = '';
+    if (current) {
+      const text = holder(current);
+      let pid = null;
+      try { pid = JSON.parse(text).pid; } catch { pid = null; }
+      if (!Number.isInteger(pid)) throw lockError('EK_LOCK_BROKEN', `${label}被占用：持有者信息读不出（${ref}）；确认没有进程在用后运行 git update-ref -d ${ref} 删除`);
+      if (!ownerGone(text)) throw lockError('EK_LOCK_BUSY', `${label}被占用：${text.trim()}`);
+      expected = current;
+    }
+    const swapped = update([ref, mine, expected]);
+    if (swapped.status === 0 && read() === mine) break;
+    const why = swapped.status === 0 ? '比较交换后引用不是自己的对象' : blocked(swapped.stderr);
+    if (why === null) continue;
+    if (Date.now() >= deadline) throw lockError('EK_LOCK_CONTENDED', `${label}暂时取不到：${why}；稍后重试`);
+    sleepMs(20 + Math.floor(Math.random() * 40));
   }
   try {
     return fn();
   } finally {
-    const released = run(['update-ref', '-d', ref, mine]);
-    if (released.status !== 0) {
-      process.stderr.write(`警告：${label}没有释放（${ref}）：${String(released.stderr).trim()}；确认没有进程在用后运行 git update-ref -d ${ref}\n`);
+    const until = Date.now() + retryMs;
+    let why = '';
+    for (;;) {
+      const released = update(['-d', ref, mine]);
+      if (released.status === 0) { why = ''; break; }
+      if (read() !== mine) { why = `引用已不指向自己的对象：${String(released.stderr).trim()}`; break; }
+      why = blocked(released.stderr);
+      if (why === null) continue;
+      if (Date.now() >= until) break;
+      sleepMs(20 + Math.floor(Math.random() * 40));
     }
+    if (why) process.stderr.write(`警告：${label}没有释放（${ref}）：${why}；本进程退出后它会按“持有者已不在”被回收，急用时确认没有进程在用后运行 git update-ref -d ${ref}\n`);
   }
 }
 
-/** 序列化同一 PR 的同步登记、收口与合并核对（各工作树共用同一把锁）。 */
-export function withPrLock(root, pr, fn) {
+/**
+ * 0.9.x 及更早版本的 PR 锁：目录 <git 公共目录>/engineering-gate/pr/<编号>/lock（mkdir 建，owner.json 记持有者）。
+ * 升级期间同一仓库的不同工作树可能装着新旧两个版本：新版取到引用锁后再按旧版同样的算法取这个目录锁，两边才互斥。
+ * 失效判定与回收照抄旧版：持有者进程已不在，或没写成 owner.json 且超过十分钟；回收用同级 reclaim 目录互斥。
+ */
+function withLegacyPrDirLock(root, no, fn, label) {
+  const parent = path.dirname(prLogFile(root, no));
+  const lock = path.join(parent, 'lock');
+  const ownerFile = path.join(lock, 'owner.json');
+  const owner = () => {
+    try { return fs.readFileSync(ownerFile, 'utf8'); }
+    catch (e) { if (e.code !== 'ENOENT') throw e; return ''; }
+  };
+  const stale = () => {
+    const stat = fs.statSync(lock, { throwIfNoEntry: false });
+    if (!stat) return false;
+    const text = owner();
+    let pid = null;
+    try { pid = JSON.parse(text).pid; } catch { pid = null; }
+    if (Number.isInteger(pid)) return ownerGone(text);
+    return Date.now() - stat.mtimeMs > 600000;
+  };
+  const occupied = () => lockError('EK_LOCK_BUSY', `${label}被占用（旧版套件的目录锁 ${lock}）：${owner().trim() || '持有者信息还没写成'}`);
+  try {
+    fs.mkdirSync(lock);
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    if (!stale()) throw occupied();
+    const reclaim = path.join(parent, 'reclaim');
+    try { fs.mkdirSync(reclaim); }
+    catch (err) { if (err.code === 'EEXIST') throw occupied(); throw err; }
+    try {
+      if (stale()) fs.rmSync(lock, { recursive: true });
+      try { fs.mkdirSync(lock); }
+      catch (err) { if (err.code === 'EEXIST') throw occupied(); throw err; }
+    } finally { fs.rmdirSync(reclaim); }
+  }
+  const identity = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token: crypto.randomUUID() });
+  try {
+    fs.writeFileSync(ownerFile, identity);
+    return fn();
+  } finally {
+    if (!owner() || owner() === identity) fs.rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+/** 序列化同一 PR 的同步登记、收口与合并核对（各工作树共用同一把锁；与旧版套件的目录锁同时持有）。opts 同 withLock。 */
+export function withPrLock(root, pr, fn, opts = {}) {
   const no = prNumber(pr);
   fs.mkdirSync(path.dirname(prLogFile(root, no)), { recursive: true });
-  return withLock(root, `pr-${no}`, fn, `PR #${pr} 的登记锁`);
+  const label = `PR #${pr} 的登记锁`;
+  return withLock(root, `pr-${no}`, () => withLegacyPrDirLock(root, no, fn, label), label, opts);
 }
