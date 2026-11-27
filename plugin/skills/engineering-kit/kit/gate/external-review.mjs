@@ -35,7 +35,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { baseRevision, defaultGh, EMPTY_TREE, forkPoint, git, isMain, loadConfig, prLogFile, prNumber, readPr, repoRoot } from './lib.mjs';
 import { EXTERNAL_REVIEWER_PREFIX, prRoundState, readFailureFindings, readLog, recordReview } from './review.mjs';
-import { FINAL_ROUND_TEXT, admitRegistration } from './review-rounds.mjs';
+import { FINAL_ROUND_TEXT, admitRegistration, finalRoundTarget } from './review-rounds.mjs';
 
 import { DISPOSITIONS, GAP_ITEMS, GAP_STATUSES, MAX_REVIEW_BYTES, REVIEW_FORMAT, SEVERITIES, SEVERITY_PREFIX, canonicalJson, fingerprint, isSerious, previousFail, renderReport, reviewedHeadProblem, validateReviewData, verdictOf } from './review-data.mjs';
 
@@ -757,6 +757,25 @@ function makeRunDir(root, outDir, headSha) {
   return dir;
 }
 
+/** 运行结果的目录名（运行目录下）：判定、数据、指纹和报告整组放在这里，由 publishResult 一次发布。 */
+export const RESULT_DIR = 'result';
+
+/**
+ * 把一组结果文件发布为 <运行目录>/result/：先全部写进运行目录下的暂存目录，再用一次目录改名发布（唯一的提交点）。
+ * 改名前被终止的，运行目录里只有暂存目录，没有 result/；改名失败时删掉暂存目录后抛错。
+ */
+function publishResult(runDir, files) {
+  const staged = path.join(runDir, `.staged-${crypto.randomUUID()}`);
+  fs.mkdirSync(staged, { mode: 0o700 });
+  try {
+    for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(staged, name), text, { flag: 'wx' });
+    fs.renameSync(staged, path.join(runDir, RESULT_DIR));
+  } catch (e) {
+    fs.rmSync(staged, { recursive: true, force: true });
+    throw e;
+  }
+}
+
 /** 解析执行器的标准输出：去掉首尾空白后必须整体是一个 JSON 对象。返回 { result, problems }。 */
 function parseResult(stdout) {
   let result = null;
@@ -836,7 +855,8 @@ export async function runExternalReview(opts) {
   const followup = config.reviewFlow === 'pr' && round === 'followup';
   const history = closureEnabled || followup ? readLog(prLogFile(root, prNumber(pr))) : [];
   const state = closureEnabled ? prRoundState(config, history) : null;
-  if (state && ['close-only', 'stop'].includes(state.phase)) {
+  // 启动执行器之前按登记同样的准入核对（各阶段都核对）：这次复审跑完不能登记的，不启动、不建运行目录
+  if (state) {
     const blocked = admitRegistration(state, { kind, verdict: 'pass', head: headSha, userDecision: opts.userDecision });
     if (blocked) throw new Error(blocked);
   }
@@ -851,7 +871,7 @@ export async function runExternalReview(opts) {
   }
   const { request } = buildRequest({ root, baseSha, headSha, kind, round, risk, priorFindings: prior.findings, priorFailSha: prior.sha, model, limits, extraExclude: policy.exclude, contextText: opts.contextText ?? null, priorReport: opts.priorReport ?? null });
   // 最后一轮：final-next 阶段还没定提交时的新提交，或已绑定的最后一轮提交上的任何一种审查（第一份已登记为不通过、阶段转为收齐前时也一样）
-  if (state && ((state.phase === 'final-next' && !state.finalHead) || (state.finalHead && state.finalHead === headSha))) {
+  if (state && finalRoundTarget(state, headSha)) {
     request.review.finalRound = true;
     request.context.instructions += '\n' + FINAL_ROUND_TEXT;
   }
@@ -910,28 +930,23 @@ export async function runExternalReview(opts) {
     if (round === 'first' && baseSha !== fork) notes.push(`首轮用 --base 收窄了被审范围：基准 ${baseSha}，分叉点 ${fork ?? '未知'}，范围之外的改动未经本次复审`);
     const assessment = assess({ result, problems, request, integrity, config, notes });
     const meta = { reviewer, inputHash, durationMs: proc.durationMs, usageLine: usageLine(result?.usage), pr: pr === undefined ? null : String(pr) };
-    const reportPath = path.join(runDir, 'report.md');
+    const resultDir = path.join(runDir, RESULT_DIR);
+    const reportPath = path.join(resultDir, 'report.md');
     let reviewData;
-    let report = null;
+    const files = {};
     if (assessment.registrable) {
       reviewData = toReviewData({ request, result, assessmentNotes: assessment.notes });
       assessment.dataSha = fingerprint(reviewData);
-      report = renderReport(reviewData, { reviewer, model: result.provenance.actualModel, keyword: config.reviewKeyword, fingerprint: assessment.dataSha,
+      files['review.json'] = canonicalJson(reviewData);
+      files['review.sha256'] = assessment.dataSha + '\n';
+      files['report.md'] = renderReport(reviewData, { reviewer, model: result.provenance.actualModel, keyword: config.reviewKeyword, fingerprint: assessment.dataSha,
         extraLines: [`请求模型：${model.id}（来源 ${model.source}，由 ${model.chosenBy} 选择${model.reason ? `；依据：${model.reason}` : ''}）`, `推理强度：${model.effort ?? '执行器默认'}`, `用量：${meta.usageLine}`, `输入哈希：${inputHash}`, ...(request.review.finalRound ? ['最后一轮复审'] : [])] });
-      fs.writeFileSync(path.join(runDir, 'review.json'), canonicalJson(reviewData), { flag: 'wx' });
-      fs.writeFileSync(path.join(runDir, 'review.sha256'), assessment.dataSha + '\n', { flag: 'wx' });
     }
-    // 产物顺序：数据、报告（先写完整的暂存文件再改名），最后才是判定文件；判定写明可登记时，其余产物都已就位。
-    // 中途失败由下面的 catch 撤下本次发布的报告，并写一份不可登记的判定
-    if (report !== null) {
-      const staged = `${reportPath}.${crypto.randomUUID()}.tmp`;
-      try {
-        fs.writeFileSync(staged, report, { flag: 'wx' });
-        fs.renameSync(staged, reportPath);
-        published = reportPath;
-      } finally { fs.rmSync(staged, { force: true }); }
-    }
-    fs.writeFileSync(path.join(runDir, 'assessment.json'), JSON.stringify({ assessment, integrity, copied, meta, provenance: result?.provenance ?? null, usage: result?.usage ?? null }, null, 2) + '\n', { flag: 'wx' });
+    files['assessment.json'] = JSON.stringify({ assessment, integrity, copied, meta, provenance: result?.provenance ?? null, usage: result?.usage ?? null }, null, 2) + '\n';
+    // 整组产物（数据、指纹、报告、判定）先写进暂存目录，再一次改名为 result/ 发布：这是唯一的提交点，
+    // 进程在任何时刻被终止，看到的要么没有 result/，要么是完整的一组
+    publishResult(runDir, files);
+    published = { assessment, reportPath: assessment.registrable ? reportPath : null, command: registerCommand(runDir, pr) };
     const base = { runDir, result, assessment, reportPath: null, registration: null };
     if (!assessment.registrable) {
       return { ...base, ok: false, message: [`外部复审没有产生可登记的报告（运行记录：${runDir}）：`, ...assessment.reasons].join('\n') };
@@ -957,15 +972,16 @@ export async function runExternalReview(opts) {
       const note = removeCopy(copy, runDir, identity);
       if (note) reasons.push(note);
     }
+    // 结果已经发布（提交点之后出错）：磁盘上的那组结果不变，返回值也照它报告，只另外说明后续步骤失败、怎样补登
     if (published) {
-      try { fs.rmSync(published, { force: true }); }
-      catch (err) { reasons.push(`已发布的报告没能撤下（${err.message}），残留在 ${published}；它不对应可登记的结果，请手动删除`); }
+      if (published.assessment.registrable) reasons.push(`结果已发布在 ${path.join(runDir, RESULT_DIR)}，可以补登，不必重跑模型：${published.command}`);
+      return { ok: false, runDir, assessment: published.assessment, reportPath: published.reportPath, registration: null, published: true, message: reasons.join('\n') };
     }
+    // 尚未发布：发布一份只含不可登记判定的结果，这一步也失败时如实写明
     const assessment = { registrable: false, verdict: null, reasons, notes: [] };
-    const failure = path.join(runDir, 'assessment-' + crypto.randomUUID() + '.tmp');
-    fs.writeFileSync(failure, JSON.stringify({ assessment }, null, 2) + '\n', { flag: 'wx' });
-    fs.renameSync(failure, path.join(runDir, 'assessment.json'));
-    return { ok: false, runDir, assessment, reportPath: null, registration: null, message: reasons.join('\n') };
+    try { publishResult(runDir, { 'assessment.json': JSON.stringify({ assessment }, null, 2) + '\n' }); }
+    catch (err) { reasons.push(`不可登记的判定也没能发布（${err.message}）：运行目录里没有 ${RESULT_DIR}/，这次运行不能补登`); }
+    return { ok: false, runDir, assessment, reportPath: null, registration: null, published: false, message: reasons.join('\n') };
   }
 }
 
@@ -1013,11 +1029,13 @@ export function registerReport({ root, headSha, kind, verdict, reviewer, reviewD
 export function registerRun({ root, runDir, pr, summary, gh = defaultGh, userDecision, evidenceChecked, accept = false }) {
   const dir = path.resolve(runDir);
   if (inside(root, dir)) return { ok: false, message: `运行目录 ${dir} 在仓库里，不是外部复审的运行目录` };
-  const read = (f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+  // 结果在 result/ 下（0.10.1 起整组原子发布）；0.10.0 及更早的运行目录没有 result/，结果文件在根下
+  const resultDir = fs.existsSync(path.join(dir, RESULT_DIR)) || !fs.existsSync(path.join(dir, 'assessment.json')) ? path.join(dir, RESULT_DIR) : dir;
+  const read = (f, at = resultDir) => JSON.parse(fs.readFileSync(path.join(at, f), 'utf8'));
   let request;
   let saved;
   try {
-    request = read('request.json');
+    request = read('request.json', dir);
     saved = read('assessment.json');
   } catch (e) {
     return { ok: false, message: `读不到运行目录里的 request.json 或 assessment.json：${e.message}` };
@@ -1026,14 +1044,14 @@ export function registerRun({ root, runDir, pr, summary, gh = defaultGh, userDec
   let reviewData;
   try {
     // 只读一次原始字节；对同一快照做指纹核对、解析和登记。
-    const dataFile = path.join(dir, 'review.json');
+    const dataFile = path.join(resultDir, 'review.json');
     if (fs.statSync(dataFile).size > MAX_REVIEW_BYTES) throw new Error('复审数据超过 512 KiB');
     const bytes = fs.readFileSync(dataFile);
     if (bytes.length > MAX_REVIEW_BYTES) throw new Error('复审数据超过 512 KiB');
     const actual = sha256(bytes);
-    const digest = (name) => fs.readFileSync(path.join(dir, name), 'utf8').trim().split(/\s+/)[0];
+    const digest = (name, at = resultDir) => fs.readFileSync(path.join(at, name), 'utf8').trim().split(/\s+/)[0];
     const hash = sha256(JSON.stringify(request));
-    if (digest('input.sha256') !== hash || saved.meta?.inputHash !== hash) throw new Error('request.json 与 input.sha256 或登记的输入哈希不符');
+    if (digest('input.sha256', dir) !== hash || saved.meta?.inputHash !== hash) throw new Error('request.json 与 input.sha256 或登记的输入哈希不符');
     if (digest('review.sha256') !== actual || saved.assessment.dataSha !== actual) throw new Error('review.json 与 review.sha256 或登记的数据指纹不符');
     reviewData = JSON.parse(bytes);
     if (reviewData.reviewedCommit !== request.target.headSha || reviewData.reviewedBase !== request.target.baseSha || reviewData.risk !== request.review.risk) throw new Error('被审范围或风险档位与 request.json 不符');

@@ -159,14 +159,14 @@ async function run(root, head, mode, extra = {}) {
 
 /** 运行目录里的数据与产物（协议 2：闸门只读 review.json；report.md 是程序生成、给人读的）。 */
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
-const jsonOf = (res) => path.join(res.runDir, 'review.json');
+const jsonOf = (res) => path.join(res.runDir, 'result', 'review.json');
 const dataOf = (res) => readJson(jsonOf(res));
-const savedOf = (res) => readJson(path.join(res.runDir, 'assessment.json'));
+const savedOf = (res) => readJson(path.join(res.runDir, 'result', 'assessment.json'));
 const sha256Of = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 /** review.sha256 里记的指纹（文件内容的第一段）。 */
-const shaFileOf = (res) => fs.readFileSync(path.join(res.runDir, 'review.sha256'), 'utf8').trim().split(/[ ]+/)[0];
+const shaFileOf = (res) => fs.readFileSync(path.join(res.runDir, 'result', 'review.sha256'), 'utf8').trim().split(/[ ]+/)[0];
 /** 报告、数据、评估三份文件的全部文字：断言“报告里写明了什么”时不绑定具体写在哪一份里。 */
-const shown = (res) => [res.reportPath, jsonOf(res), path.join(res.runDir, 'assessment.json')].filter((f) => f && fs.existsSync(f)).map((f) => fs.readFileSync(f, 'utf8')).join('\n');
+const shown = (res) => [res.reportPath, jsonOf(res), path.join(res.runDir, 'result', 'assessment.json')].filter((f) => f && fs.existsSync(f)).map((f) => fs.readFileSync(f, 'utf8')).join('\n');
 /** assessment.json 里的可登记标记、原因与数据指纹（容忍写在 assessment 层还是顶层）。 */
 const registrableOf = (saved) => saved.assessment?.registrable ?? saved.registrable;
 const reasonsOf = (saved) => (saved.assessment?.reasons ?? saved.reasons ?? []).join('\n');
@@ -761,7 +761,7 @@ test('L-f 补登：运行目录里的任务被改过（被审提交、哈希对�
 test('P-c 补登：assessment.json 里的复审者不是 external: 开头时拒绝', async () => {
   const { root, head } = repo();
   const res = await run(root, head, 'pass');
-  const file = path.join(res.runDir, 'assessment.json');
+  const file = path.join(res.runDir, 'result', 'assessment.json');
   const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.equal(saved.meta.reviewer, 'external:fake');
   fs.writeFileSync(file, JSON.stringify({ ...saved, meta: { ...saved.meta, reviewer: 'feature-dev:code-reviewer' } }));
@@ -938,7 +938,7 @@ test('缺口 1 accept：外部复审判不通过时，register --accept 带用�
   assert.equal(moved.ok, false);
   assert.match(moved.message, /PR 最终提交已变为 cccccccccccc/);
   // 运行目录被改成不像外部复审（复审者名不是 external:）：拒绝，与普通补登同一道核对
-  const assessmentFile = path.join(res.runDir, 'assessment.json');
+  const assessmentFile = path.join(res.runDir, 'result', 'assessment.json');
   const saved = JSON.parse(fs.readFileSync(assessmentFile, 'utf8'));
   fs.writeFileSync(assessmentFile, JSON.stringify({ ...saved, meta: { ...saved.meta, reviewer: 'feature-dev:code-reviewer' } }));
   assert.match(reg(res.runDir, { userDecision: '用户接受（测试）' }).message, /复审者不是外部复审者/);
@@ -1171,7 +1171,7 @@ test('S9 执行器说 fail 但只有低级发现 → 不可登记：原因写进
   const saved = savedOf(res);
   assert.equal(registrableOf(saved), false);
   assert.match(reasonsOf(saved), /低级|没有高、中级/);
-  assert.equal(fs.existsSync(path.join(res.runDir, 'report.md')), false, '不出可登记的报告');
+  assert.equal(fs.existsSync(path.join(res.runDir, 'result', 'report.md')), false, '不出可登记的报告');
   assert.match(registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh([head]) }).message, /没有产生可登记的报告/);
 });
 
@@ -1200,13 +1200,16 @@ test('S9 执行器说 pass 却列了中级发现 → 按 fail 处理并写明说
   assert.equal(register(root, head, 'fail', res).ok, true);
 });
 
-test('S9 成功的运行目录里有 review.json、review.sha256、report.md、assessment.json；assessment 标记可登记并带 dataSha，指纹与 review.json 的内容一致', async () => {
+test('T1 成功的运行目录：过程记录在根下，结果（review.json、review.sha256、report.md、assessment.json）整组在 result/ 下；assessment 标记可登记并带 dataSha，指纹与 review.json 的内容一致（0.10.1 代码 M3）', async () => {
   const { root, head } = repo();
   const res = await run(root, head, 'pass');
   assert.equal(res.ok, true, res.message);
-  for (const name of ['review.json', 'review.sha256', 'report.md', 'assessment.json', 'request.json']) {
-    assert.ok(fs.existsSync(path.join(res.runDir, name)), `${name} 应在运行目录里`);
+  for (const name of ['request.json', 'input.sha256']) assert.ok(fs.existsSync(path.join(res.runDir, name)), `${name} 应在运行目录根下`);
+  for (const name of ['review.json', 'review.sha256', 'report.md', 'assessment.json']) {
+    assert.ok(fs.existsSync(path.join(res.runDir, 'result', name)), `${name} 应在 result/ 下`);
+    assert.equal(fs.existsSync(path.join(res.runDir, name)), false, `${name} 不应留在运行目录根下`);
   }
+  assert.equal(path.resolve(res.reportPath), path.resolve(res.runDir, 'result', 'report.md'), 'reportPath 指向 result/report.md');
   const hash = sha256Of(fs.readFileSync(jsonOf(res)));
   assert.equal(shaFileOf(res), hash, 'review.sha256 是 review.json 内容的 sha256');
   const saved = savedOf(res);
@@ -1291,7 +1294,7 @@ test('H6 外部复审独占运行目录：--out-dir 已存在即拒绝且里面�
     assert.equal(a.ok, true, a.message);
     assert.equal(b.ok, true, b.message);
     assert.notEqual(a.runDir, b.runDir);
-    assert.ok(fs.existsSync(path.join(a.runDir, 'review.json')) && fs.existsSync(path.join(b.runDir, 'review.json')));
+    assert.ok(fs.existsSync(path.join(a.runDir, 'result', 'review.json')) && fs.existsSync(path.join(b.runDir, 'result', 'review.json')));
     if (process.platform !== 'win32') assert.equal(fs.statSync(a.runDir).mode & 0o777, 0o700, '运行目录只对当前用户可读写');
   } finally {
     fs.rmSync(a.runDir, { recursive: true, force: true });
@@ -1506,11 +1509,76 @@ test('报告写明模型选择依据（--model-reason）（PR #42 一致性审 L
   assert.match(fs.readFileSync(res.reportPath, 'utf8'), /跨厂商比不出强弱/);
 });
 
-test('S9 产物完整：报告发布失败时运行不标为可登记，也不留下报告；补登被拒（PR #43 代码 M4、一致性 M6）', async () => {
+
+// ───────────── 产物整组原子发布（0.10.1 代码 M3）：T2–T7 ─────────────
+
+const RESULT_FILES = ['review.json', 'review.sha256', 'report.md', 'assessment.json'];
+/** 目标名是 result 的改名（整组发布的提交点）。 */
+const isCommitPoint = (to) => path.basename(String(to)) === 'result';
+
+test('T2 整组先写进暂存目录，写完后一次改名为 result 才发布：改名那一刻 result 还不存在、暂存目录里四个文件齐全、运行目录根下没有报告和判定（0.10.1 代码 M3）', async () => {
+  const { root, head } = repo();
+  const original = fs.renameSync;
+  let seen = null;
+  fs.renameSync = (from, to) => {
+    if (isCommitPoint(to) && !seen) {
+      const runDir = path.dirname(String(to));
+      seen = {
+        resultExists: fs.existsSync(to),
+        stagingIsNotResult: path.basename(String(from)) !== 'result',
+        staged: RESULT_FILES.map((f) => fs.existsSync(path.join(String(from), f))),
+        rootReport: fs.existsSync(path.join(runDir, 'report.md')),
+        rootAssessment: fs.existsSync(path.join(runDir, 'assessment.json')),
+      };
+    }
+    return original(from, to);
+  };
+  let res;
+  try {
+    res = await run(root, head, 'pass');
+  } finally {
+    fs.renameSync = original;
+  }
+  assert.equal(res.ok, true, res.message);
+  assert.ok(seen, '发布时有一次改名为 result 的提交点');
+  assert.equal(seen.resultExists, false, '改名那一刻 result 还不存在');
+  assert.equal(seen.stagingIsNotResult, true, '暂存目录的名字不是 result');
+  assert.deepEqual(seen.staged, [true, true, true, true], '暂存目录里四个文件齐全');
+  assert.equal(seen.rootReport, false);
+  assert.equal(seen.rootAssessment, false);
+  for (const f of RESULT_FILES) assert.ok(fs.existsSync(path.join(res.runDir, 'result', f)), f);
+});
+
+test('T3 提交点改名抛错：不可登记，result 里只有不可登记的判定、没有报告，补登被拒（0.10.1 代码 M3）', async () => {
+  const { root, head } = repo();
+  const original = fs.renameSync;
+  let thrown = 0;
+  fs.renameSync = (from, to) => {
+    if (isCommitPoint(to) && thrown === 0) {
+      thrown += 1;
+      throw Object.assign(new Error('注入的提交点失败（测试）'), { code: 'EIO' });
+    }
+    return original(from, to);
+  };
+  let res;
+  try {
+    res = await run(root, head, 'pass');
+  } finally {
+    fs.renameSync = original;
+  }
+  assert.equal(thrown, 1, '提交点确实被触发过');
+  assert.equal(res.ok, false);
+  assert.ok(res.runDir, '失败时也交回运行目录');
+  assert.equal(fs.existsSync(path.join(res.runDir, 'result', 'report.md')), false, '没有报告');
+  assert.equal(readJson(path.join(res.runDir, 'result', 'assessment.json')).assessment.registrable, false, '判定写明不可登记');
+  assert.equal(registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh([head]) }).ok, false);
+});
+
+test('T4 提交点和失败发布都抛错：不抛出，交回 ok:false 并写明，补登被拒（0.10.1 代码 M3）', async () => {
   const { root, head } = repo();
   const original = fs.renameSync;
   fs.renameSync = (from, to) => {
-    if (String(to).endsWith('report.md')) throw Object.assign(new Error('注入的报告发布失败（测试）'), { code: 'EIO' });
+    if (isCommitPoint(to)) throw Object.assign(new Error('注入的改名失败（测试）'), { code: 'EIO' });
     return original(from, to);
   };
   let res;
@@ -1520,50 +1588,74 @@ test('S9 产物完整：报告发布失败时运行不标为可登记，也不�
     fs.renameSync = original;
   }
   assert.equal(res.ok, false);
-  assert.match(res.message, /注入的报告发布失败/);
-  const runDir = res.runDir;
-  assert.ok(runDir, '失败时也交回运行目录');
-  assert.equal(fs.existsSync(path.join(runDir, 'report.md')), false, '没有残缺或孤立的报告');
-  assert.equal(readJson(path.join(runDir, 'assessment.json')).assessment.registrable, false, '判定文件写明不可登记');
-  assert.equal(registerRun({ root, runDir, summary: 's', gh: fakeGh([head]) }).ok, false);
+  assert.ok(String(res.message).length > 0, '写明原因');
+  assert.ok(res.runDir, '照样交回运行目录');
+  assert.equal(registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh([head]) }).ok, false);
 });
 
-test('S9 产物顺序：发布报告的那一刻判定文件还没写；报告发布后写判定失败时撤下报告、不可登记；撤下也失败时照样交回不可登记的结果并写明残留（PR #43 第 2 轮代码 M4、M5，一致性 M4）', async () => {
+test('T5 强制终止（改名为 result 时进程直接退出）：运行目录里没有 result，补登被拒（0.10.1 代码 M3）', async () => {
   const { root, head } = repo();
-  const rename = fs.renameSync;
-  const writeFile = fs.writeFileSync;
-  const rm = fs.rmSync;
-  // 1. 发布报告时判定文件还不存在
-  let seenAtPublish = null;
-  fs.renameSync = (from, to) => {
-    if (String(to).endsWith('report.md')) seenAtPublish = fs.existsSync(path.join(path.dirname(String(to)), 'assessment.json'));
-    return rename(from, to);
-  };
-  let ok;
-  try { ok = await run(root, head, 'pass'); } finally { fs.renameSync = rename; }
-  assert.equal(ok.ok, true, ok.message);
-  assert.equal(seenAtPublish, false, '报告发布时还没有可登记的判定');
-  // 2. 报告发布后写判定失败：撤下报告，判定不可登记
-  const failAssessment = (file, ...rest) => {
-    if (String(file).endsWith('assessment.json')) throw Object.assign(new Error('注入的判定写入失败（测试）'), { code: 'EIO' });
-    return writeFile(file, ...rest);
-  };
-  fs.writeFileSync = failAssessment;
-  let res;
-  try { res = await run(root, head, 'pass'); } finally { fs.writeFileSync = writeFile; }
+  const outDir = path.join(tmpDir('ekit-xr-'), 'run');
+  const script = path.join(tmpDir('ekit-kill-'), 'kill.mjs');
+  const mod = new URL('../gate/external-review.mjs', import.meta.url).href;
+  fs.writeFileSync(script, [
+    "import fs from 'node:fs';",
+    "import path from 'node:path';",
+    `import { runExternalReview } from ${JSON.stringify(mod)};`,
+    'const [root, head, outDir, fakePath] = process.argv.slice(2);',
+    "const GREEN = [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }];",
+    "const gh = (args) => (args[1] === 'view' ? { status: 0, stdout: JSON.stringify({ state: 'OPEN', headRefOid: head, statusCheckRollup: GREEN }), stderr: '' } : { status: 0, stdout: '', stderr: '' });",
+    "const local = { file: '(测试)', executors: { fake: { type: 'protocol', command: [process.execPath, fakePath], defaultModel: 'fake-model-1', env: { FAKE_MODE: 'pass' } } } };",
+    'const original = fs.renameSync;',
+    "fs.renameSync = (from, to) => { if (path.basename(String(to)) === 'result') process.exit(9); return original(from, to); };",
+    "await runExternalReview({ root, executor: 'fake', pr: '7', gh, localConfig: local, outDir });",
+    'process.exit(0);',
+  ].join('\n'));
+  const r = spawnSync(process.execPath, [script, root, head, outDir, fakePath], { encoding: 'utf8' });
+  assert.equal(r.status, 9, `子进程应在提交点被终止：${r.stdout}${r.stderr}`);
+  assert.ok(fs.existsSync(outDir), '运行目录已建');
+  assert.equal(fs.existsSync(path.join(outDir, 'result')), false, '没有 result：整组没有发布');
+  assert.equal(registerRun({ root, runDir: outDir, summary: 's', gh: fakeGh([head]) }).ok, false);
+});
+
+test('T6 不可登记的运行（fail 只有低级发现）：result 里只有 assessment.json（0.10.1 代码 M3）', async () => {
+  const { root, head } = repo();
+  const res = await run(root, head, 'fail-low-only');
   assert.equal(res.ok, false);
-  assert.equal(fs.existsSync(path.join(res.runDir, 'report.md')), false, '撤下了已发布的报告');
-  assert.equal(readJson(path.join(res.runDir, 'assessment.json')).assessment.registrable, false);
-  // 3. 撤下报告也失败：不抛出，交回不可登记的结果并写明报告残留
-  fs.writeFileSync = failAssessment;
-  fs.rmSync = (p, ...rest) => {
-    if (String(p).endsWith('report.md')) throw Object.assign(new Error('注入的撤下失败（测试）'), { code: 'EBUSY' });
-    return rm(p, ...rest);
-  };
-  let both;
-  try { both = await run(root, head, 'pass'); } finally { fs.writeFileSync = writeFile; fs.rmSync = rm; }
-  assert.equal(both.ok, false);
-  assert.match(both.message, /没能撤下/);
-  assert.equal(readJson(path.join(both.runDir, 'assessment.json')).assessment.registrable, false);
-  assert.equal(registerRun({ root, runDir: both.runDir, summary: 's', gh: fakeGh([head]) }).ok, false);
+  assert.deepEqual(fs.readdirSync(path.join(res.runDir, 'result')).sort(), ['assessment.json']);
+  assert.equal(fs.existsSync(path.join(res.runDir, 'assessment.json')), false, '根下没有 assessment.json');
+});
+
+test('T7 旧布局（0.10.0 及更早：结果文件在运行目录根下、没有 result）仍可补登（0.10.1 代码 M3）', async () => {
+  const { root, head } = repo();
+  const res = await run(root, head, 'pass');
+  assert.equal(res.ok, true, res.message);
+  const dir = path.join(res.runDir, 'result');
+  for (const f of fs.readdirSync(dir)) fs.renameSync(path.join(dir, f), path.join(res.runDir, f));
+  fs.rmSync(dir, { recursive: true, force: true });
+  assert.equal(fs.existsSync(dir), false);
+  const done = registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh([head]) });
+  assert.equal(done.ok, true, done.message);
+  assert.equal(done.record.headSha, head);
+});
+
+// ---------- PR #46 第 1 轮复审的回归 ----------
+
+test('M4 结果发布之后的步骤出错：返回值照已发布的结果报告（可登记、报告路径在 result/ 下），写明可以补登；磁盘结果不变，补登成功（PR #46 第 1 轮代码 M4）', async () => {
+  const { root, head } = repo();
+  const local = { ...LOCAL, executors: { fake: { ...LOCAL.executors.fake, env: { FAKE_MODE: 'pass' } } } };
+  const opts = { root, executor: 'fake', pr: '7', gh: fakeGh([head]), localConfig: local, outDir: path.join(tmpDir('ekit-xr-'), 'run') };
+  // 发布之后第一次读 opts.register 时抛错，模拟提交点之后的意外
+  Object.defineProperty(opts, 'register', { enumerable: true, get() { throw new Error('注入的发布后错误（测试）'); } });
+  const res = await runExternalReview(opts);
+  assert.equal(res.ok, false);
+  assert.match(res.message, /注入的发布后错误/);
+  assert.match(res.message, /可以补登/);
+  assert.equal(res.published, true);
+  assert.equal(res.assessment.registrable, true, '返回已发布的判定，不是新造的不可登记判定');
+  assert.equal(res.reportPath, path.join(res.runDir, 'result', 'report.md'));
+  assert.ok(fs.existsSync(res.reportPath));
+  assert.equal(readJson(path.join(res.runDir, 'result', 'assessment.json')).assessment.registrable, true, '磁盘上的判定不变');
+  const done = registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh([head]) });
+  assert.equal(done.ok, true, done.message);
 });

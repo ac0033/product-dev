@@ -25,20 +25,25 @@
 //       node scripts/engineering/gate/review.mjs defer --kind consistency --reason "<理由>"
 //       node scripts/engineering/gate/review.mjs accept --kind code|consistency --reviewer <名> --report <报告文件> --user-decision "<用户的决定及出处>"
 //       pr 流程的同样命令加 --pr <编号>，且必须带 --kind。
-//       开启轮次收口后，risks --pr <编号> [--fixed-in code:M1=路径] 生成风险登记，提交后以 close --pr <编号> --summary "<说明>" 核对并登记。
+//       开启轮次收口后，risks --pr <编号> --shared-summary code:M1="<可共享摘要>" [--fixed-in code:M1=路径] 生成风险登记（只存编号、指纹和摘要），
+//       提交后以 close --pr <编号> --summary "<说明>" 核对并登记；修复差异只放行白名单内的文件（见 review-rounds.mjs 的 closureProblems）。
 // 报告文件放在仓库之外（例如系统临时目录），它不属于被审代码。
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
   assertPolicy,
+  configAtRev,
   defaultGh,
   diffNames,
   forkPoint,
   git,
   gateScope,
+  gateScopeAt,
   headInfo,
+  isIgnoredDoc,
   isMain,
+  isTestFile,
   loadConfig,
   prLogFile,
   prNumber,
@@ -51,13 +56,14 @@ import {
   withLock,
   withPrLock,
   treeHash,
+  treeHashAt,
   uncommittedInScope,
   writeRecord,
 } from './lib.mjs';
 
 import { COVERAGE_RULE, MAX_REVIEW_BYTES, admissionProblems, canonicalJson, compactFindings, coverageOf, fingerprint, renderReport, validateReviewData } from './review-data.mjs';
 import { isRepoPath } from './config.mjs';
-import { admitRegistration, closureProblems, expectedRiskEntries, nextHint, parseRiskRegister, riskKey, riskPhaseProblems, roundState } from './review-rounds.mjs';
+import { MAX_SUMMARY_CHARS, admitRegistration, displayPath, replayNote, summaryFingerprint, closureProblems, expectedRiskEntries, nextHint, parseRiskRegister, riskKey, riskPhaseProblems, roundState, summaryProblem } from './review-rounds.mjs';
 
 /** 审查种类及中文名。 */
 const KINDS = { code: '代码复审', consistency: '一致性审' };
@@ -252,12 +258,17 @@ export function recordReview({ root, verdict, reviewer, reportPath, reviewData, 
     if (issues.length) return { ok: false, message: issues.join('\n') };
   }
 
-  // 本次改动只取一次，分成闸门范围（scope）和文档（docs）两部分，与 gate.mjs、verify.mjs 同一口径（gateScope）
-  const { baseRev, changed, scope, docs } = gateScope(root, config);
-  const hash = treeHash(root, scope);
-  // 给了被审范围的复审审的是提交；登记却绑定工作区的树。闸门范围内还有未提交的改动时，那部分没经过复审，不能登记通过
+  // 本次改动只取一次，分成闸门范围（scope）和文档（docs）两部分，与 gate.mjs、verify.mjs 同一口径（gateScope）。
+  // 给了被审范围的复审审的是提交：范围、树哈希和文档哈希都从这个不可变的提交算（gateScopeAt、treeHashAt），不读工作区，
+  // 登记绑定的就是复审者看过的那份内容；工作区之后怎么变都改不了这次登记对应的内容（测试记录也须与它一致）
+  const worktreeScope = gateScope(root, config);
+  const snapshot = data?.reviewedCommit ? gateScopeAt(root, config, data.reviewedCommit) : null;
+  const { baseRev, changed, scope, docs } = snapshot ?? worktreeScope;
+  const hashOf = (files) => (snapshot ? treeHashAt(root, data.reviewedCommit, files) : treeHash(root, files));
+  const hash = hashOf(scope);
+  // 未提交的改动没有经过复审，提前拒绝并说明（按工作区的闸门范围查；绑定的内容已由上面的提交快照保证）
   if (data?.reviewedCommit && ['pass', 'accept'].includes(verdict)) {
-    const dirty = uncommittedInScope(root, scope);
+    const dirty = uncommittedInScope(root, worktreeScope.scope);
     if (dirty.length) return { ok: false, message: `复审审的是提交 ${data.reviewedCommit.slice(0, 12)}，工作区还有未提交的改动：${dirty.join('、')}；这些改动没有经过复审。先提交，再对新的 HEAD 复审后登记` };
   }
   if (verdict !== 'defer') {
@@ -276,14 +287,14 @@ export function recordReview({ root, verdict, reviewer, reportPath, reviewData, 
   const logFile = path.join(reviews, 'log.jsonl');
   const prior = readLog(logFile).filter((e) => (e.branch ?? null) === branch);
   const scopeName = branch ? `分支 ${branch} ` : '游离 HEAD ';
-  const docHash = treeHash(root, docs);
+  const docHash = hashOf(docs);
   const keys = ROUND_KEYS['pre-push'];
   const key = keys.of({ treeHash: hash, docHash }, prior.length);
   const blocked = roundBlock(prior, verdict, config.maxReviewRounds, userDecision, scopeName, { key, kind: k }, keys.of);
   if (blocked) return { ok: false, message: blocked };
 
   const docsOnly = scope.length === 0;
-  const uncommitted = uncommittedInScope(root, changed).length;
+  const uncommitted = uncommittedInScope(root, worktreeScope.changed).length;
   const dir = path.join(reviews, 'branches', branchDirName(branch));
   fs.mkdirSync(dir, { recursive: true });
   const at = new Date().toISOString();
@@ -344,25 +355,32 @@ function registerLocked({ root, config, verdict, reviewer, data, evidenceChecked
   // 轮次按提交计，要先知道这次登记对应 PR 的哪个最终提交
   const keys = ROUND_KEYS.pr;
   const closureEnabled = config.roundClosure === 'fix-and-record';
+  const priorState = closureEnabled ? prRoundState(config, prior) : null;
   const blocked = closureEnabled
-    ? admitRegistration(prRoundState(config, prior), { verdict, kind, head: st.head, userDecision })
+    ? admitRegistration(priorState, { verdict, kind, head: st.head, userDecision })
     : roundBlock(prior, verdict, config.maxReviewRounds, userDecision, scopeName, { key: st.head, kind }, keys.of);
   if (blocked) return { ok: false, message: blocked };
+  // 越权登记：不带用户决定就会被拒、靠用户决定才放行的。它照常作为最新记录（合并入口认它），但轮次计算不计它（roundState）
+  const outOfBand = closureEnabled && admitRegistration(priorState, { verdict, kind, head: st.head, userDecision: null }) !== null;
 
   const file = prRecordFile(root, no, kind);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const record = { pr: no, kind, verdict, reviewer: reviewer ?? null, headSha: st.head, summary, reason: reason ?? null, userDecision: userDecision ?? null, report: null, at: new Date().toISOString() };
+  if (closureEnabled) record.outOfBand = outOfBand; // 0.10.1 起开收口时一律写明；没有这个字段的旧记录由 roundState 重放判定
   if (coverage) Object.assign(record, { coverage: coverage.full ? 'full' : 'partial', coverageRule: COVERAGE_RULE });
   saveCopies(path.dirname(file), record, data, evidenceChecked, config.reviewKeyword);
   // 先追加历史（轮次按它计数），再写最新记录（merge.mjs 读它）
   savePrRecord(file, logFile, record);
   const lines = [`已登记 PR #${no} 的${KINDS[kind]}（${verdict}，最终提交 ${st.head.slice(0, 12)}）`];
   if (verdict === 'accept') lines.push(`用户决定接受风险：${userDecision}`);
+  if (outOfBand) lines.push(`这是经用户决定的越权登记（用户决定：${userDecision}）：作为最新记录供合并入口核对，不计入复审轮次`);
   const entries = [...prior, record];
   const updated = closureEnabled ? prRoundState(config, entries) : null;
   lines.push(roundLine(entries, verdict, config.maxReviewRounds, scopeName, st.head, keys, updated?.rounds.map((r) => r.head)));
   const hint = updated && nextHint(updated);
   if (hint) lines.push(hint);
+  const replay = updated && replayNote(updated);
+  if (replay) lines.push(replay);
   return { ok: true, message: lines.join('\n'), record };
 }
 
@@ -383,7 +401,7 @@ function savePrRecord(file, logFile, record) {
     if (length === undefined) fs.rmSync(logFile, { force: true });
     else fs.truncateSync(logFile, length);
     throw err;
-  } finally { fs.rmSync(tmp, { force: true }); }
+  } finally { try { fs.rmSync(tmp, { force: true }); } catch { /* 清理暂存文件失败不盖过写入本身的结果 */ } }
 }
 
 /** 从失败登记的数据副本读完整发现，逐字节核对登记时保存的指纹。 */
@@ -399,7 +417,7 @@ function riskEvidence(pr, latest) {
   const failures = [];
   const problems = [];
   for (const record of Object.values(latest?.failures ?? {})) {
-    try { failures.push({ kind: record.kind, findings: readFailureFindings(record) }); }
+    try { failures.push({ kind: record.kind, findings: readFailureFindings(record), dataSha: record.dataSha }); }
     catch (e) { problems.push(record.kind + ' 复审数据副本无法核对：' + e.message); }
   }
   const expected = expectedRiskEntries({ pr, round: latest?.index, failHead: latest?.head, failures });
@@ -414,11 +432,14 @@ export function checkPrClosure(root, no, config, st, priorClose = {}) {
   const registerPath = config.riskRegister;
   const blob = git(root, ['show', st.head + ':' + registerPath]);
   const diff = failHead && diffNames(root, [failHead, st.head]);
+  // 白名单里的测试按失败提交（复审过的内容）上的 testGlobs 认定：修复差异里改配置本身会被白名单拦下，分支放宽 testGlobs 也绕不过去
+  const reviewedConfig = failHead ? configAtRev(root, failHead) : null;
+  const exempt = (f) => isIgnoredDoc(f, config.reviewIgnore, registerPath) || (!!reviewedConfig && isTestFile(f, reviewedConfig));
   const problems = closureProblems({
     closure: config.roundClosure, flow: config.reviewFlow, state, prOpen: st.state === 'OPEN', ciProblems: st.ciProblems,
     head: st.head, failHead, headIsDescendant: !!failHead && git(root, ['merge-base', '--is-ancestor', failHead, st.head]).ok,
     registerPath, register: blob.ok ? parseRiskRegister(blob.out) : null, expected: evidence.expected,
-    fixDiff: diff?.files ?? [],
+    fixDiff: diff?.files ?? [], exempt, declaredFixedIn: declaredFixedIn(root, no, state.latest),
     ...priorClose,
   });
   if (diff && !diff.ok) problems.push('无法读取最新失败提交到最终提交的修复差异');
@@ -429,6 +450,113 @@ export function checkPrClosure(root, no, config, st, priorClose = {}) {
   }
   problems.push(...evidence.problems);
   return { failHead, round: state.latest?.index, entries: evidence.expected.length, problems };
+}
+
+export { displayPath };
+
+/**
+ * 修复差异按文件的增删行数（二进制文件写“二进制”），供主控核对同一文件里有没有夹带无关改动。
+ * `--numstat -z` 每条记录以 NUL 结尾，记录里只有前两个制表符是列分隔符，其后的全部内容都是路径（路径可以含制表符）。
+ */
+export function fixDiffLines(root, from, to) {
+  const r = git(root, ['diff', '--no-renames', '--numstat', '-z', from, to]);
+  if (!r.ok) return ['  （读不出按文件的改动行数）'];
+  return r.out.split('\0').filter(Boolean).map((row) => {
+    const a = row.indexOf('\t');
+    const b = row.indexOf('\t', a + 1);
+    const [add, del, file] = [row.slice(0, a), row.slice(a + 1, b), row.slice(b + 1)];
+    return '  ' + displayPath(file) + '：' + (add === '-' ? '二进制' : '+' + add + ' -' + del);
+  });
+}
+
+/** 风险登记内容里旧格式（0.10.0）行的物理行号。 */
+function legacyLines(text) {
+  const out = [];
+  for (const [i, line] of text.split('\n').entries()) {
+    if (line.trim() && parseRiskRegister(line).entries[0]?.legacy) out.push(i + 1);
+  }
+  return out;
+}
+
+/**
+ * 还没推送的提交里含旧格式风险登记行的那些（按提交逐个读风险登记）。待推送范围：有上游时是 @{u}..HEAD，
+ * 没有上游时是基准提交..HEAD（功能分支上的全部提交）。返回 { checked, commits, why }。
+ */
+function unpushedLegacyCommits(root, config) {
+  const upstream = git(root, ['rev-parse', '--verify', '--quiet', '@{u}']);
+  const from = upstream.ok ? upstream.out.trim() : config.baseRev;
+  if (!from) return { checked: false, commits: [], why: '没有上游，也没有基准提交' };
+  // 遍历待推送范围的完整提交图（不按路径简化历史：合并进来的侧支上的提交同样会被推送），逐个读风险登记的对象
+  const list = git(root, ['rev-list', from + '..HEAD']);
+  if (!list.ok) return { checked: false, commits: [], why: list.err.trim() || 'git rev-list 失败' };
+  const seen = new Map();
+  const commits = [];
+  for (const c of list.out.split('\n').filter(Boolean)) {
+    const entry = git(root, ['ls-tree', c, '--', config.riskRegister]);
+    if (!entry.ok) return { checked: false, commits, why: '读不出提交 ' + c.slice(0, 12) + ' 的树：' + entry.err.trim() };
+    const m = /^\d+ blob ([0-9a-f]+)\t/.exec(entry.out);
+    if (!m) continue; // 这个提交里没有风险登记
+    if (!seen.has(m[1])) {
+      const blob = git(root, ['cat-file', 'blob', m[1]]);
+      if (!blob.ok) return { checked: false, commits, why: '读不出提交 ' + c.slice(0, 12) + ' 里的风险登记：' + blob.err.trim() };
+      seen.set(m[1], legacyLines(blob.out).length > 0);
+    }
+    if (seen.get(m[1])) commits.push(c);
+  }
+  return { checked: true, commits, why: '' };
+}
+
+/** 收口成功时提示：最终提交上的风险登记仍有不属于本轮的旧格式行（含复审原文），只写行号。 */
+function legacyHint(root, head, registerPath) {
+  const blob = git(root, ['show', head + ':' + registerPath]);
+  const rows = blob.ok ? legacyLines(blob.out) : [];
+  return rows.length ? ['提示：最终提交上的风险登记第 ' + rows.join('、') + ' 行仍是旧格式（0.10.0，逐字写了复审原文），会随合并留在仓库里；要清除须另行改写这些行和含原文的历史'] : [];
+}
+
+/** 整份替换一个文件（暂存后改名）；text 为 null 时删除。 */
+function replaceFile(file, text) {
+  if (text === null) { fs.rmSync(file, { force: true }); return; }
+  const tmp = file + '.' + crypto.randomUUID() + '.tmp';
+  try {
+    fs.writeFileSync(tmp, text, { flag: 'wx' });
+    fs.renameSync(tmp, file);
+  } finally {
+    // 清理暂存文件失败不能盖过写入本身的结果（成功或原来的错误）
+    try { fs.rmSync(tmp, { force: true }); } catch { /* 留下的暂存文件不影响结果 */ }
+  }
+}
+
+/** 本机的修复路径申报：git 公共目录 pr/<编号>/risks.json，由 risks 在 PR 锁内写，PR 的提交改不到。返回把它恢复成写之前样子的函数。 */
+function saveDeclaredFixedIn(root, no, latest, entries) {
+  const file = prRecordFile(root, no, 'risks');
+  const before = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+  // 上一代申报落盘保留：进程在两份文件之间退出时，已提交的旧风险登记仍能和上一代申报对上（declaredFixedIn 两代都读）
+  if (before !== null) replaceFile(prRecordFile(root, no, 'risks.prev'), before);
+  const record = { pr: no, failHead: latest.head, round: latest.index, at: new Date().toISOString(),
+    entries: entries.map((e) => ({ key: riskKey(e), findingSha: e.findingSha, fixedIn: e.fixedIn, summary: e.summary, summarySha: summaryFingerprint(e.summary) })) };
+  replaceFile(file, JSON.stringify(record, null, 2) + '\n');
+  return () => replaceFile(file, before);
+}
+
+/**
+ * 读本机的修复路径申报（当前一代 risks.json 和上一代 risks.prev.json），只取针对当前失败提交与轮次的；
+ * 返回 身份 → 候选数组（当前一代在前）。没有或对不上时返回空表。
+ */
+function declaredFixedIn(root, no, latest) {
+  const map = new Map();
+  if (!latest) return map;
+  for (const name of ['risks', 'risks.prev']) {
+    let record = null;
+    try { record = JSON.parse(fs.readFileSync(prRecordFile(root, no, name), 'utf8')); } catch { continue; }
+    if (record?.failHead !== latest.head || record.round !== latest.index || !Array.isArray(record.entries)) continue;
+    for (const e of record.entries) {
+      if (typeof e?.key === 'string' && typeof e.findingSha === 'string' && Array.isArray(e.fixedIn) && e.fixedIn.every(isRepoPath)) {
+        if (!map.has(e.key)) map.set(e.key, []);
+        map.get(e.key).push({ findingSha: e.findingSha, fixedIn: e.fixedIn, summary: typeof e.summary === 'string' ? e.summary : null, summarySha: typeof e.summarySha === 'string' ? e.summarySha : null });
+      }
+    }
+  }
+  return map;
 }
 
 /** 更新本轮中级发现的实际修复位置。参数可重复，同一编号在两种审查里都有时须带种类。 */
@@ -457,8 +585,37 @@ function registerFile(root, rel) {
   return file;
 }
 
-/** 在 PR 锁内生成可提交的风险登记；其余条目的原文保留。返回操作结果和下一步。 */
-export function writeRisks({ root, pr, fixedIn = [] }) {
+/**
+ * 按 --shared-summary 填每条中级的可共享摘要。没给的只从本机申报（risks 上次核对后写下的那份，PR 的提交改不到）沿用：
+ * 须是同一条发现（findingSha 相同），且摘要与申报里记的指纹对得上；不从 PR 能改的风险登记文件沿用。
+ * 返回拒绝信息或 null。
+ */
+function applySummaries(expected, specs, existing) {
+  for (const spec of specs) {
+    const match = /^(?:(code|consistency):)?(M[1-9]\d*)=([\s\S]*)$/u.exec(spec);
+    if (!match) return '--shared-summary 须为 [审查种类:]编号=摘要';
+    const [, kind, id, text] = match;
+    const label = spec.slice(0, spec.indexOf('='));
+    const matches = expected.filter((e) => e.id === id && (!kind || e.kind === kind));
+    if (matches.length !== 1) return '--shared-summary 找不到唯一的本轮中级发现：' + label;
+    const bad = summaryProblem(text);
+    if (bad) return '--shared-summary ' + label + '：' + bad;
+    matches[0].summary = text.trim();
+  }
+  const missing = [];
+  for (const e of expected) {
+    if (e.summary !== null) continue;
+    // 只从本机申报（risks 上次核对后写下的那份）沿用，不从 PR 能改的风险登记文件沿用
+    const kept = (existing.get(riskKey(e)) ?? []).find((c) => c.findingSha === e.findingSha && !summaryProblem(c.summary) && c.summarySha === summaryFingerprint(c.summary));
+    if (kept) e.summary = kept.summary;
+    else missing.push(e.kind + ':' + e.id);
+  }
+  if (!missing.length) return null;
+  return '这些中级发现缺少可共享摘要：' + missing.join('、') + '。风险登记会随 PR 推送，不写复审原文；核对发现里哪些内容可以共享后，用 --shared-summary 种类:编号="摘要" 逐条写（不超过 ' + MAX_SUMMARY_CHARS + ' 字、不换行）';
+}
+
+/** 在 PR 锁内生成可提交的风险登记；其余条目原样保留，同身份的旧条目（含 0.10.0 旧格式）改写成新格式。返回操作结果和下一步。 */
+export function writeRisks({ root, pr, fixedIn = [], sharedSummary = [] }) {
   const no = prNumber(pr);
   const config = loadConfig(root);
   assertPolicy(config);
@@ -477,6 +634,8 @@ export function writeRisks({ root, pr, fixedIn = [] }) {
     const original = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
     const parsed = parseRiskRegister(original);
     if (parsed.problems.length) return { ok: false, message: parsed.problems.join('\n') };
+    const unsummarized = applySummaries(entries, sharedSummary, declaredFixedIn(root, no, state.latest));
+    if (unsummarized) return { ok: false, message: unsummarized };
     const replace = new Set(entries.map(riskKey));
     const lines = original.split(/\r?\n/);
     if (lines.at(-1) === '') lines.pop();
@@ -484,12 +643,31 @@ export function writeRisks({ root, pr, fixedIn = [] }) {
     const kept = lines.filter((line) => !line.trim() || !replace.has(riskKey(parsed.entries[index++])));
     const content = kept.concat(entries.map((e) => JSON.stringify(e))).join('\n') + '\n';
     fs.mkdirSync(path.dirname(file), { recursive: true });
+    // 两份文件一起生效：先写本机申报（git 公共目录，PR 的提交改不到；close 与合并入口只认它），再替换工作区的风险登记；
+    // 风险登记没换成就把申报恢复成原来的样子。进程在两步之间被终止时，申报新、登记旧：close 会报缺条目，重跑 risks 即可（两步都是整份替换，可重复执行）
+    const restore = saveDeclaredFixedIn(root, no, state.latest, entries);
     const tmp = file + '.' + crypto.randomUUID() + '.tmp';
     try {
       fs.writeFileSync(tmp, content, { flag: 'wx' });
       fs.renameSync(tmp, file);
-    } finally { fs.rmSync(tmp, { force: true }); }
-    return { ok: true, message: '已写入 ' + entries.length + ' 条风险登记到 ' + config.riskRegister + '，提交并推送后运行 review.mjs close' };
+    } catch (e) {
+      // 保留原来的错误；申报也恢复不了时一并写明，两份文件对不上的状态重跑 risks 即可修复
+      try { restore(); }
+      catch (re) { throw new Error(e.message + '；本机申报也没能恢复（' + re.message + '）：风险登记与本机申报可能对不上，修好原因后重跑 review.mjs risks'); }
+      throw e;
+    } finally { try { fs.rmSync(tmp, { force: true }); } catch { /* 清理暂存文件失败不盖过写入本身的结果 */ } }
+    // 提醒放在下一步指引之前：旧格式原文可能在当前文件里，也可能只在还没推送的提交里
+    const out = ['已写入 ' + entries.length + ' 条风险登记到 ' + config.riskRegister];
+    const legacy = legacyLines(content);
+    if (legacy.length) out.push('提示：风险登记第 ' + legacy.join('、') + ' 行仍是旧格式（0.10.0，逐字写了复审原文），不属于本轮；要清除原文须另行改写这些行');
+    const unpushed = unpushedLegacyCommits(root, config);
+    if (unpushed.commits.length) {
+      out.push('注意：还没推送的提交 ' + unpushed.commits.map((c) => c.slice(0, 12)).join('、') + ' 里的风险登记含旧格式行（复审原文），推送会把它们一起外发：先改写这些提交（例如交互式变基）再推送');
+    } else if (!unpushed.checked) {
+      out.push('注意：读不出还没推送的提交范围（' + unpushed.why + '）：推送前用 git log -p -- ' + config.riskRegister + ' 人工确认待推送的提交里没有旧格式行');
+    }
+    out.push('提交并推送后运行 review.mjs close');
+    return { ok: true, message: out.join('\n') };
     }, '风险登记的写入锁');
   });
 }
@@ -506,7 +684,9 @@ export function closeRound({ root, pr, summary, gh = defaultGh }) {
     if (problems.length) return { ok: false, message: problems.join('\n') };
     const record = { kind: 'close', verdict: 'close', headSha: st.head, failHead, round, riskRegister: config.riskRegister, entries, summary, at: new Date().toISOString() };
     savePrRecord(prRecordFile(root, no, 'close'), prLogFile(root, no), record);
-    return { ok: true, message: '已登记 PR #' + no + ' 第 ' + round + ' 轮收口，核对了 ' + entries + ' 条风险登记' };
+    return { ok: true, message: ['已登记 PR #' + no + ' 第 ' + round + ' 轮收口，核对了 ' + entries + ' 条风险登记',
+      '修复差异（' + failHead.slice(0, 12) + '..' + st.head.slice(0, 12) + '）按文件的改动行数，请核对同一文件里没有夹带与修复无关的改动：',
+      ...fixDiffLines(root, failHead, st.head), ...legacyHint(root, st.head, config.riskRegister)].join('\n') };
   });
 }
 
@@ -514,7 +694,7 @@ export function closeRound({ root, pr, summary, gh = defaultGh }) {
 function parseArgs(argv) {
   const out = { verdict: argv[0] };
   const allowed = ['--kind', '--reviewer', '--report', '--summary', '--user-decision', '--evidence-checked', '--reason', '--pr'];
-  if (out.verdict === 'risks') allowed.push('--fixed-in');
+  if (out.verdict === 'risks') allowed.push('--fixed-in', '--shared-summary');
   for (let i = 1; i < argv.length; i += 2) {
     if (!allowed.includes(argv[i])) {
       const hint = argv[i] === '--viaExternalReview' ? '；external: 复审者只能由 external-review.mjs 登记' : '';
@@ -522,6 +702,7 @@ function parseArgs(argv) {
     }
     if (!argv[i + 1] || argv[i + 1].startsWith('--')) throw new Error(`${argv[i]} 缺少值`);
     if (argv[i] === '--fixed-in') (out.fixedIn ??= []).push(argv[i + 1]);
+    else if (argv[i] === '--shared-summary') (out.sharedSummary ??= []).push(argv[i + 1]);
     else out[argv[i].slice(2)] = argv[i + 1];
   }
   return out;
