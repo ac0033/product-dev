@@ -801,3 +801,67 @@ test('M5 displayPath 在各平台都转义控制字符（PR #46 第 1 轮代码 
   assert.equal(REVIEW.displayPath('a\rb'), String.raw`a\rb`);
   assert.equal(REVIEW.displayPath('a\\b'), String.raw`a\\b`, '反斜杠本身也转义，转义后的写法不会和原样的反斜杠混淆');
 });
+
+// ---------- PR #46 第 2 轮复审的回归 ----------
+
+test('M2 越权登记：第 N 轮收齐前经用户决定在别的提交上的登记带 outOfBand、不计入轮次；收齐后最后一轮的另一种审查要按最后一轮补登，补齐前不能收口（PR #46 第 2 轮代码 M2、一致性 M3）', async () => {
+  const { root } = rcRepo();
+  const a = addCommit(root, 1);
+  must(reg(root, 'code', 'fail', a, [H(), M()]));
+  must(reg(root, 'consistency', 'pass', a));
+  const b = addCommit(root, 2);
+  must(reg(root, 'code', 'fail', b, [H(), M()]));
+  const d = addCommit(root, 3);
+  const early = must(reg(root, 'consistency', 'pass', d, [], { userDecision: '用户同意先审 d' }));
+  assert.equal(early.record.outOfBand, true, '越权登记带标记');
+  assert.match(early.message, /越权/);
+  // 第 2 轮的 b 仍缺一致性审：照常在 b 上补登（迟到的那份针对 b，PR 的最终提交暂时回到 b）
+  const late = must(reg(root, 'consistency', 'pass', b, [], { prHead: b }));
+  assert.equal(late.record.outOfBand, undefined, '按规则的登记不带标记');
+  // 最后一轮在 d 上：代码复审只剩中级；提前的那份一致性审不算，阶段是收齐前
+  must(reg(root, 'code', 'fail', d, [M()]));
+  const fix = fixCommit(root, 4);
+  const rows = logRows(root).length;
+  const refused = await closeRound(root, fix);
+  assertCloseRefused(root, refused, rows);
+  assert.match(msgOf(refused), /collecting/);
+  // 在 d 上按最后一轮补登一致性审（不要用户决定），之后修复、写风险登记、收口
+  must(reg(root, 'consistency', 'pass', d, [], { prHead: d }));
+  must(await writeRisks(root, fix));
+  commitAll(root, 'risks');
+  must(await closeRound(root, headOf(root)));
+});
+
+test('M8 risks 写风险登记失败时把本机申报恢复原样，不留下互相对不上的两份文件；重跑成功（PR #46 第 2 轮代码 M8）', async () => {
+  const { root } = midRounds();
+  const fix = fixCommit(root, 3);
+  const declared = path.join(prDir(root), 'risks.json');
+  assert.equal(fs.existsSync(declared), false);
+  const original = fs.renameSync;
+  fs.renameSync = (from, to) => {
+    if (String(to).endsWith('review-risks.jsonl')) throw Object.assign(new Error('注入的风险登记写入失败（测试）'), { code: 'EIO' });
+    return original(from, to);
+  };
+  let failed;
+  try { failed = await writeRisks(root, fix).catch((e) => ({ ok: false, message: e.message })); } finally { fs.renameSync = original; }
+  assert.equal(failed.ok, false);
+  assert.match(msgOf(failed), /注入的风险登记写入失败/);
+  assert.equal(fs.existsSync(declared), false, '申报恢复成写之前的样子（原来没有）');
+  assert.equal(fs.existsSync(path.join(root, REG)), false);
+  must(await writeRisks(root, fix));
+  assert.ok(fs.existsSync(declared));
+});
+
+test('M7 风险登记或它的历史里有旧格式行时，risks 提示推送前检查还没推送的提交；close 成功时提示最终提交上仍有的旧格式行号（PR #46 第 2 轮代码 M7、一致性 M5）', async () => {
+  const { root } = midRounds();
+  const fix = fixCommit(root, 3);
+  const unrelated = { pr: '3', commit: 'a'.repeat(40), round: 1, kind: 'code', id: 'M5', severity: 'medium', location: 'src/x.ts:1', problem: '无关旧行的原文', reason: '理由', fix: '改法', status: '已修、未再复审', fixedIn: [] };
+  write(root, REG, `${JSON.stringify(unrelated)}${NL}`);
+  const w = must(await writeRisks(root, fix));
+  assert.match(msgOf(w), /git log -p/);
+  assert.match(msgOf(w), /推送/);
+  commitAll(root, 'risks');
+  const c = must(await closeRound(root, headOf(root)));
+  assert.match(msgOf(c), /第 1 行仍是旧格式/);
+  assert.ok(!msgOf(c).includes('无关旧行的原文'));
+});
