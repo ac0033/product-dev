@@ -1,18 +1,15 @@
-// 测试台账：把 JUnit、测试命令和 CI 产物汇入 git 公共目录，按测试文件查看长期结果。
-// buildReport 返回 empty 或各类文件、layers、commandLevel 和可选 untriggered。
-// parseLcov 返回每个 file 的 lines / branches（各含 hit、total），coverageSummary 返回改动文件的 Markdown 表。
-// 覆盖率另记为 ek-coverage/1 行（每个改动的源文件一行：file、lines、branches），与测试结果同存一份台账；报告的分类与层级只看测试行。
-// pull 只接受与实际下载的运行对得上的 CI 行（source 为 ci、runId 以 ci-<运行号>-<attempt>- 开头、字段类型正确），其余拒绝并列出原因。
+// 测试台账：闸门每次真正跑了测试，就把 JUnit 报告（或整条测试命令的结果）按测试文件记进 git 公共目录的台账，供巡检看长期结果。
+// 行格式 ek-test-ledger/1（字段见 readLedger 的校验）。buildReport 返回 { empty: true }，或 alwaysPass、alwaysFail、flaky、
+// layers、commandLevel、windowEmpty 和可选的 untriggered；formatReport 把它写成中文多行文本。
+// 只报告、不拦截：写台账失败由调用方降为警告。CI 产物的拉回、覆盖率与变异测试在后续版本另做（见 PR #47 的范围说明）。
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { normalizeConfig } from './config.mjs';
-import { CONFIG_FILE, defaultGh, diffNames, git, gitCommonDir, headInfo, isMain, matchesAny, prNumber, repoRoot, runGh, withLock } from './lib.mjs';
+import { CONFIG_FILE, diffNames, git, gitCommonDir, headInfo, isMain, matchesAny, repoRoot, withLock } from './lib.mjs';
 
 const SCHEMA = 'ek-test-ledger/1';
-const COVERAGE_SCHEMA = 'ek-coverage/1';
 const UNKNOWN = '（未知文件）';
 const DAY = 86400000;
 const entities = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" };
@@ -42,17 +39,32 @@ function counters(file) {
   return { file, tests: 0, failures: 0, skipped: 0, durationMs: 0 };
 }
 
-/** 属性值里只许出现五种具名实体和数字引用；原始的 < 或不成引用的 & 说明报告本身坏了。 */
-function decodeValue(raw) {
-  if (raw.includes('<')) throw new Error('属性值里有未转义的 <');
+/** XML 1.0 允许的字符：#x9、#xA、#xD、#x20–#xD7FF、#xE000–#xFFFD、#x10000–#x10FFFF。 */
+function isXmlChar(code) {
+  return code === 0x9 || code === 0xa || code === 0xd || (code >= 0x20 && code <= 0xd7ff) || (code >= 0xe000 && code <= 0xfffd) || (code >= 0x10000 && code <= 0x10ffff);
+}
+
+/** 原文里的每个字符都要是 XML 字符（单独的代理项、控制字符、U+FFFE/FFFF 都说明报告坏了）。 */
+function checkChars(raw, where) {
+  for (const ch of raw) {
+    const code = ch.codePointAt(0);
+    if (!isXmlChar(code) || (code >= 0xd800 && code <= 0xdfff)) throw new Error(`${where}里有不合法的 XML 字符 U+${code.toString(16).toUpperCase().padStart(4, '0')}`);
+  }
+}
+
+/**
+ * 解码属性值或正文里的引用：只许五种具名实体和数字引用（十六进制前缀只许小写 x，码点须是 XML 字符）；
+ * 原始的 <、不成引用的 & 和不合法的字符都说明报告本身坏了。
+ */
+function decodeValue(raw, where = '属性值') {
+  checkChars(raw, where);
+  if (raw.includes('<')) throw new Error(`${where}里有未转义的 <`);
   return raw.replace(/&([^;\s&<]*);?/g, (whole, body) => {
-    if (!whole.endsWith(';')) throw new Error(`属性值里有不成引用的 &：${whole}`);
+    if (!whole.endsWith(';')) throw new Error(`${where}里有不成引用的 &：${whole}`);
     if (Object.hasOwn(entities, body)) return entities[body];
-    // XML 1.0：十六进制前缀只许小写 x，码点须是合法字符（#x9、#xA、#xD、#x20–#xD7FF、#xE000–#xFFFD、#x10000–#x10FFFF）
     const num = /^#(?:x([0-9a-fA-F]+)|([0-9]+))$/.exec(body);
     const code = num ? parseInt(num[1] ?? num[2], num[1] ? 16 : 10) : NaN;
-    const xmlChar = code === 0x9 || code === 0xa || code === 0xd || (code >= 0x20 && code <= 0xd7ff) || (code >= 0xe000 && code <= 0xfffd) || (code >= 0x10000 && code <= 0x10ffff);
-    if (!xmlChar) throw new Error(`属性值里有无效的实体：${whole}`);
+    if (!isXmlChar(code)) throw new Error(`${where}里有无效的实体：${whole}`);
     return String.fromCodePoint(code);
   });
 }
@@ -71,7 +83,7 @@ function attributes(text) {
   return attrs;
 }
 
-/** 解析单份 JUnit XML，按文件合并测试数、失败数、跳过数和耗时；损坏报告返回原因。 */
+/** 解析单份 JUnit XML，按文件合并测试数、失败数、跳过数和耗时；损坏报告（含正文、属性里的非法字符与引用）返回原因。 */
 export function parseJUnit(xml, { root = process.cwd() } = {}) {
   const files = new Map();
   const stack = [];
@@ -86,8 +98,14 @@ export function parseJUnit(xml, { root = process.cwd() } = {}) {
       offset = token.lastIndex;
       const raw = match[0];
       if (raw.startsWith('<!--') || raw.startsWith('<?')) continue;
-      if (!raw.startsWith('<') || raw.startsWith('<![CDATA[')) {
+      if (raw.startsWith('<![CDATA[')) {
+        if (!stack.length) throw new Error('根元素外有 CDATA');
+        checkChars(raw.slice(9, -3), 'CDATA');
+        continue;
+      }
+      if (!raw.startsWith('<')) {
         if (!stack.length && raw.trim()) throw new Error('根元素外有文本');
+        decodeValue(raw, '正文');
         continue;
       }
       if (raw.startsWith('</')) {
@@ -176,14 +194,49 @@ export function ledgerFile(root) {
   return path.join(gitCommonDir(root), 'engineering-gate', 'test-ledger.jsonl');
 }
 
-/** 一次追加本批次的 JSON 行，自动创建父目录。 */
+/**
+ * 一次追加本批次的 JSON 行，自动创建父目录。文件末尾没有换行（上次写到一半中断，或被手改过）时先补一个换行，
+ * 不让新记录与旧的最后一行拼成一行而两条一起作废。
+ */
 export function appendEntries(file, entries) {
   if (!entries.length) return;
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.appendFileSync(file, entries.map((e) => JSON.stringify(e) + '\n').join(''));
+  let lead = '';
+  const size = fs.statSync(file, { throwIfNoEntry: false })?.size ?? 0;
+  if (size > 0) {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const last = Buffer.alloc(1);
+      fs.readSync(fd, last, 0, 1, size - 1);
+      if (last[0] !== 0x0a) lead = '\n';
+    } finally { fs.closeSync(fd); }
+  }
+  fs.appendFileSync(file, lead + entries.map((e) => JSON.stringify(e) + '\n').join(''));
 }
 
-/** 读取台账（测试行与覆盖率行），另列 JSON 或 schema 不合法的物理行号。 */
+const isCount = (v) => Number.isFinite(v) && v >= 0;
+const isText = (v) => typeof v === 'string' && v !== '';
+
+/** 一行台账是否符合 ek-test-ledger/1；返回问题说明，合格返回 null。先查类型再解析，不对不可信的值做隐式转换。 */
+export function entryProblem(entry) {
+  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return '不是 JSON 对象';
+  if (entry.schema !== SCHEMA) return 'schema 不认识';
+  if (typeof entry.at !== 'string' || !Number.isFinite(Date.parse(entry.at))) return 'at 不是可解析的时间';
+  if (!isText(entry.runId)) return 'runId 不是非空字符串';
+  if (!['local', 'ci'].includes(entry.source)) return 'source 不是 local 或 ci';
+  if (!(entry.commit === null || (typeof entry.commit === 'string' && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(entry.commit)))) return 'commit 不是提交号或 null';
+  if (!['full', 'affected'].includes(entry.mode)) return 'mode 不是 full 或 affected';
+  if (!(entry.os === null || isText(entry.os))) return 'os 不是字符串或 null';
+  if (!(entry.file === null || isText(entry.file))) return 'file 不是字符串或 null';
+  if (!isText(entry.layer)) return 'layer 不是非空字符串';
+  if (!['pass', 'fail', 'skip'].includes(entry.result)) return 'result 不是 pass、fail 或 skip';
+  for (const k of ['tests', 'failures', 'skipped', 'durationMs']) if (!isCount(entry[k])) return `${k} 不是非负数`;
+  if (!Array.isArray(entry.changed) || !entry.changed.every((f) => typeof f === 'string')) return 'changed 不是字符串数组';
+  if (!(entry.note === null || typeof entry.note === 'string')) return 'note 不是字符串或 null';
+  return null;
+}
+
+/** 读取台账，另列解析不了、schema 不认识或字段不合格的物理行号；文件不存在返回空。 */
 export function readLedger(file) {
   const entries = [], bad = [];
   let text;
@@ -194,34 +247,18 @@ export function readLedger(file) {
   const lines = text.split(/\r?\n/);
   if (lines.at(-1) === '') lines.pop();
   lines.forEach((line, i) => {
-    try {
-      const entry = JSON.parse(line);
-      if (entry?.schema === SCHEMA || entry?.schema === COVERAGE_SCHEMA) entries.push(entry);
-      else bad.push(i + 1);
-    } catch { bad.push(i + 1); }
+    let entry;
+    try { entry = JSON.parse(line); } catch { bad.push(i + 1); return; }
+    if (entryProblem(entry)) bad.push(i + 1);
+    else entries.push(entry);
   });
   return { entries, bad };
-}
-
-/** 按种类、runId、来源、文件和说明过滤已存在及本批重复的条目（同一次运行的几条命令级诊断 file 都是 null，靠说明区分）。 */
-export function mergeEntries(existing, incoming) {
-  const key = (entry) => JSON.stringify([entry.schema ?? SCHEMA, entry.runId, entry.source, entry.file, entry.note ?? null]);
-  const seen = new Set(existing.map(key));
-  return incoming.filter((entry) => {
-    const id = key(entry);
-    if (seen.has(id)) return false;
-    seen.add(id);
-    return true;
-  });
 }
 
 /** 统计窗口内的文件结果与层级失败率，长期未触发按全部历史的最近时间判断。 */
 export function buildReport(entries, { now = Date.now(), sinceDays = null, staleDays = 30, testFiles = null } = {}) {
   const time = new Date(now).getTime();
-  const tests = entries.filter((e) => (e.schema ?? SCHEMA) === SCHEMA);
-  const inWindow = (e) => sinceDays === null || Date.parse(e.at) >= time - sinceDays * DAY;
-  const coverageRows = entries.filter((e) => e.schema === COVERAGE_SCHEMA && inWindow(e));
-  const recent = tests.filter(inWindow);
+  const recent = sinceDays === null ? entries : entries.filter((e) => Date.parse(e.at) >= time - sinceDays * DAY);
   // 只有整份台账一条都没有、又没给测试文件清单时才算“没有数据”；有历史而窗口里没有，按 windowEmpty 照常出报告
   if (!entries.length && testFiles === null) return { empty: true };
   const byFile = new Map(), byLayer = new Map();
@@ -248,12 +285,9 @@ export function buildReport(entries, { now = Date.now(), sinceDays = null, stale
     flaky: files.filter((f) => f.pass && f.fail), layers, commandLevel, windowEmpty: !recent.length };
   if (testFiles !== null) {
     // 长期未运行按全部历史算，不受时间窗口限制：窗口里没有记录时也照样列出
-    const active = new Set(tests.filter((e) => Date.parse(e.at) >= time - staleDays * DAY).map((e) => e.file));
+    const active = new Set(entries.filter((e) => Date.parse(e.at) >= time - staleDays * DAY).map((e) => e.file));
     report.untriggered = testFiles.filter((file) => !active.has(file));
   }
-  const latest = new Map();
-  for (const row of coverageRows) if (!latest.has(row.file) || Date.parse(row.at) >= Date.parse(latest.get(row.file).at)) latest.set(row.file, row);
-  report.coverage = [...latest.values()].sort((a, b) => a.file.localeCompare(b.file));
   return report;
 }
 
@@ -267,44 +301,8 @@ export function formatReport(report) {
   section('时过时不过', report.flaky.map((f) => `${f.file}（通过 ${f.pass} 次、失败 ${f.fail} 次）`));
   section('各层测试', report.layers.map((l) => `${l.name}：${l.files} 个文件，运行 ${l.runs} 次，失败 ${l.failures} 次，失败率 ${(l.failureRate * 100).toFixed(1)}%`));
   if (report.untriggered) section('长期未运行', report.untriggered);
-  const pct = ({ hit, total }) => (total ? `${((100 * hit) / total).toFixed(1)}%（${hit}/${total}）` : '—');
-  if (report.coverage.length) section('覆盖率（各文件最近一次）', report.coverage.map((c) => `${c.file}：行 ${pct(c.lines)}，分支 ${pct(c.branches)}`));
   section(`命令级记录 ${report.commandLevel.count} 条`, Object.entries(report.commandLevel.notes).map(([note, n]) => `${note}：${n} 条`));
   return lines.join('\n');
-}
-
-/** 合并不同 lcov 记录中相同文件的行号与分支编号；任一次命中就算覆盖。 */
-export function parseLcov(text, { root = process.cwd() } = {}) {
-  const files = new Map();
-  let current;
-  for (const line of text.split(/\r?\n/)) {
-    if (line.startsWith('SF:')) {
-      const file = fileName(line.slice(3), root);
-      if (!files.has(file)) files.set(file, { lines: new Map(), branches: new Map() });
-      current = files.get(file);
-    } else if (line === 'end_of_record') {
-      current = null;
-    } else if (current && line.startsWith('DA:')) {
-      const [number, hits] = line.slice(3).split(',');
-      current.lines.set(number, current.lines.get(number) || Number(hits) > 0);
-    } else if (current && line.startsWith('BRDA:')) {
-      const [lineNo, block, branch, taken] = line.slice(5).split(',');
-      const key = [lineNo, block, branch].join(',');
-      current.branches.set(key, current.branches.get(key) || Number(taken) > 0);
-    }
-  }
-  const count = (map) => ({ hit: [...map.values()].filter(Boolean).length, total: map.size });
-  return [...files].map(([file, counts]) => ({ file, lines: count(counts.lines), branches: count(counts.branches) }));
-}
-
-/** 输出改动文件的行与分支覆盖率，没有可统计分母时显示破折号。 */
-export function coverageSummary(files, changed) {
-  const wanted = new Set(changed);
-  const selected = files.filter((item) => wanted.has(item.file));
-  if (!selected.length) return '本次改动的文件没有覆盖率数据';
-  const rate = ({ hit, total }) => total ? `${(100 * hit / total).toFixed(1)}% (${hit}/${total})` : '—';
-  return ['| 文件 | 行覆盖率 | 分支覆盖率 |', '| --- | ---: | ---: |',
-    ...selected.map((f) => `| ${f.file.replaceAll('|', '\\|').replace(/[\r\n]/g, ' ')} | ${rate(f.lines)} | ${rate(f.branches)} |`)].join('\n');
 }
 
 /** 收集与 glob 或字面路径匹配的 JUnit 文件。闸门可用 startedAt 排除旧报告。 */
@@ -322,7 +320,10 @@ export function readReports(root, patterns, startedAt = -Infinity) {
   return [...files].sort().map((file) => ({ path: file, text: fs.readFileSync(file, 'utf8') }));
 }
 
-/** 记录一次实际运行，返回条目供调用方显示计数。 */
+/**
+ * 记录一次实际运行，返回条目供调用方显示计数。写共享台账（没给 out）时持 test-ledger 锁（各工作树共用），
+ * 锁被占用时报错由调用方处理（闸门降为警告）。
+ */
 export function recordTests({ root, config, patterns = config.testReports, startedAt, exitCode, source = 'local',
   commit, mode = 'full', os: system = { linux: 'linux', win32: 'windows', darwin: 'macos' }[process.platform] ?? null,
   changed = [], runId, out }) {
@@ -331,7 +332,8 @@ export function recordTests({ root, config, patterns = config.testReports, start
   const entries = buildEntries({ root, reports: readReports(root, patterns, startedAt), testReportsConfigured: patterns.length > 0,
     testLayers: config.testLayers, exitCode, source, commit: commit === undefined ? headInfo(root).headSha : commit, mode,
     os: system, changed, at: new Date().toISOString(), runId: runId ?? defaultId });
-  appendEntries(out ?? ledgerFile(root), entries);
+  if (out) appendEntries(out, entries);
+  else withLock(root, 'test-ledger', () => appendEntries(ledgerFile(root), entries), '测试台账的写入锁');
   return entries;
 }
 
@@ -343,112 +345,7 @@ export function changedBetween(root, base, commit = 'HEAD') {
   return diff.files;
 }
 
-/**
- * 从 PR 最终提交的已完成运行下载指定产物（按 gh run list 的顺序，最新在前）。文件仅在回调 consume(dir, run, head) 内有效：
- * run 是 gh run list 的那一项，head 是 gh pr view 给的 PR 最终提交。缺失产物与 gh 错误分别处理。
- */
-export function readRunArtifacts({ root, pr, artifact, prefix = false, gh = defaultGh }, consume) {
-  const view = JSON.parse(runGh(gh, ['pr', 'view', prNumber(pr), '--json', 'headRefOid'], root));
-  if (!/^[0-9a-f]{40}$/i.test(view.headRefOid)) throw new Error('gh 没有返回有效的 PR 最终提交');
-  const runs = JSON.parse(runGh(gh, ['run', 'list', '--commit', view.headRefOid, '--json', 'databaseId,attempt,status,conclusion,name'], root));
-  const downloaded = [], missing = [];
-  for (const run of runs.filter((r) => r.status === 'completed')) {
-    const id = String(run.databaseId);
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ek-artifact-'));
-    try {
-      try {
-        runGh(gh, ['run', 'download', id, ...(prefix ? ['--pattern', artifact + '*'] : ['--name', artifact]), '--dir', dir], root);
-      } catch (error) {
-        if (!/no (?:valid |matching )?artifacts? (?:found|match)|no artifacts? (?:was |were )?downloaded/i.test(error.message)) throw error;
-        missing.push(id);
-        continue;
-      }
-      consume(dir, run, view.headRefOid);
-      downloaded.push(id);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  }
-  return { downloaded, missing, runs, head: view.headRefOid };
-}
-
-const isCount = (v) => Number.isFinite(v) && v >= 0;
-const isRatio = (v) => v !== null && typeof v === 'object' && isCount(v.hit) && isCount(v.total) && v.hit <= v.total;
-const isText = (v) => typeof v === 'string' && v !== '';
-const isCommit = (v) => v === null || (typeof v === 'string' && /^[0-9a-f]{40}$/i.test(v));
-const ARTIFACT_KINDS = { 'test-ledger-linux': 'linux', 'test-ledger-windows': 'windows', 'test-ledger-macos': 'macos', 'test-ledger-coverage': 'coverage' };
-
-/**
- * 一个台账产物的身份：产物名只认 test-ledger-<系统> 与 test-ledger-coverage，由它定出允许的 schema、系统，
- * 期望的 runId 由下载的运行号、attempt 与后缀派生（不取产物内容自报的值）。产物名不认识时返回 null。
- */
-export function artifactIdentity(name, run) {
-  const suffix = ARTIFACT_KINDS[name];
-  if (!suffix) return null;
-  return { schema: suffix === 'coverage' ? COVERAGE_SCHEMA : SCHEMA, os: suffix === 'coverage' ? null : suffix, runId: `ci-${run.databaseId}-${run.attempt ?? 1}-${suffix}` };
-}
-
-/**
- * 产物里的一行能不能进本机台账。威胁模型：产物内容由 PR 自己的 CI 产出，PR 作者可以完全控制它，台账只用于报告；
- * 这里保证的只是身份字段与下载元数据一致（不同运行、不同产物之间不能互相顶替），以及字段类型符合 schema。返回拒绝原因，合格返回 null。
- */
-export function importProblem(entry, identity) {
-  if (entry.schema !== identity.schema) return `产物里不该有 ${entry.schema} 行（应为 ${identity.schema}）`;
-  if (entry.source !== 'ci') return `来源不是 ci（${entry.source}）`;
-  if (entry.runId !== identity.runId) return `runId ${entry.runId} 与下载它的运行和产物不符（应为 ${identity.runId}）`;
-  if (!Number.isFinite(Date.parse(entry.at))) return `时间不可解析（${entry.at}）`;
-  if (!isCommit(entry.commit)) return `commit 不是 40 位提交号或 null（${JSON.stringify(entry.commit)}）`;
-  if (entry.schema === COVERAGE_SCHEMA) {
-    if (!isText(entry.file)) return '覆盖率行缺文件名';
-    if (!(entry.os === null || isText(entry.os))) return `os 不是字符串或 null（${JSON.stringify(entry.os)}）`;
-    if (!isRatio(entry.lines) || !isRatio(entry.branches)) return '覆盖率行的 lines 或 branches 不是 { hit, total }';
-    return null;
-  }
-  if (entry.os !== identity.os) return `os ${entry.os} 与产物不符（应为 ${identity.os}）`;
-  if (!['full', 'affected'].includes(entry.mode)) return `mode 不合法（${entry.mode}）`;
-  if (entry.file !== null && !isText(entry.file)) return `file 不是字符串或 null（${JSON.stringify(entry.file)}）`;
-  if (!isText(entry.layer)) return `layer 不是非空字符串（${JSON.stringify(entry.layer)}）`;
-  if (!['pass', 'fail', 'skip'].includes(entry.result)) return `结果不合法（${entry.result}）`;
-  for (const k of ['tests', 'failures', 'skipped', 'durationMs']) if (!isCount(entry[k])) return `${k} 不是非负数（${JSON.stringify(entry[k])}）`;
-  if (!Array.isArray(entry.changed) || !entry.changed.every((f) => typeof f === 'string')) return 'changed 不是字符串数组';
-  if (!(entry.note === null || typeof entry.note === 'string')) return `note 不是字符串或 null（${JSON.stringify(entry.note)}）`;
-  return null;
-}
-
-function pullLedger(root, pr, artifact) {
-  const incoming = [];
-  const rejected = [];
-  const { downloaded, missing } = readRunArtifacts({ root, pr, artifact, prefix: true }, (dir, run, head) => {
-    for (const file of fs.globSync('**/*.jsonl', { cwd: dir })) {
-      const rel = file.split(path.sep).join('/');
-      const name = rel.includes('/') ? rel.slice(0, rel.indexOf('/')) : null;
-      const where = `运行 ${run.databaseId} / ${name ?? '（不在产物子目录里）'} / ${rel}`;
-      const identity = name && artifactIdentity(name, run);
-      const { entries, bad } = readLedger(path.join(dir, file));
-      if (!identity) {
-        rejected.push(`${where}：产物名不认识，整份 ${entries.length + bad.length} 行不导入`);
-        continue;
-      }
-      for (const line of bad) rejected.push(`${where}:${line}：解析不了或 schema 不认识`);
-      for (const entry of entries) {
-        const why = importProblem(entry, identity);
-        if (why) rejected.push(`${where}：${why}`);
-        else incoming.push({ ...entry, prHead: head });
-      }
-    }
-  });
-  const file = ledgerFile(root);
-  const count = withLock(root, 'test-ledger-pull', () => {
-    const fresh = mergeEntries(readLedger(file).entries, incoming);
-    appendEntries(file, fresh);
-    return fresh.length;
-  });
-  const total = rejected.reduce((n, why) => n + (Number(/整份 (\d+) 行/.exec(why)?.[1]) || 1), 0);
-  console.log(`拉回运行 ${downloaded.join('、') || '无'}；缺少产物的运行 ${missing.join('、') || '无'}；新增 ${count} 条，跳过重复 ${incoming.length - count} 条${total ? `，拒绝 ${total} 条（与下载的运行和产物对不上、字段不合法或解析不了，未写入）` : ''}`);
-  for (const why of rejected) console.log(`  拒绝：${why}`);
-}
-
-/** 本地没有工程配置时使用默认值，允许独立采集已有的 CI 报告。 */
+/** 本地没有工程配置时使用默认值，允许在没装套件的仓库里独立记录和出报告。 */
 export function metricsConfig(root) {
   const file = path.join(root, CONFIG_FILE);
   return normalizeConfig(fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {});
@@ -464,24 +361,33 @@ function days(value, fallback) {
   return Number(value);
 }
 
-/** 巡检用的层级提示：没配 testLayers 时提示补配；已跟踪文件命中多个层级时列出文件、命中的层和实际采用的层（第一个）。 */
+/**
+ * 巡检用的配置提示：没配 testReports 时提示补配（否则台账只记整条命令）；没配 testLayers 时提示补配；
+ * 已跟踪文件命中多个层级时列出文件、命中的层和实际采用的层（第一个）。
+ */
 function layerHints(root, config) {
-  if (!config.testLayers.length) return ['提示：未配置 modules.gate.testLayers，台账层级一律记“未分层”；在项目配置里按 unit、integration、e2e 等声明后可按层统计'];
+  const hints = [];
+  if (!config.testReports.length) hints.push('提示：未配置 modules.gate.testReports，台账只记整条测试命令的通过或失败；在测试命令里打开 JUnit 报告并配置它后，可按测试文件统计');
+  if (!config.testLayers.length) {
+    hints.push('提示：未配置 modules.gate.testLayers，台账层级一律记“未分层”；在项目配置里按 unit、integration、e2e 等声明后可按层统计');
+    return hints;
+  }
   const tracked = git(root, ['ls-files', '-z']);
-  if (!tracked.ok) return [];
+  if (!tracked.ok) return hints;
   const overlaps = [];
   for (const file of tracked.out.split('\0').filter(Boolean)) {
     const hit = config.testLayers.filter((layer) => matchesAny(file, layer.paths)).map((layer) => layer.name);
     if (hit.length > 1) overlaps.push(`  ${file}：命中 ${hit.join('、')}，采用 ${hit[0]}`);
   }
-  return overlaps.length ? ['提示：以下测试文件命中多个层级，按配置顺序取第一个：', ...overlaps] : [];
+  if (overlaps.length) hints.push('提示：以下测试文件命中多个层级，按配置顺序取第一个：', ...overlaps);
+  return hints;
 }
 
 function main([command, ...args]) {
   const root = repoRoot();
   if (command === 'record') {
     const v = options(args, ['exit-code', 'source', 'junit', 'mode', 'commit', 'os', 'run-id', 'changed-from', 'out']);
-    if (!/^-?\d+$/.test(v['exit-code'])) throw new Error('--exit-code 须为整数');
+    if (!/^-?\d+$/.test(v['exit-code'] ?? '')) throw new Error('--exit-code 须为整数');
     if (v.source !== undefined && !['local', 'ci'].includes(v.source)) throw new Error('--source 须为 local 或 ci');
     if (v.mode !== undefined && !['full', 'affected'].includes(v.mode)) throw new Error('--mode 须为 full 或 affected');
     if (v.os !== undefined && !['linux', 'windows', 'macos'].includes(v.os)) throw new Error('--os 须为 linux、windows 或 macos');
@@ -490,9 +396,6 @@ function main([command, ...args]) {
     const changed = v['changed-from'] === undefined ? [] : changedBetween(root, v['changed-from'], commit);
     recordTests({ root, config: metricsConfig(root), patterns: v.junit, exitCode: Number(v['exit-code']), commit, changed,
       source: v.source, os: v.os, mode: v.mode, runId: v['run-id'], out: v.out });
-  } else if (command === 'pull') {
-    const v = options(args, ['pr', 'artifact']);
-    pullLedger(root, v.pr, v.artifact ?? 'test-ledger');
   } else if (command === 'report') {
     const v = options(args, ['ledger', 'since', 'stale-days']);
     const { entries, bad } = readLedger(v.ledger ?? ledgerFile(root));
@@ -506,24 +409,7 @@ function main([command, ...args]) {
     if (bad.length) console.log(`跳过 ${bad.length} 行坏行（行号 ${bad.join('、')}）`);
     for (const line of layerHints(root, config)) console.log(line);
     console.log(formatReport(buildReport(entries, { sinceDays: days(v.since, null), staleDays: days(v['stale-days'], 30), testFiles })));
-  } else if (command === 'coverage') {
-    const v = options(args, ['lcov', 'base', 'summary', 'out', 'run-id', 'os']);
-    if (v.os !== undefined && !['linux', 'windows', 'macos'].includes(v.os)) throw new Error('--os 须为 linux、windows 或 macos');
-    if (!v.lcov || !v.base || !v.summary) throw new Error('coverage 需要 --lcov、--base 和 --summary');
-    const files = parseLcov(fs.readFileSync(v.lcov, 'utf8'), { root });
-    const changed = changedBetween(root, v.base);
-    const report = coverageSummary(files, changed);
-    fs.appendFileSync(v.summary, report + '\n');
-    console.log(report);
-    if (v.out) {
-      // 覆盖率进台账：每个改动的源文件一行，供 pull 拉回后在报告里看趋势
-      const wanted = new Set(changed);
-      const at = new Date().toISOString();
-      const runId = v['run-id'] ?? `ci-${randomUUID()}`;
-      const { headSha } = headInfo(root);
-      appendEntries(v.out, files.filter((f) => wanted.has(f.file)).map((f) => ({ schema: COVERAGE_SCHEMA, at, runId, source: 'ci', commit: headSha, os: v.os ?? null, file: f.file, lines: f.lines, branches: f.branches })));
-    }
-  } else throw new Error('命令须为 record、pull、report 或 coverage');
+  } else throw new Error('命令须为 record 或 report');
 }
 
 if (isMain(import.meta.url)) {

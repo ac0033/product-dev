@@ -15,7 +15,7 @@ export const FLAT_KEYS = [
   'base', 'sourceGlobs', 'testGlobs', 'reviewIgnore', 'commentMode', 'testCommand', 'testEnv',
   'reviewers', 'reviewMinChars', 'reviewSections', 'reviewKeyword', 'lockMaxAgeMinutes', 'reviewFlow', 'testGroups', 'maxReviewRounds', 'requiredChecks',
   'roundClosure', 'riskRegister', 'externalExecutors', 'externalExclude', 'fullTests', 'ciRunner', 'ciFallback', 'ciOs', 'session', 'parallel',
-  'testLayers', 'testReports', 'coverage', 'mutationCommand',
+  'testLayers', 'testReports',
 ];
 
 /**
@@ -41,8 +41,6 @@ export const DEFAULTS = {
   testGroups: [],
   testLayers: [],
   testReports: [],
-  coverage: null,
-  mutationCommand: null,
   maxReviewRounds: 3,
   roundClosure: 'off',
   riskRegister: 'docs/04-开发/review-risks.jsonl',
@@ -141,7 +139,7 @@ export const COMMENT_MODES = ['header', 'header+exports'];
 
 /**
  * 校验其余字段的类型（新旧两种结构展开后共用）：写错的类型会让某项检查静默失效（如 reviewMinChars 写成字符串，最少字数检查就不执行），
- * 所以一律报错，不回退默认值。可选的执行位置与测试工具另由 checkExecution 和 checkTestMetrics 校验。
+ * 所以一律报错，不回退默认值。可选的执行位置与测试层级、报告另由 checkExecution 和 checkTestMetrics 校验。
  */
 function checkTypes(eff) {
   const at = (k) => `engineering.config.json 的 ${k}`;
@@ -215,7 +213,7 @@ function checkTestGroups(groups) {
 }
 
 /** 测试度量只影响报告；错误带上整个配置项，方便排查嵌套的层级或路径。 */
-function checkTestMetrics({ testLayers, testReports, coverage, mutationCommand }) {
+function checkTestMetrics({ testLayers, testReports }) {
   const nonEmpty = (value) => typeof value === 'string' && value.trim() !== '';
   const strings = (value) => Array.isArray(value) && value.every(nonEmpty);
   const invalid = (key, value, reason) => {
@@ -227,10 +225,6 @@ function checkTestMetrics({ testLayers, testReports, coverage, mutationCommand }
     invalid('testLayers', testLayers, '须为层级数组，层名不重复且无首尾空白，每层 paths 至少包含一个 glob');
   }
   if (!strings(testReports)) invalid('testReports', testReports, '须为非空字符串组成的数组');
-  if (coverage !== null && !(isObject(coverage) && nonEmpty(coverage.command) && isRepoPath(coverage.lcov))) {
-    invalid('coverage', coverage, '须为 null 或含非空 command 与仓库相对路径 lcov 的对象');
-  }
-  if (mutationCommand !== null && !nonEmpty(mutationCommand)) invalid('mutationCommand', mutationCommand, '须为 null 或非空命令');
 }
 
 /**
@@ -288,8 +282,6 @@ function expand(raw) {
     testGroups: pick(gate, 'testGroups', 'modules.gate'),
     testLayers: pick(gate, 'testLayers', 'modules.gate'),
     testReports: pick(gate, 'testReports', 'modules.gate'),
-    coverage: pick(gate, 'coverage', 'modules.gate'),
-    mutationCommand: pick(gate, 'mutationCommand', 'modules.gate'),
     requiredChecks: pick(gate, 'requiredChecks', 'modules.gate'),
     fullTests: pick(gate, 'fullTests', 'modules.gate'),
     ciRunner: pick(gate, 'ciRunner', 'modules.gate'),
@@ -328,8 +320,6 @@ export function toProfile(flat, { keepZeroMinChars = false } = {}) {
   if (f.testGroups.length > 0) gate.testGroups = f.testGroups;
   if (f.testLayers.length > 0) gate.testLayers = f.testLayers;
   if (f.testReports.length > 0) gate.testReports = f.testReports;
-  if (f.coverage !== null) gate.coverage = f.coverage;
-  if (f.mutationCommand !== null) gate.mutationCommand = f.mutationCommand;
   if (f.requiredChecks.length > 0) gate.requiredChecks = f.requiredChecks;
   const review = { reviewers: f.reviewers, reviewSections: f.reviewSections, reviewKeyword: f.reviewKeyword, maxReviewRounds: f.maxReviewRounds };
   // 显式写了 0 的旧配置（keepZeroMinChars，由调用方按原始文件判断）保留这个 0：回滚时 toFlat 据此继续写出 0，旧版不会回到自己的默认字数

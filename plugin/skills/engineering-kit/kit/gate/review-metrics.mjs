@@ -1,5 +1,6 @@
 // 只读汇总各 PR 的复审登记。collectMetrics 返回 prs、summary、badLines 和 skippedDirs。
 // 每个 PR 含 pr、rounds、missedLater、accepts、closes、lastAt、dataMissing；占比以 0 到 1 表示。
+// firstPassRate 是“没有任何不通过登记、且至少有一次通过登记”的 PR 占比：只看登记历史，不核对两种审查是否都已登记（合并入口另有核对）。
 // unavailable 单列没有 log.jsonl、读不出或只有坏行的 PR（{ pr, reason }），它们不计入 prs 和汇总，其他 PR 照常统计。
 import fs from 'node:fs';
 import path from 'node:path';
@@ -90,7 +91,7 @@ export function collectMetrics({ commonDir, now = Date.now(), sinceDays = null }
 }
 
 function table({ prs, summary: s, badLines, skippedDirs, unavailable }) {
-  const lines = [`共 ${s.prCount} 个 PR，平均失败轮次 ${s.averageRounds.toFixed(2)}，一轮通过 ${(100 * s.firstPassRate).toFixed(1)}%，后续发现原先漏检 ${s.missedLater} 条，接受风险 ${s.accepts} 次，收口 ${s.closes} 次`,
+  const lines = [`共 ${s.prCount} 个 PR，平均失败轮次 ${s.averageRounds.toFixed(2)}，没有不通过登记 ${(100 * s.firstPassRate).toFixed(1)}%，后续发现原先漏检 ${s.missedLater} 条，接受风险 ${s.accepts} 次，收口 ${s.closes} 次`,
     'PR\t失败轮次\t后续漏检\t接受风险\t收口\t最后登记时间'];
   for (const p of prs) lines.push([p.pr, p.rounds, p.missedLater, p.accepts, p.closes, p.lastAt].join('\t'));
   for (const p of prs) for (const missing of p.dataMissing) lines.push(`PR ${p.pr} 第 ${missing.line} 行复审数据缺失：${missing.reason}`);
