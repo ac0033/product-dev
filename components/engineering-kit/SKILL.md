@@ -111,6 +111,8 @@ node "<kit>/tools/release.mjs"                              # 提交整包目录
 
 0.7.0 起另有外部复审（`external-review.mjs`）：把代码复审或一致性审交给其他厂商的模型，结果转成 `review.mjs` 认可的复审数据（`ek-review/1`）、生成报告后照常登记，两种流程都能用。协议与厂商无关（任务 JSON 从标准输入进、结果 JSON 从标准输出出），内置执行器是 Codex CLI；项目在主干配置的 `modules.review.externalExecutors` 列允许的执行器，复审者名单加 `external:<执行器名>`，执行器的命令和默认模型写在仓库之外的本机配置。接入步骤和使用规则以插件入口的 `review.md` 第 1 节“外部复审者”为准。真实验证：只在合成样例上用 Codex 跑过（`evals/runs/2026-11-12-external-review.md`），尚未在真实项目里走过。
 
+0.11.0 起另有测试度量（都只报告、不拦截）：测试台账 `test-ledger.mjs` 默认就记——闸门每次真正跑了测试（全量，或 `--affected`、`--full`）就按测试文件记一笔（结果、层级、提交、改动文件，写在 git 公共目录的 `engineering-gate/test-ledger.jsonl`，各工作树共用）；结果来自 `modules.gate.testReports` 配的 JUnit XML，没配只记整条命令；层级按 `modules.gate.testLayers`。`test-ledger.mjs record` 可以在没装套件的仓库或 CI 里单独记，`report` 列出一直失败、时过时不过、长期没运行的测试和各层失败率，并提示补配这两个键。`fullTests` 为 `ci` 的项目本机通常不跑全量，台账只有本机实际跑过的那部分；CI 结果拉回台账、覆盖率与自动变异测试留到后续版本（运行与 PR 的归属、attempt、作业超时等边界要先在契约里定清）。复审质量指标 `review-metrics.mjs`：从 PR 登记历史统计轮次、第二轮起的“原先漏检”条数、accept 与 close 次数，读不出日志的 PR 单列。
+
 ## 6. 套件的范围与局限
 
 - `fullTests: "ci"` 下本机没有任何全量测试保证：全量是否通过只看 CI；CI 作业没启动（额度用完、自托管 runner 离线）时合并入口会因检查缺失或未完成拒绝合并，不会放行。`ciRunner` 只是声明，套件不检查 runner 是否在线，也不核对 workflow 的 `runs-on` 与它一致。

@@ -541,3 +541,137 @@ test('S1 Markdown 报告不再能登记：传 .md 文本被拒，提示须为 ek
   assert.equal(readRecord(root, 'review.json'), null);
   assert.equal(fs.existsSync(path.join(recordDir(root), 'reviews', 'log.jsonl')), false);
 });
+
+// ---------- C3 闸门写测试台账（规格 spec-CD 第 2.4 节） ----------
+// 台账文件在 git 公共目录的 engineering-gate/test-ledger.jsonl。这里不 import 台账模块（实现可能还不存在，不能让本文件整体加载失败），
+// 直接按格式读文件。测试命令是仓库里的 mk.mjs：写一份 JUnit 报告到 reports/j.xml，MK_FAIL=1 时报告里带失败用例并以退出码 1 退出。
+
+/** 台账文件路径（git 公共目录下）。 */
+function ledgerPath(root) {
+  return path.join(git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']).trim(), 'engineering-gate', 'test-ledger.jsonl');
+}
+
+/** 读台账里的全部条目；文件不存在返回空数组。 */
+function ledgerEntries(root) {
+  const f = ledgerPath(root);
+  return fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+}
+
+const MK = [
+  "import fs from 'node:fs';",
+  "fs.mkdirSync('reports', { recursive: true });",
+  "const bad = process.env.MK_FAIL === '1';",
+  "fs.writeFileSync('reports/j.xml', `<testsuites><testsuite name=\"s\" file=\"test/dedup.test.ts\"><testcase name=\"t\" time=\"0.1\">${bad ? '<failure message=\"x\"/>' : ''}</testcase></testsuite></testsuites>`);",
+  'process.exit(bad ? 1 : 0);',
+  '',
+].join('\n');
+
+/** 建一个配了 testReports 与 testLayers 的仓库，测试命令是 mk.mjs；并改好源文件与测试（测试先行检查通过）。extra 覆盖配置。 */
+function ledgerRepo(extra = {}) {
+  const root = featureRepo({ testCommand: 'node mk.mjs', testReports: ['reports/*.xml'], testLayers: [{ name: 'unit', paths: ['test/**'] }], ...extra });
+  write(root, 'mk.mjs', MK);
+  write(root, '.gitignore', 'reports/\n'); // 报告是测试产物，不能算运行期间出现的新文件
+  write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort();\n}\n`);
+  write(root, 'test/dedup.test.ts', "import { dedup } from '../src/dedup.ts';\nassert.ok(dedup, 'sorted');\n");
+  return root;
+}
+
+test('C3 闸门写台账：全量运行按 JUnit 写文件级条目（本机来源、全量、分层、本次改动文件），只取本次运行开始后修改过的报告，输出 测试台账：新增 N 条', () => {
+  const root = ledgerRepo();
+  // 一份很早以前的旧报告：修改时间早于本次运行开始，不能被读进台账
+  write(root, 'reports/old.xml', '<testsuites><testsuite name="s" file="test/old.test.ts"><testcase name="o"/></testsuite></testsuites>');
+  const long = new Date('2020-01-01T00:00:00Z');
+  fs.utimesSync(path.join(root, 'reports', 'old.xml'), long, long);
+  const res = runGate({ root });
+  assert.equal(res.ok, true, res.messages.join('\n'));
+  const es = ledgerEntries(root);
+  assert.equal(es.length, 1, JSON.stringify(es));
+  const [e] = es;
+  assert.deepEqual([e.schema, e.source, e.mode, e.file, e.layer, e.result, e.failures], ['ek-test-ledger/1', 'local', 'full', 'test/dedup.test.ts', 'unit', 'pass', 0]);
+  assert.match(e.runId, /^local-/);
+  assert.ok(e.changed.includes('src/dedup.ts') && e.changed.includes('test/dedup.test.ts'), `全量时 changed 为本次改动：${JSON.stringify(e.changed)}`);
+  assert.ok(res.messages.some((m) => /测试台账：新增 1 条（文件级 1、命令级 0）/.test(m)), res.messages.join('\n'));
+});
+
+test('C3 闸门写台账：测试失败时同样写，result 为 fail，闸门结论仍是不通过', () => {
+  const root = ledgerRepo({ testEnv: { MK_FAIL: '1' } });
+  const res = runGate({ root });
+  assert.equal(res.ok, false);
+  const [e] = ledgerEntries(root);
+  assert.deepEqual([e.file, e.result, e.failures], ['test/dedup.test.ts', 'fail', 1]);
+});
+
+test('C3 闸门写台账：没配 testReports → 一条命令级条目（未配置 testReports），输出里文件级 0、命令级 1', () => {
+  const root = ledgerRepo({ testReports: [] });
+  const res = runGate({ root });
+  assert.equal(res.ok, true, res.messages.join('\n'));
+  const [e, ...rest] = ledgerEntries(root);
+  assert.equal(rest.length, 0);
+  assert.deepEqual([e.file, e.result, e.note, e.layer], [null, 'pass', '未配置 testReports', '未分层']);
+  assert.ok(res.messages.some((m) => /测试台账：新增 1 条（文件级 0、命令级 1）/.test(m)), res.messages.join('\n'));
+});
+
+test('C3 闸门写台账：按影响范围运行时 mode 为 affected，changed 为全量记录之后改动的文件', () => {
+  const root = ledgerRepo({ testGroups: [{ name: 'g', paths: ['src/**', 'test/**'], command: 'node mk.mjs' }] });
+  assert.equal(runGate({ root }).ok, true);
+  assert.equal(ledgerEntries(root).length, 1);
+  write(root, 'src/dedup.ts', `${SRC_HEADER}export function dedup(items: string[]) {\n  return [...new Set(items)].sort().reverse();\n}\n`);
+  const res = runGate({ root, affected: true });
+  assert.equal(res.ok, true, res.messages.join('\n'));
+  const es = ledgerEntries(root);
+  assert.equal(es.length, 2, JSON.stringify(es));
+  assert.equal(es[1].mode, 'affected');
+  assert.deepEqual(es[1].changed, ['src/dedup.ts']);
+  assert.notEqual(es[1].runId, es[0].runId, '每次运行一个 runId');
+});
+
+test('C3 闸门写台账：沿用已有通过记录时没有真正运行测试，不写', () => {
+  const root = ledgerRepo();
+  assert.equal(runGate({ root }).ok, true);
+  const res = runGate({ root });
+  assert.ok(res.messages.some((m) => /沿用已有通过记录/.test(m)), res.messages.join('\n'));
+  assert.equal(ledgerEntries(root).length, 1, '第二次没有运行测试，台账不新增');
+});
+
+test('C3 闸门写台账：fullTests=ci 只做静态检查，没有运行测试命令，不写台账', () => {
+  const root = ledgerRepo({ fullTests: 'ci', reviewFlow: 'pr', ciRunner: 'github-hosted', requiredChecks: ['ci-gate'] });
+  const res = runGate({ root });
+  assert.equal(res.ok, true, res.messages.join('\n'));
+  assert.equal(fs.existsSync(ledgerPath(root)), false);
+  assert.ok(!res.messages.some((m) => /测试台账：新增/.test(m)));
+});
+
+test('C3 闸门写台账：写台账失败只在输出里加警告，不改变闸门结论、不改测试记录', () => {
+  const root = ledgerRepo();
+  // 让台账路径是一个目录：追加写必然失败
+  fs.mkdirSync(ledgerPath(root), { recursive: true });
+  const res = runGate({ root });
+  assert.equal(res.ok, true, res.messages.join('\n'));
+  assert.equal(res.record.passed, true);
+  assert.equal(readRecord(root, 'tests.json').passed, true, '测试记录照常写');
+  assert.ok(res.messages.some((m) => /警告：测试台账没写进去：/.test(m)), res.messages.join('\n'));
+  // 测试失败时结论仍是失败（警告不会把它改成通过）
+  const failing = ledgerRepo({ testEnv: { MK_FAIL: '1' } });
+  fs.mkdirSync(ledgerPath(failing), { recursive: true });
+  const bad = runGate({ root: failing });
+  assert.equal(bad.ok, false);
+  assert.ok(bad.messages.some((m) => /警告：测试台账没写进去：/.test(m)));
+});
+
+test('R4-5 闸门：测试期间代码变化时不记台账（输出 本次不记台账）；正常运行的条目 commit 等于测试开始时的 HEAD', () => {
+  // 测试命令运行期间改了一个受跟踪的源文件：记录作废，台账不能记下这次运行
+  const root = ledgerRepo({ testCommand: 'node mk-mutate.mjs' });
+  write(root, 'mk-mutate.mjs', `${MK}`.replace("process.exit(bad ? 1 : 0);", "fs.appendFileSync('src/dedup.ts', '// 运行期间改动\\n');\nprocess.exit(bad ? 1 : 0);"));
+  const res = runGate({ root });
+  assert.equal(res.ok, false, res.messages.join('\n'));
+  assert.ok(res.messages.some((m) => /测试运行期间代码发生了变化/.test(m)), res.messages.join('\n'));
+  assert.ok(res.messages.some((m) => /本次不记台账/.test(m)), res.messages.join('\n'));
+  assert.equal(ledgerEntries(root).length, 0, '代码变了，台账不新增条目');
+  // 正常运行：条目的 commit 是测试开始时的 HEAD
+  const ok = ledgerRepo();
+  const head = git(ok, ['rev-parse', 'HEAD']).trim();
+  const good = runGate({ root: ok });
+  assert.equal(good.ok, true, good.messages.join('\n'));
+  const [e] = ledgerEntries(ok);
+  assert.equal(e.commit, head);
+});
