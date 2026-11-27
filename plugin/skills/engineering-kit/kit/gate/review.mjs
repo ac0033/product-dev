@@ -432,7 +432,7 @@ export function checkPrClosure(root, no, config, st, priorClose = {}) {
     closure: config.roundClosure, flow: config.reviewFlow, state, prOpen: st.state === 'OPEN', ciProblems: st.ciProblems,
     head: st.head, failHead, headIsDescendant: !!failHead && git(root, ['merge-base', '--is-ancestor', failHead, st.head]).ok,
     registerPath, register: blob.ok ? parseRiskRegister(blob.out) : null, expected: evidence.expected,
-    fixDiff: diff?.files ?? [], exempt,
+    fixDiff: diff?.files ?? [], exempt, declaredFixedIn: declaredFixedIn(root, no, state.latest),
     ...priorClose,
   });
   if (diff && !diff.ok) problems.push('无法读取最新失败提交到最终提交的修复差异');
@@ -445,14 +445,57 @@ export function checkPrClosure(root, no, config, st, priorClose = {}) {
   return { failHead, round: state.latest?.index, entries: evidence.expected.length, problems };
 }
 
-/** 修复差异按文件的增删行数（二进制文件写“二进制”），供主控核对同一文件里有没有夹带无关改动。 */
-function fixDiffLines(root, from, to) {
+/** 显示用的路径：控制字符（含制表符、换行）转义成 \t、\n、\u001b 这样的可见写法，一条路径只占一行。 */
+export function displayPath(file) {
+  return file.replace(/[\p{Cc}\\]/gu, (c) => (c === '\\' ? '\\\\' : c === '\t' ? '\\t' : c === '\n' ? '\\n' : c === '\r' ? '\\r' : '\\u' + c.codePointAt(0).toString(16).padStart(4, '0')));
+}
+
+/**
+ * 修复差异按文件的增删行数（二进制文件写“二进制”），供主控核对同一文件里有没有夹带无关改动。
+ * `--numstat -z` 每条记录以 NUL 结尾，记录里只有前两个制表符是列分隔符，其后的全部内容都是路径（路径可以含制表符）。
+ */
+export function fixDiffLines(root, from, to) {
   const r = git(root, ['diff', '--no-renames', '--numstat', '-z', from, to]);
   if (!r.ok) return ['  （读不出按文件的改动行数）'];
   return r.out.split('\0').filter(Boolean).map((row) => {
-    const [add, del, file] = row.split('\t');
-    return '  ' + file + '：' + (add === '-' ? '二进制' : '+' + add + ' -' + del);
+    const a = row.indexOf('\t');
+    const b = row.indexOf('\t', a + 1);
+    const [add, del, file] = [row.slice(0, a), row.slice(a + 1, b), row.slice(b + 1)];
+    return '  ' + displayPath(file) + '：' + (add === '-' ? '二进制' : '+' + add + ' -' + del);
   });
+}
+
+/** 风险登记内容里旧格式（0.10.0）行的物理行号。 */
+function legacyLines(text) {
+  const out = [];
+  for (const [i, line] of text.split('\n').entries()) {
+    if (line.trim() && parseRiskRegister(line).entries[0]?.legacy) out.push(i + 1);
+  }
+  return out;
+}
+
+/** 本机的修复路径申报：git 公共目录 pr/<编号>/risks.json，由 risks 在 PR 锁内写，PR 的提交改不到。 */
+function saveDeclaredFixedIn(root, no, latest, entries) {
+  const file = prRecordFile(root, no, 'risks');
+  const record = { pr: no, failHead: latest.head, round: latest.index, at: new Date().toISOString(),
+    entries: entries.map((e) => ({ key: riskKey(e), findingSha: e.findingSha, fixedIn: e.fixedIn })) };
+  const tmp = file + '.' + crypto.randomUUID() + '.tmp';
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(record, null, 2) + '\n', { flag: 'wx' });
+    fs.renameSync(tmp, file);
+  } finally { fs.rmSync(tmp, { force: true }); }
+}
+
+/** 读本机的修复路径申报，只取针对当前失败提交与轮次的那份；没有或对不上时返回空表。 */
+function declaredFixedIn(root, no, latest) {
+  const map = new Map();
+  let record = null;
+  try { record = JSON.parse(fs.readFileSync(prRecordFile(root, no, 'risks'), 'utf8')); } catch { return map; }
+  if (!latest || record?.failHead !== latest.head || record.round !== latest.index || !Array.isArray(record.entries)) return map;
+  for (const e of record.entries) {
+    if (typeof e?.key === 'string' && typeof e.findingSha === 'string' && Array.isArray(e.fixedIn) && e.fixedIn.every(isRepoPath)) map.set(e.key, { findingSha: e.findingSha, fixedIn: e.fixedIn });
+  }
+  return map;
 }
 
 /** 更新本轮中级发现的实际修复位置。参数可重复，同一编号在两种审查里都有时须带种类。 */
@@ -542,7 +585,12 @@ export function writeRisks({ root, pr, fixedIn = [], sharedSummary = [] }) {
       fs.writeFileSync(tmp, content, { flag: 'wx' });
       fs.renameSync(tmp, file);
     } finally { fs.rmSync(tmp, { force: true }); }
-    return { ok: true, message: '已写入 ' + entries.length + ' 条风险登记到 ' + config.riskRegister + '，提交并推送后运行 review.mjs close' };
+    // 申报的修复路径另存一份在本机（git 公共目录，PR 的提交改不到）：close 与合并入口只认这份申报
+    saveDeclaredFixedIn(root, no, state.latest, entries);
+    const out = ['已写入 ' + entries.length + ' 条风险登记到 ' + config.riskRegister + '，提交并推送后运行 review.mjs close'];
+    const legacy = legacyLines(content);
+    if (legacy.length) out.push('提示：风险登记第 ' + legacy.join('、') + ' 行仍是旧格式（0.10.0，逐字写了复审原文），不属于本轮；要清除原文须另行改写这些行，已推送过的 git 历史里仍有原文');
+    return { ok: true, message: out.join('\n') };
     }, '风险登记的写入锁');
   });
 }

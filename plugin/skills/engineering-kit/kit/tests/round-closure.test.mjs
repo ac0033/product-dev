@@ -733,3 +733,71 @@ test('P6 风险登记里有同身份的旧格式行：close 拒绝并写“旧�
   commitAll(root, 'risks');
   must(await closeRound(root, headOf(root)));
 });
+
+// ---------- PR #46 第 1 轮复审的回归 ----------
+
+test('H1 risks 之后改写已提交登记里的 fixedIn、借它带进无关文件：close 与合并入口都拒绝；本机没有 risks 的申报记录时同样拒绝（PR #46 第 1 轮代码 H1、一致性 M4）', async () => {
+  const { root } = midRounds();
+  const fix = fixCommit(root, 3);
+  must(await writeRisks(root, fix));
+  const entry = JSON.parse(read(root, REG).split(NL)[0]);
+  entry.fixedIn = ['src/f9.ts'];
+  write(root, REG, `${JSON.stringify(entry)}${NL}`);
+  write(root, 'src/f9.ts', `${SRC_HEADER}export const v9 = 9;${NL}`);
+  commitAll(root, 'tampered fixedIn');
+  const head = headOf(root);
+  const rows = logRows(root).length;
+  const r = await closeRound(root, head);
+  assertCloseRefused(root, r, rows);
+  assert.match(msgOf(r), /申报/);
+  const gh = fakeGh(head);
+  const m = mergePr({ root, pr: '7', gh });
+  assert.equal(m.ok, false);
+  assert.equal(gh.calls.some((a) => a[1] === 'merge'), false, '没有执行合并');
+
+  // 本机的申报记录不在（例如登记是手写或在别处生成的）：拒绝并指向在本机运行 risks
+  const other = midRounds();
+  const fix2 = fixCommit(other.root, 3);
+  must(await writeRisks(other.root, fix2));
+  fs.rmSync(path.join(prDir(other.root), 'risks.json'));
+  commitAll(other.root, 'risks');
+  const missing = await closeRound(other.root, headOf(other.root));
+  assert.equal(missing.ok, false);
+  assert.match(msgOf(missing), /本机没有 risks/);
+});
+
+test('M5 risks 的输出点出仍是旧格式的无关行行号，不回显原文（PR #46 第 1 轮一致性 M5）', async () => {
+  const { root } = midRounds();
+  const fix = fixCommit(root, 3);
+  const OLD = '无关旧行里的原文';
+  const unrelated = { pr: '3', commit: 'a'.repeat(40), round: 1, kind: 'code', id: 'M5', severity: 'medium', location: 'src/x.ts:1', problem: OLD, reason: '理由', fix: '改法', status: '已修、未再复审', fixedIn: [] };
+  write(root, REG, `${JSON.stringify(unrelated)}${NL}`);
+  const w = must(await writeRisks(root, fix));
+  assert.match(msgOf(w), /第 1 行/);
+  assert.match(msgOf(w), /旧格式/);
+  assert.ok(!msgOf(w).includes(OLD), '不回显原文');
+});
+
+test('M5 close 的输出按文件列出增删行数（PR #46 第 1 轮代码 M5、一致性 M6）', async () => {
+  const { root } = midRounds();
+  const { head } = await fixAndRecord(root, 3);
+  const c = must(await closeRound(root, head));
+  assert.match(msgOf(c), /src\/dedup\.ts：\+\d+ -\d+/);
+  assert.match(msgOf(c), /review-risks\.jsonl：\+\d+ -\d+/);
+});
+
+test('M5 显示用的路径把制表符、换行等控制字符转义，一条路径只占一行；含制表符的文件名完整保留并带上增删行数（PR #46 第 1 轮代码 M5、一致性 M6）', { skip: process.platform === 'win32' && 'Windows 的文件名不能含制表符和换行' }, () => {
+  assert.equal(REVIEW.displayPath('a\tb\nc\\d'), String.raw`a\tb\nc\\d`);
+  assert.equal(REVIEW.displayPath('src/普通.ts'), 'src/普通.ts');
+  const { root, c2 } = midRounds();
+  write(root, 'test/a\tb.ts', `x${NL}y${NL}`);
+  commitAll(root, 'tab path');
+  const lines = REVIEW.fixDiffLines(root, c2, headOf(root));
+  assert.ok(lines.includes(String.raw`  test/a\tb.ts：+2 -0`), lines.join(' / '));
+});
+
+test('M5 displayPath 在各平台都转义控制字符（PR #46 第 1 轮代码 M5）', () => {
+  assert.equal(REVIEW.displayPath('x\u001by'), String.raw`x\u001by`);
+  assert.equal(REVIEW.displayPath('a\rb'), String.raw`a\rb`);
+  assert.equal(REVIEW.displayPath('a\\b'), String.raw`a\\b`, '反斜杠本身也转义，转义后的写法不会和原样的反斜杠混淆');
+});

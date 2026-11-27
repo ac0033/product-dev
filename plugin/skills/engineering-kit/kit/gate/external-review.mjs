@@ -946,7 +946,7 @@ export async function runExternalReview(opts) {
     // 整组产物（数据、指纹、报告、判定）先写进暂存目录，再一次改名为 result/ 发布：这是唯一的提交点，
     // 进程在任何时刻被终止，看到的要么没有 result/，要么是完整的一组
     publishResult(runDir, files);
-    published = true;
+    published = { assessment, reportPath: assessment.registrable ? reportPath : null, command: registerCommand(runDir, pr) };
     const base = { runDir, result, assessment, reportPath: null, registration: null };
     if (!assessment.registrable) {
       return { ...base, ok: false, message: [`外部复审没有产生可登记的报告（运行记录：${runDir}）：`, ...assessment.reasons].join('\n') };
@@ -972,13 +972,16 @@ export async function runExternalReview(opts) {
       const note = removeCopy(copy, runDir, identity);
       if (note) reasons.push(note);
     }
-    const assessment = { registrable: false, verdict: null, reasons, notes: [] };
-    // 结果已经发布（提交点之后出错）就不再改动；否则发布一份只含不可登记判定的结果，这一步也失败时如实写明
-    if (!published) {
-      try { publishResult(runDir, { 'assessment.json': JSON.stringify({ assessment }, null, 2) + '\n' }); }
-      catch (err) { reasons.push(`不可登记的判定也没能发布（${err.message}）：运行目录里没有 ${RESULT_DIR}/，这次运行不能补登`); }
+    // 结果已经发布（提交点之后出错）：磁盘上的那组结果不变，返回值也照它报告，只另外说明后续步骤失败、怎样补登
+    if (published) {
+      if (published.assessment.registrable) reasons.push(`结果已发布在 ${path.join(runDir, RESULT_DIR)}，可以补登，不必重跑模型：${published.command}`);
+      return { ok: false, runDir, assessment: published.assessment, reportPath: published.reportPath, registration: null, published: true, message: reasons.join('\n') };
     }
-    return { ok: false, runDir, assessment, reportPath: null, registration: null, message: reasons.join('\n') };
+    // 尚未发布：发布一份只含不可登记判定的结果，这一步也失败时如实写明
+    const assessment = { registrable: false, verdict: null, reasons, notes: [] };
+    try { publishResult(runDir, { 'assessment.json': JSON.stringify({ assessment }, null, 2) + '\n' }); }
+    catch (err) { reasons.push(`不可登记的判定也没能发布（${err.message}）：运行目录里没有 ${RESULT_DIR}/，这次运行不能补登`); }
+    return { ok: false, runDir, assessment, reportPath: null, registration: null, published: false, message: reasons.join('\n') };
   }
 }
 

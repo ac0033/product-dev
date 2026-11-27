@@ -73,6 +73,8 @@ export function roundState({ entries, limit, closure, required = ['code', 'consi
   let finalHead = null;
   let finalKinds = [];
   let finalEntries = [];
+  // 超出允许轮次的不通过：默认是第 N 轮之后的全部；开放最后一轮时只算第 N 轮收齐之后的（与最后一轮同一个时间截点）
+  let extraFrom = 0;
   if (lastAllowed?.collected && lastAllowed.high && !lastAllowed.unresolvable && !lastAllowed.systemic) {
     // 收齐位置以第 N 轮提交首次不通过为下界（之前在该提交上的登记照算进收齐）
     const start = firstFail.get(lastAllowed.head);
@@ -82,15 +84,19 @@ export function roundState({ entries, limit, closure, required = ['code', 'consi
       if (history[i].headSha === lastAllowed.head) seen.add(history[i].kind);
       if (required.every((k) => seen.has(k))) collectedAt = i;
     }
-    const after = history.slice(collectedAt + 1);
+    extraFrom = collectedAt + 1;
+    const after = history.slice(extraFrom);
     finalHead = after.find((e) => e.headSha !== lastAllowed.head && counted(e))?.headSha ?? null;
     finalEntries = finalHead ? after.filter((e) => e.headSha === finalHead) : [];
     finalKinds = [...new Set(finalEntries.map((e) => e.kind))];
     if (finalEntries.some((e) => e.verdict === 'fail')) rounds.push(summarize(finalHead, limit + 1, finalEntries, required, lastAllowed));
   }
-  // 第 N 轮之后其余提交上的不通过都超出了允许的轮次
-  for (const head of failHeads.slice(limit)) {
-    if (head !== finalHead) rounds.push(summarize(head, rounds.length + 1, byHead.get(head), required, rounds.at(-1)));
+  // 超出允许轮次的提交：收齐之前（经用户决定）在别的提交上的不通过只留作追溯，不占轮次；最后一轮提交另算
+  const allowed = new Set(rounds.map((r) => r.head));
+  const extraHeads = [...new Set(history.slice(extraFrom).filter((e) => e.verdict === 'fail' && !allowed.has(e.headSha) && e.headSha !== finalHead).map((e) => e.headSha))];
+  for (const head of extraHeads) {
+    const own = history.slice(extraFrom).filter((e) => e.headSha === head);
+    rounds.push(summarize(head, rounds.length + 1, own, required, rounds.at(-1)));
   }
   const state = { closure, limit, rounds, latest: rounds.at(-1) ?? null, finalHead, finalKinds };
   const [phase, reasons] = classify(state);
@@ -242,16 +248,31 @@ export function closureProblems(facts) {
   const allowed = new Set([registerPath]);
   for (const e of expected) {
     const label = e.kind + ' ' + e.id + '：';
-    const all = (byKey.get(riskKey(e)) ?? []).filter((v) => v.round === e.round);
-    const matches = all.filter((v) => !v.legacy);
+    const same = byKey.get(riskKey(e)) ?? [];
+    const matches = same.filter((v) => !v.legacy && v.round === e.round);
     for (const f of e[findingFiles] ?? []) allowed.add(f);
+    // 同一条发现还留着旧格式行（逐字写了复审原文）时不收口：新旧并存说明原文还在要推送的文件里
+    if (same.some((v) => v.legacy)) {
+      problems.push(label + '风险登记里还有这条发现的旧格式行（0.10.0，逐字写了复审原文）：重新运行 review.mjs risks 改写成新格式并提交（已推送过的历史里仍有原文，按项目规则另行处理）');
+      continue;
+    }
     if (matches.length !== 1) {
-      if (!matches.length && all.length) problems.push(label + '风险登记里只有旧格式（0.10.0，逐字写了复审原文）的条目：重新运行 review.mjs risks 生成新格式并提交');
-      else problems.push(label + (matches.length ? '风险登记条目重复' : '缺少风险登记条目'));
+      problems.push(label + (matches.length ? '风险登记条目重复' : '缺少风险登记条目'));
       continue;
     }
     const [actual] = matches;
-    for (const f of actual.fixedIn) allowed.add(f);
+    // 申报的修复路径只认本机登记（risks 在 PR 锁内留下、PR 改不到的那份）：提交里的 fixedIn 必须与它一致
+    const declared = facts.declaredFixedIn?.get(riskKey(e));
+    const sameSet = (a, b) => a.length === b.length && a.every((f) => b.includes(f));
+    if (!declared || declared.findingSha !== e.findingSha) {
+      problems.push(label + '本机没有 risks 对这条发现的登记（或登记针对的不是同一条发现）：在本机运行 review.mjs risks 生成风险登记，不要手写或改写');
+      continue;
+    }
+    if (!sameSet(actual.fixedIn, declared.fixedIn)) {
+      problems.push(label + '提交里的实际改在（' + (actual.fixedIn.join('、') || '无') + '）与本机 risks 登记的申报（' + (declared.fixedIn.join('、') || '无') + '）不一致：修复路径只能经 review.mjs risks --fixed-in 申报');
+      continue;
+    }
+    for (const f of declared.fixedIn) allowed.add(f);
     for (const k of ['severity', 'status', 'dataSha', 'findingSha']) {
       if (actual[k] !== e[k]) problems.push(label + k + ' 与预期登记内容不一致');
     }

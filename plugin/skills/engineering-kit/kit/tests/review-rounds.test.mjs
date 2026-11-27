@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as RR from '../gate/review-rounds.mjs';
-import { FINAL_ROUND_TEXT, admitRegistration, closureProblems, expectedRiskEntries, nextHint, parseRiskRegister, roundState } from '../gate/review-rounds.mjs';
+import { FINAL_ROUND_TEXT, admitRegistration, closureProblems, expectedRiskEntries, nextHint, parseRiskRegister, riskKey, roundState } from '../gate/review-rounds.mjs';
 
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
@@ -378,6 +378,13 @@ const DATA_SHA = 'd'.repeat(64);
 const SUMMARY = '已核对的可共享摘要';
 /** 满足全部前提的事实：第 N 轮（B）只剩中级，修复提交改了定位文件，风险登记完整。 */
 function goodFacts(over = {}) {
+  const facts = baseFacts(over);
+  if (!Object.hasOwn(over, 'declaredFixedIn')) {
+    Object.defineProperty(facts, 'declaredFixedIn', { enumerable: true, configurable: true, get() { return declaredOf(this.register?.entries ?? []); } });
+  }
+  return facts;
+}
+function baseFacts(over) {
   const state = closeOnly();
   const expected = expectedRiskEntries({ pr: '7', round: 2, failHead: B, failures: [{ kind: 'code', findings: [FAIL_FINDING], dataSha: DATA_SHA }] });
   return {
@@ -395,6 +402,13 @@ function goodFacts(over = {}) {
     registerPath: 'docs/04-开发/review-risks.jsonl',
     ...over,
   };
+}
+/**
+ * 本机申报表（risks 在 PR 锁内留下的那份）：没显式给时按当前登记里的条目算，即“提交里的 fixedIn 就是 risks 申报的”。
+ * 用 getter，测试改了 register 之后仍按改后的条目算；要测申报与提交不一致时显式给 declaredFixedIn。
+ */
+function declaredOf(entries) {
+  return new Map(entries.filter((e) => !e.legacy).map((e) => [riskKey(e), { findingSha: e.findingSha, fixedIn: e.fixedIn }]));
 }
 const all = (facts) => closureProblems(facts).join('|');
 const withEntry = (over) => {
@@ -664,11 +678,25 @@ test('P4 closureProblems：findingSha、dataSha、severity、status 与预期不
   assert.deepEqual(closureProblems(goodFacts(withEntry({ summary: '  前后有空白的摘要  ' }))), [], '去掉首尾空白后非空即可');
 });
 
-test('P6 closureProblems：同一身份只有旧格式条目时报“旧格式”；同身份已有新格式条目时旧行不碍事（0.10.1 代码 H2）', () => {
+test('P6 closureProblems：同一身份只有旧格式条目时报“旧格式”；同身份新旧格式并存时同样拒绝（原文还在要推送的文件里；PR #46 第 1 轮一致性 M5）', () => {
   const g = goodFacts();
   const legacy = { ...legacyEntry({ commit: g.expected[0].commit, round: g.expected[0].round }), legacy: true };
   assert.match(closureProblems({ ...g, register: { entries: [legacy], problems: [] } }).join('|'), /旧格式/);
-  assert.deepEqual(closureProblems({ ...g, register: { entries: [legacy, ...g.register.entries], problems: [] } }), []);
+  assert.match(closureProblems({ ...g, register: { entries: [legacy, ...g.register.entries], problems: [] } }).join('|'), /旧格式/);
+  const other = { ...legacy, id: 'M9' };
+  assert.deepEqual(closureProblems({ ...g, register: { entries: [other, ...g.register.entries], problems: [] } }), [], '别的发现的旧格式行不阻断本轮收口（risks 会提示行号）');
+});
+
+test('H1 closureProblems：提交里的 fixedIn 与本机 risks 申报不一致、或本机没有申报时拒绝；只有申报过的路径扩大白名单（PR #46 第 1 轮代码 H1、一致性 M4）', () => {
+  const g = goodFacts({ fixDiff: ['src/dedup.ts', 'src/f9.ts'] });
+  g.register = { entries: [{ ...g.expected[0], summary: SUMMARY, fixedIn: ['src/f9.ts'] }], problems: [] };
+  const key = riskKey(g.expected[0]);
+  const tampered = closureProblems({ ...g, declaredFixedIn: new Map([[key, { findingSha: g.expected[0].findingSha, fixedIn: [] }]]) }).join('|');
+  assert.match(tampered, /申报/);
+  assert.match(tampered, /M1/);
+  assert.match(closureProblems({ ...g, declaredFixedIn: new Map() }).join('|'), /本机没有 risks/);
+  assert.match(closureProblems({ ...g, declaredFixedIn: new Map([[key, { findingSha: 'f'.repeat(64), fixedIn: ['src/f9.ts'] }]]) }).join('|'), /本机没有 risks/, '申报针对的不是同一条发现');
+  assert.deepEqual(closureProblems({ ...g, declaredFixedIn: new Map([[key, { findingSha: g.expected[0].findingSha, fixedIn: ['src/f9.ts'] }]]) }), [], '与申报一致时放行');
 });
 
 // ---------- 0.10.1：收口的修复差异白名单（代码 H1） ----------
@@ -688,4 +716,21 @@ test('W6 closureProblems：修复差异含白名单外的文件时报出该文�
   const declared = goodFacts({ fixDiff: ['src/other.ts'] });
   declared.register = { entries: [{ ...declared.expected[0], summary: SUMMARY, fixedIn: ['src/other.ts'] }], problems: [] };
   assert.deepEqual(closureProblems(declared), [], '--fixed-in 申报的路径允许');
+});
+
+// ---------- PR #46 第 1 轮复审的回归 ----------
+
+test('M1 roundState：第 N 轮收齐前（经用户决定）在别的提交 D 上登记的不通过不占轮次，最后一轮照常在 C 上进行并收口；收齐后在 D 上的不通过仍算超额（PR #46 第 1 轮代码 M1、一致性 M3）', () => {
+  const early = [...roundHigh(A), fail('code', B, [f('H1'), f('M1')]), rec('code', 'fail', D, [f('M1')], { userDecision: '用户同意先审 D' })];
+  const atCollect = rs([...early, pass('consistency', B)]);
+  assert.equal(atCollect.phase, 'final-next', '提前在 D 上的不通过不改变阶段');
+  assert.equal(atCollect.latest.head, B);
+  assert.equal(atCollect.rounds.length, 2);
+  assert.equal(RR.finalRoundTarget(atCollect, D), true, 'D 仍可作为最后一轮提交');
+  const closed = rs([...early, pass('consistency', B), fail('code', C, [f('M1')]), pass('consistency', C)]);
+  assert.equal(closed.phase, 'close-only', 'C 上的最后一轮只剩中级即可收口');
+  assert.equal(closed.latest.head, C);
+  assert.equal(closed.rounds.length, 3);
+  const extra = rs([...early, pass('consistency', B), fail('code', C, [f('M1')]), pass('consistency', C), fail('code', D, [f('M1')]), pass('consistency', D)]);
+  assert.equal(extra.phase, 'stop', '收齐之后在别的提交上的不通过仍超出允许的轮次');
 });

@@ -1638,3 +1638,24 @@ test('T7 旧布局（0.10.0 及更早：结果文件在运行目录根下、没�
   assert.equal(done.ok, true, done.message);
   assert.equal(done.record.headSha, head);
 });
+
+// ---------- PR #46 第 1 轮复审的回归 ----------
+
+test('M4 结果发布之后的步骤出错：返回值照已发布的结果报告（可登记、报告路径在 result/ 下），写明可以补登；磁盘结果不变，补登成功（PR #46 第 1 轮代码 M4）', async () => {
+  const { root, head } = repo();
+  const local = { ...LOCAL, executors: { fake: { ...LOCAL.executors.fake, env: { FAKE_MODE: 'pass' } } } };
+  const opts = { root, executor: 'fake', pr: '7', gh: fakeGh([head]), localConfig: local, outDir: path.join(tmpDir('ekit-xr-'), 'run') };
+  // 发布之后第一次读 opts.register 时抛错，模拟提交点之后的意外
+  Object.defineProperty(opts, 'register', { enumerable: true, get() { throw new Error('注入的发布后错误（测试）'); } });
+  const res = await runExternalReview(opts);
+  assert.equal(res.ok, false);
+  assert.match(res.message, /注入的发布后错误/);
+  assert.match(res.message, /可以补登/);
+  assert.equal(res.published, true);
+  assert.equal(res.assessment.registrable, true, '返回已发布的判定，不是新造的不可登记判定');
+  assert.equal(res.reportPath, path.join(res.runDir, 'result', 'report.md'));
+  assert.ok(fs.existsSync(res.reportPath));
+  assert.equal(readJson(path.join(res.runDir, 'result', 'assessment.json')).assessment.registrable, true, '磁盘上的判定不变');
+  const done = registerRun({ root, runDir: res.runDir, summary: 's', gh: fakeGh([head]) });
+  assert.equal(done.ok, true, done.message);
+});
