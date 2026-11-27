@@ -79,7 +79,7 @@ jobs:
         shell: bash
         env:
           OUTCOME: ${{ steps.evals.outcome == 'success' && steps.kit.outcome == 'success' && '0' || '1' }}
-        run: node components/engineering-kit/kit/gate/test-ledger.mjs record --source ci --exit-code "$OUTCOME" --junit "${{ runner.temp }}/junit-evals.xml" --junit "${{ runner.temp }}/junit-kit.xml" --os "${{ matrix.os }}" --run-id "ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}" --mode full --out "${{ runner.temp }}/test-ledger-${{ matrix.os }}.jsonl"
+        run: node components/engineering-kit/kit/gate/test-ledger.mjs record --source ci --exit-code "$OUTCOME" --junit "${{ runner.temp }}/junit-evals.xml" --junit "${{ runner.temp }}/junit-kit.xml" --os "${{ runner.os == 'Windows' && 'windows' || runner.os == 'macOS' && 'macos' || 'linux' }}" --run-id "ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}" --mode full --out "${{ runner.temp }}/test-ledger-${{ matrix.os }}.jsonl"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         continue-on-error: true
