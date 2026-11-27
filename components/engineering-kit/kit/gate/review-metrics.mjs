@@ -14,7 +14,12 @@ function readLog(log, pr, badLines) {
   lines.forEach((line, i) => {
     try {
       const r = JSON.parse(line);
-      if (!r?.kind || !r.verdict || !r.headSha || !Number.isFinite(Date.parse(r.at))) throw new Error('登记字段缺失或时间无效');
+      // 按登记写入端（review.mjs）的格式校验：结构损坏的行不能改变轮次、最近时间或汇总分母
+      if (!r || typeof r !== 'object') throw new Error('登记不是对象');
+      if (!['code', 'consistency', 'close'].includes(r.kind)) throw new Error(`kind 不合法（${JSON.stringify(r.kind)}）`);
+      if (!['pass', 'fail', 'defer', 'accept', 'close'].includes(r.verdict)) throw new Error(`verdict 不合法（${JSON.stringify(r.verdict)}）`);
+      if (typeof r.headSha !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(r.headSha)) throw new Error(`headSha 不是 40 或 64 位提交号（${JSON.stringify(r.headSha)}）`);
+      if (typeof r.at !== 'string' || !Number.isFinite(Date.parse(r.at))) throw new Error('时间无效');
       records.push({ ...r, line: i + 1 });
     } catch (error) {
       badLines.push({ pr, line: i + 1, reason: error.message });

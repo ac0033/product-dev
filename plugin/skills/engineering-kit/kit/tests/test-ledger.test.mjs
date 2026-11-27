@@ -245,7 +245,7 @@ test('C3 台账读写：appendEntries 建目录并逐行追加；readLedger 返�
   assert.deepEqual(got.bad, [4, 5], '坏行用物理行号（从 1 数）');
 });
 
-test('C5 pull 去重：mergeEntries 按 (runId, source, file) 去重，只返回要追加的新条目（命令级 file 为 null 同样参与）', async () => {
+test('C5 pull 去重：mergeEntries 按 (schema, runId, source, file, note) 去重，只返回要追加的新条目（命令级 file 为 null 同样参与）', async () => {
   const { mergeEntries } = await lib();
   const existing = [entry({ runId: 'r1' }), entry({ runId: 'r1', file: null, layer: '未分层', note: 'x' })];
   const incoming = [
@@ -331,7 +331,9 @@ test('C5 报告：sinceDays 只算窗口内的条目', async () => {
   const recent = buildReport(es, { now: NOW, sinceDays: 7 });
   assert.deepEqual(names(recent.alwaysFail), []);
   assert.deepEqual(names(recent.alwaysPass), ['tests/new.test.mjs']);
-  assert.equal(buildReport(es, { now: NOW, sinceDays: 0.5 }).empty, true, '窗口里一条都没有就是空台账');
+  const none = buildReport(es, { now: NOW, sinceDays: 0.5 });
+  assert.notEqual(none.empty, true, '台账有历史：窗口里一条都没有不再算空台账');
+  assert.equal(none.windowEmpty, true, '而是 windowEmpty');
 });
 
 test('C5 报告：空台账返回 empty；formatReport 空台账输出 台账里还没有数据，非空为多行中文且含文件名', async () => {
@@ -477,7 +479,7 @@ test('C5 pull：gh pr view → gh run list → 对每个已完成的运行 gh ru
   const got = readLedger(ledgerFile(root)).entries;
   assert.deepEqual(got.map((e) => `${e.runId}|${e.file}`).sort(), [
     'ci-101-1-linux|tests/a.test.mjs', 'ci-101-1-linux|tests/b.test.mjs', 'ci-102-1-linux|tests/a.test.mjs', 'ci-102-1-windows|tests/a.test.mjs',
-  ], '重复的 (runId, source, file) 只留一条');
+  ], '重复的 (schema, runId, source, file, note) 只留一条');
   for (const id of ['101', '102', '104']) assert.ok(r.stdout.includes(id), `输出要提到运行 ${id}（拉回的或跳过的）`);
   assert.match(r.stdout, /新增/);
   const calls = gh.calls();
@@ -581,9 +583,10 @@ test('H1 pull：只接受 schema 合法、source 为 ci、runId 以 ci-<运行�
   const root = repoWithTests();
   const good = [
     entry({ runId: 'ci-201-2-linux', file: 'tests/a.test.mjs' }),
-    entry({ runId: 'ci-201-2-windows', os: 'windows', file: null, layer: '未分层', note: '未配置 testReports' }),
+    entry({ runId: 'ci-201-2-linux', file: null, layer: '未分层', note: '未配置 testReports' }),
   ];
   const bad = [
+    entry({ runId: 'ci-201-2-windows', os: 'windows', file: 'tests/b.test.mjs' }), // linux 产物里自报 windows：按第 10 节拒绝
     entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', source: 'local' }),
     entry({ runId: 'ci-999-2-linux', file: 'tests/b.test.mjs' }),
     entry({ runId: 'ci-201-1-linux', file: 'tests/b.test.mjs' }),
@@ -596,16 +599,16 @@ test('H1 pull：只接受 schema 合法、source 为 ci、runId 以 ci-<运行�
   const r = cli(root, ['pull', '--pr', '7'], gh.env);
   assert.equal(r.status, 0, r.stderr + r.stdout);
   const got = readLedger(ledgerFile(root)).entries;
-  assert.deepEqual(got.map((e) => `${e.runId}|${e.file}`).sort(), ['ci-201-2-linux|tests/a.test.mjs', 'ci-201-2-windows|null']);
-  assert.match(r.stdout, /拒绝 7 条/);
+  assert.deepEqual(got.map((e) => `${e.runId}|${e.file}`).sort(), ['ci-201-2-linux|null', 'ci-201-2-linux|tests/a.test.mjs']);
+  assert.match(r.stdout, /拒绝 8 条/);
 });
 
-test('H2 pull 去重：去重键含 note——同一次运行的两条命令级记录（file 为 null、note 不同）都保留，再拉一次不重复', async () => {
+test('H2 pull 去重：去重键是 (schema, runId, source, file, note)——同一次运行的两条命令级记录（file 为 null、note 不同）都保留，再拉一次不重复', async () => {
   const { mergeEntries, readLedger, ledgerFile } = await lib();
   const cmd = (note) => entry({ runId: 'ci-301-1-linux', file: null, layer: '未分层', result: 'fail', note });
   const a = cmd('JUnit 解析失败：r1.xml：标签不完整');
   const b = cmd('JUnit 解析失败：r2.xml：标签不完整');
-  assert.equal(mergeEntries([], [a, b]).length, 2, '同 runId、source、file 但 note 不同：都保留');
+  assert.equal(mergeEntries([], [a, b]).length, 2, '同 schema、runId、source、file 但 note 不同：都保留');
   assert.equal(mergeEntries([a, b], [a, b]).length, 0, '都已存在：不重复');
   assert.equal(mergeEntries([a], [a, b, b]).length, 1, '本批内同 note 的重复只留一条');
   const root = repoWithTests();
@@ -767,4 +770,119 @@ test('M9 pull：合法的覆盖率条目导入台账，来源不合法的覆盖�
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.deepEqual(readLedger(ledgerFile(root)).entries.map((e) => `${e.schema}|${e.file}`), ['ek-coverage/1|src/a.mjs']);
   assert.match(r.stdout, /拒绝 1 条/);
+});
+
+// ---------- 第 2 轮复审回归（规格第 10 节） ----------
+
+/** 用假 gh 拉一次 PR（运行 201 第 2 次），返回 { r, entries, gh }。artifacts 是产物内相对路径到文本的映射。 */
+async function pull201(artifacts, prHead = 'd'.repeat(40)) {
+  const { readLedger, ledgerFile } = await lib();
+  const root = repoWithTests();
+  const gh = fakeGh({ prHead, runs: [RUN2], artifacts: { 201: artifacts } });
+  const r = cli(root, ['pull', '--pr', '7'], gh.env);
+  const entries = fs.existsSync(ledgerFile(root)) ? readLedger(ledgerFile(root)).entries : [];
+  return { r, entries, gh };
+}
+
+const GOOD = () => entry({ runId: 'ci-201-2-linux', file: 'tests/a.test.mjs' });
+
+test('R2-1 导入身份：test-ledger-linux 产物里自报 windows 的条目拒绝（产物名后缀决定 os）；windows 产物里自报 windows 的合格', async () => {
+  const { r, entries } = await pull201({
+    'test-ledger-linux/l.jsonl': lines(GOOD(), entry({ runId: 'ci-201-2-windows', os: 'windows', file: 'tests/b.test.mjs' })),
+    'test-ledger-windows/l.jsonl': lines(entry({ runId: 'ci-201-2-windows', os: 'windows', file: 'tests/b.test.mjs' })),
+  });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.deepEqual(entries.map((e) => `${e.runId}|${e.os}|${e.file}`).sort(), ['ci-201-2-linux|linux|tests/a.test.mjs', 'ci-201-2-windows|windows|tests/b.test.mjs']);
+  assert.match(r.stdout, /拒绝 1 条/);
+});
+
+test('R2-1 导入身份：产物名不认识（other-artifact）整份拒绝；文件不在产物子目录里拒绝', async () => {
+  const unknown = await pull201({ 'other-artifact/x.jsonl': lines(GOOD(), GOOD()) });
+  assert.equal(unknown.r.status, 0, unknown.r.stderr + unknown.r.stdout);
+  assert.equal(unknown.entries.length, 0, '不认识的产物名：整份不导入');
+  assert.match(unknown.r.stdout, /拒绝/);
+  const loose = await pull201({ 'l.jsonl': lines(GOOD()) });
+  assert.equal(loose.r.status, 0, loose.r.stderr + loose.r.stdout);
+  assert.equal(loose.entries.length, 0, '文件不在子目录里：拒绝');
+  assert.match(loose.r.stdout, /拒绝/);
+});
+
+test('R2-1 导入身份：test-ledger-coverage 里出现测试行拒绝；test-ledger-linux 里出现覆盖率行拒绝；各自的合格行仍导入', async () => {
+  const { r, entries } = await pull201({
+    'test-ledger-coverage/c.jsonl': lines(covEntry(), entry({ runId: 'ci-201-2-coverage', file: 'tests/b.test.mjs' })),
+    'test-ledger-linux/l.jsonl': lines(GOOD(), covEntry({ runId: 'ci-201-2-linux', file: 'src/b.mjs' })),
+  });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.deepEqual(entries.map((e) => `${e.schema}|${e.runId}|${e.file}`).sort(), ['ek-coverage/1|ci-201-2-coverage|src/a.mjs', 'ek-test-ledger/1|ci-201-2-linux|tests/a.test.mjs']);
+  assert.match(r.stdout, /拒绝 2 条/);
+});
+
+test('R2-1 导入身份：runId 只是前缀相同、后缀不同（ci-201-2-linux-x）拒绝', async () => {
+  const { r, entries } = await pull201({ 'test-ledger-linux/l.jsonl': lines(GOOD(), entry({ runId: 'ci-201-2-linux-x', file: 'tests/b.test.mjs' })) });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.deepEqual(entries.map((e) => e.runId), ['ci-201-2-linux']);
+  assert.match(r.stdout, /拒绝 1 条/);
+});
+
+test('R2-1 导入身份：layer 非字符串、note 非字符串、changed 不是字符串数组、commit 不是 40 位十六进制都拒绝；commit 为 null 的合格', async () => {
+  const bad = [
+    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', layer: 5 }),
+    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', note: 5 }),
+    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', changed: 'src/x.mjs' }),
+    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', changed: ['src/x.mjs', 3] }),
+    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', commit: 'abc123' }),
+    entry({ runId: 'ci-201-2-linux', file: 'tests/b.test.mjs', commit: 'g'.repeat(40) }),
+  ];
+  const { r, entries } = await pull201({ 'test-ledger-linux/l.jsonl': lines(GOOD(), entry({ runId: 'ci-201-2-linux', file: 'tests/c.test.mjs', commit: null }), ...bad) });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.deepEqual(entries.map((e) => e.file).sort(), ['tests/a.test.mjs', 'tests/c.test.mjs']);
+  assert.match(r.stdout, /拒绝 6 条/);
+});
+
+test('R2-1 导入身份：产物里的坏 JSON 行和未知 schema 行计入 拒绝 N 条，输出里有产物名和 文件名:行号', async () => {
+  const text = `${JSON.stringify(GOOD())}\nthis is not json\n${JSON.stringify({ schema: 'other/9', file: 'x' })}\n`;
+  const { r, entries } = await pull201({ 'test-ledger-linux/l.jsonl': text });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(entries.length, 1);
+  assert.match(r.stdout, /拒绝 2 条/);
+  assert.ok(r.stdout.includes('test-ledger-linux'), r.stdout);
+  assert.ok(r.stdout.includes('l.jsonl:2') && r.stdout.includes('l.jsonl:3'), r.stdout);
+});
+
+test('R2-1 导入身份：合格条目入台账后带可信字段 prHead（等于 gh pr view 给的最终提交），commit 原样保留', async () => {
+  const head = '9'.repeat(40);
+  const { r, entries } = await pull201({ 'test-ledger-linux/l.jsonl': lines(GOOD()) }, head);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].prHead, head);
+  assert.equal(entries[0].commit, 'a'.repeat(40), 'CI 实际检出的提交原样保留');
+});
+
+test('R2-2 报告空窗口：台账有历史、窗口内没有记录、没给 testFiles → 不是 empty，windowEmpty 为真，formatReport 第一行是 所选时间窗口内没有测试记录；整份台账为空且没给 testFiles 仍是 台账里还没有数据', async () => {
+  const { buildReport, formatReport } = await lib();
+  const es = [entry({ runId: 'o1', file: 'tests/old.test.mjs', at: ago(40) })];
+  const r = buildReport(es, { now: NOW, sinceDays: 7 });
+  assert.notEqual(r.empty, true);
+  assert.equal(r.windowEmpty, true);
+  const text = formatReport(r);
+  assert.match(text.split('\n')[0], /所选时间窗口内没有测试记录/);
+  assert.doesNotMatch(text, /台账里还没有数据/);
+  const none = buildReport([], { now: NOW });
+  assert.equal(none.empty, true);
+  assert.match(formatReport(none), /台账里还没有数据/);
+});
+
+test('R2-3 JUnit 数字引用：&#X41;（大写 X）、&#1;、&#xFFFE; 判坏；&#9;、&#x41;、&#65;、&#x1F600; 合法并解码', async () => {
+  const { parseJUnit } = await lib();
+  const root = repoWithTests();
+  const wrap = (attr) => `<testsuites><testsuite name="s"><testcase name="t" ${attr}/></testsuite></testsuites>`;
+  for (const ref of ['&#X41;', '&#1;', '&#xFFFE;']) {
+    const r = parseJUnit(wrap(`classname="x${ref}y"`), { root });
+    assert.equal(r.ok, false, ref);
+    assert.ok(typeof r.error === 'string' && r.error.length > 0, ref);
+  }
+  assert.equal(parseJUnit(wrap('classname="a&#9;b"'), { root }).ok, true, '&#9;');
+  assert.deepEqual(parseJUnit(wrap('file="&#x41;"'), { root }).files.map((f) => f.file), ['A'], '&#x41;');
+  assert.deepEqual(parseJUnit(wrap('file="&#65;"'), { root }).files.map((f) => f.file), ['A'], '&#65;');
+  assert.deepEqual(parseJUnit(wrap('file="&#x1F600;"'), { root }).files.map((f) => f.file), ['\u{1F600}'], '&#x1F600;');
 });

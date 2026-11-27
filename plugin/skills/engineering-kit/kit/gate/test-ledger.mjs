@@ -48,9 +48,11 @@ function decodeValue(raw) {
   return raw.replace(/&([^;\s&<]*);?/g, (whole, body) => {
     if (!whole.endsWith(';')) throw new Error(`属性值里有不成引用的 &：${whole}`);
     if (Object.hasOwn(entities, body)) return entities[body];
-    const num = /^#(?:x([0-9a-f]+)|(\d+))$/i.exec(body);
+    // XML 1.0：十六进制前缀只许小写 x，码点须是合法字符（#x9、#xA、#xD、#x20–#xD7FF、#xE000–#xFFFD、#x10000–#x10FFFF）
+    const num = /^#(?:x([0-9a-fA-F]+)|([0-9]+))$/.exec(body);
     const code = num ? parseInt(num[1] ?? num[2], num[1] ? 16 : 10) : NaN;
-    if (!Number.isInteger(code) || code < 1 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) throw new Error(`属性值里有无效的实体：${whole}`);
+    const xmlChar = code === 0x9 || code === 0xa || code === 0xd || (code >= 0x20 && code <= 0xd7ff) || (code >= 0xe000 && code <= 0xfffd) || (code >= 0x10000 && code <= 0x10ffff);
+    if (!xmlChar) throw new Error(`属性值里有无效的实体：${whole}`);
     return String.fromCodePoint(code);
   });
 }
@@ -220,7 +222,8 @@ export function buildReport(entries, { now = Date.now(), sinceDays = null, stale
   const inWindow = (e) => sinceDays === null || Date.parse(e.at) >= time - sinceDays * DAY;
   const coverageRows = entries.filter((e) => e.schema === COVERAGE_SCHEMA && inWindow(e));
   const recent = tests.filter(inWindow);
-  if (!recent.length && !coverageRows.length && testFiles === null) return { empty: true };
+  // 只有整份台账一条都没有、又没给测试文件清单时才算“没有数据”；有历史而窗口里没有，按 windowEmpty 照常出报告
+  if (!entries.length && testFiles === null) return { empty: true };
   const byFile = new Map(), byLayer = new Map();
   const commandLevel = { count: 0, notes: Object.create(null) };
   for (const { file, layer, result, note } of recent) {
@@ -340,7 +343,10 @@ export function changedBetween(root, base, commit = 'HEAD') {
   return diff.files;
 }
 
-/** 从 PR 最终提交的已完成运行下载指定产物，文件仅在回调 consume(dir, run) 内有效（run 是 gh run list 的那一项）；缺失产物与 gh 错误分别处理。 */
+/**
+ * 从 PR 最终提交的已完成运行下载指定产物（按 gh run list 的顺序，最新在前）。文件仅在回调 consume(dir, run, head) 内有效：
+ * run 是 gh run list 的那一项，head 是 gh pr view 给的 PR 最终提交。缺失产物与 gh 错误分别处理。
+ */
 export function readRunArtifacts({ root, pr, artifact, prefix = false, gh = defaultGh }, consume) {
   const view = JSON.parse(runGh(gh, ['pr', 'view', prNumber(pr), '--json', 'headRefOid'], root));
   if (!/^[0-9a-f]{40}$/i.test(view.headRefOid)) throw new Error('gh 没有返回有效的 PR 最终提交');
@@ -357,47 +363,77 @@ export function readRunArtifacts({ root, pr, artifact, prefix = false, gh = defa
         missing.push(id);
         continue;
       }
-      consume(dir, run);
+      consume(dir, run, view.headRefOid);
       downloaded.push(id);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }
-  return { downloaded, missing, runs };
+  return { downloaded, missing, runs, head: view.headRefOid };
 }
 
 const isCount = (v) => Number.isFinite(v) && v >= 0;
 const isRatio = (v) => v !== null && typeof v === 'object' && isCount(v.hit) && isCount(v.total) && v.hit <= v.total;
+const isText = (v) => typeof v === 'string' && v !== '';
+const isCommit = (v) => v === null || (typeof v === 'string' && /^[0-9a-f]{40}$/i.test(v));
+const ARTIFACT_KINDS = { 'test-ledger-linux': 'linux', 'test-ledger-windows': 'windows', 'test-ledger-macos': 'macos', 'test-ledger-coverage': 'coverage' };
 
 /**
- * 产物里的一行能不能进本机台账：产物来自 PR 上的 CI，内容可以被 PR 改写，所以只认与实际下载的运行对得上的 CI 行，
- * 不认产物自报的来源。返回拒绝原因，合格返回 null。
+ * 一个台账产物的身份：产物名只认 test-ledger-<系统> 与 test-ledger-coverage，由它定出允许的 schema、系统，
+ * 期望的 runId 由下载的运行号、attempt 与后缀派生（不取产物内容自报的值）。产物名不认识时返回 null。
  */
-export function importProblem(entry, run) {
+export function artifactIdentity(name, run) {
+  const suffix = ARTIFACT_KINDS[name];
+  if (!suffix) return null;
+  return { schema: suffix === 'coverage' ? COVERAGE_SCHEMA : SCHEMA, os: suffix === 'coverage' ? null : suffix, runId: `ci-${run.databaseId}-${run.attempt ?? 1}-${suffix}` };
+}
+
+/**
+ * 产物里的一行能不能进本机台账。威胁模型：产物内容由 PR 自己的 CI 产出，PR 作者可以完全控制它，台账只用于报告；
+ * 这里保证的只是身份字段与下载元数据一致（不同运行、不同产物之间不能互相顶替），以及字段类型符合 schema。返回拒绝原因，合格返回 null。
+ */
+export function importProblem(entry, identity) {
+  if (entry.schema !== identity.schema) return `产物里不该有 ${entry.schema} 行（应为 ${identity.schema}）`;
   if (entry.source !== 'ci') return `来源不是 ci（${entry.source}）`;
-  const prefix = `ci-${run.databaseId}-${run.attempt ?? 1}-`;
-  if (typeof entry.runId !== 'string' || !entry.runId.startsWith(prefix)) return `runId ${entry.runId} 不属于下载它的运行（应以 ${prefix} 开头）`;
+  if (entry.runId !== identity.runId) return `runId ${entry.runId} 与下载它的运行和产物不符（应为 ${identity.runId}）`;
   if (!Number.isFinite(Date.parse(entry.at))) return `时间不可解析（${entry.at}）`;
+  if (!isCommit(entry.commit)) return `commit 不是 40 位提交号或 null（${JSON.stringify(entry.commit)}）`;
   if (entry.schema === COVERAGE_SCHEMA) {
-    if (typeof entry.file !== 'string' || !entry.file) return '覆盖率行缺文件名';
+    if (!isText(entry.file)) return '覆盖率行缺文件名';
+    if (!(entry.os === null || isText(entry.os))) return `os 不是字符串或 null（${JSON.stringify(entry.os)}）`;
     if (!isRatio(entry.lines) || !isRatio(entry.branches)) return '覆盖率行的 lines 或 branches 不是 { hit, total }';
     return null;
   }
-  if (entry.file !== null && (typeof entry.file !== 'string' || !entry.file)) return `file 不是字符串或 null（${JSON.stringify(entry.file)}）`;
+  if (entry.os !== identity.os) return `os ${entry.os} 与产物不符（应为 ${identity.os}）`;
+  if (!['full', 'affected'].includes(entry.mode)) return `mode 不合法（${entry.mode}）`;
+  if (entry.file !== null && !isText(entry.file)) return `file 不是字符串或 null（${JSON.stringify(entry.file)}）`;
+  if (!isText(entry.layer)) return `layer 不是非空字符串（${JSON.stringify(entry.layer)}）`;
   if (!['pass', 'fail', 'skip'].includes(entry.result)) return `结果不合法（${entry.result}）`;
   for (const k of ['tests', 'failures', 'skipped', 'durationMs']) if (!isCount(entry[k])) return `${k} 不是非负数（${JSON.stringify(entry[k])}）`;
+  if (!Array.isArray(entry.changed) || !entry.changed.every((f) => typeof f === 'string')) return 'changed 不是字符串数组';
+  if (!(entry.note === null || typeof entry.note === 'string')) return `note 不是字符串或 null（${JSON.stringify(entry.note)}）`;
   return null;
 }
 
 function pullLedger(root, pr, artifact) {
   const incoming = [];
   const rejected = [];
-  const { downloaded, missing } = readRunArtifacts({ root, pr, artifact, prefix: true }, (dir, run) => {
+  const { downloaded, missing } = readRunArtifacts({ root, pr, artifact, prefix: true }, (dir, run, head) => {
     for (const file of fs.globSync('**/*.jsonl', { cwd: dir })) {
-      for (const entry of readLedger(path.join(dir, file)).entries) {
-        const why = importProblem(entry, run);
-        if (why) rejected.push(`运行 ${run.databaseId}：${why}`);
-        else incoming.push(entry);
+      const rel = file.split(path.sep).join('/');
+      const name = rel.includes('/') ? rel.slice(0, rel.indexOf('/')) : null;
+      const where = `运行 ${run.databaseId} / ${name ?? '（不在产物子目录里）'} / ${rel}`;
+      const identity = name && artifactIdentity(name, run);
+      const { entries, bad } = readLedger(path.join(dir, file));
+      if (!identity) {
+        rejected.push(`${where}：产物名不认识，整份 ${entries.length + bad.length} 行不导入`);
+        continue;
+      }
+      for (const line of bad) rejected.push(`${where}:${line}：解析不了或 schema 不认识`);
+      for (const entry of entries) {
+        const why = importProblem(entry, identity);
+        if (why) rejected.push(`${where}：${why}`);
+        else incoming.push({ ...entry, prHead: head });
       }
     }
   });
@@ -407,7 +443,8 @@ function pullLedger(root, pr, artifact) {
     appendEntries(file, fresh);
     return fresh.length;
   });
-  console.log(`拉回运行 ${downloaded.join('、') || '无'}；缺少产物的运行 ${missing.join('、') || '无'}；新增 ${count} 条，跳过重复 ${incoming.length - count} 条${rejected.length ? `，拒绝 ${rejected.length} 条（与下载的运行对不上或字段不合法，未写入）` : ''}`);
+  const total = rejected.reduce((n, why) => n + (Number(/整份 (\d+) 行/.exec(why)?.[1]) || 1), 0);
+  console.log(`拉回运行 ${downloaded.join('、') || '无'}；缺少产物的运行 ${missing.join('、') || '无'}；新增 ${count} 条，跳过重复 ${incoming.length - count} 条${total ? `，拒绝 ${total} 条（与下载的运行和产物对不上、字段不合法或解析不了，未写入）` : ''}`);
   for (const why of rejected) console.log(`  拒绝：${why}`);
 }
 
