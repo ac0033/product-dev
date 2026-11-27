@@ -817,3 +817,24 @@ test('M6 closureProblems：提交里的可共享摘要与本机申报记下的�
   assert.match(closureProblems({ ...g, declaredFixedIn: declared }).join('|'), /摘要与本机/);
   assert.deepEqual(closureProblems(g), [], '对照：与申报一致时放行');
 });
+
+// ---------- PR #46 第 4 轮（确认复核）的回归 ----------
+
+test('M4 可共享摘要拒绝孤立的代理码元；U+FFFD 与孤立代理码元的摘要指纹不同（PR #46 第 4 轮代码 M4）', () => {
+  const lone = 'x' + String.fromCharCode(0xd800) + 'y';
+  const replacement = 'x' + String.fromCodePoint(0xfffd) + 'y';
+  assert.ok(RR.summaryProblem(lone), '孤立代理码元不合格');
+  assert.equal(RR.summaryProblem(replacement), null, 'U+FFFD 本身是合法字符');
+  assert.notEqual(RR.summaryFingerprint(lone), RR.summaryFingerprint(replacement));
+});
+
+test('M5 roundState：最后一轮已绑定之后，升级前在更早提交上经用户决定登记的不通过按重放判为越权，不打断最后一轮；重放时给出提示（PR #46 第 4 轮一致性 M5、代码 M1）', () => {
+  const legacyOld = rec('code', 'fail', A, [f('M1')], { userDecision: '0.10.0 时用户同意重审 A' });
+  const s = rs([...roundHigh(A), ...roundHigh(B), pass('code', C), legacyOld]);
+  assert.equal(s.finalHead, C, '最后一轮仍是 C');
+  assert.equal(s.phase, 'final-next');
+  assert.equal(admitRegistration(s, { kind: 'consistency', verdict: 'pass', head: C }), null, 'C 上照常补另一种审查');
+  assert.equal(s.legacyReplayed, 1);
+  assert.match(RR.replayNote(s), /重放/);
+  assert.equal(RR.replayNote(rs([...roundHigh(A)])), null, '没有重放时不提示');
+});
