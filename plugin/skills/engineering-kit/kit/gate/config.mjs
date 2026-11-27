@@ -15,6 +15,7 @@ export const FLAT_KEYS = [
   'base', 'sourceGlobs', 'testGlobs', 'reviewIgnore', 'commentMode', 'testCommand', 'testEnv',
   'reviewers', 'reviewMinChars', 'reviewSections', 'reviewKeyword', 'lockMaxAgeMinutes', 'reviewFlow', 'testGroups', 'maxReviewRounds', 'requiredChecks',
   'roundClosure', 'riskRegister', 'externalExecutors', 'externalExclude', 'fullTests', 'ciRunner', 'ciFallback', 'ciOs', 'session', 'parallel',
+  'testLayers', 'testReports', 'coverage', 'mutationCommand',
 ];
 
 /**
@@ -38,6 +39,10 @@ export const DEFAULTS = {
   lockMaxAgeMinutes: 90,
   reviewFlow: 'pre-push',
   testGroups: [],
+  testLayers: [],
+  testReports: [],
+  coverage: null,
+  mutationCommand: null,
   maxReviewRounds: 3,
   roundClosure: 'off',
   riskRegister: 'docs/04-开发/review-risks.jsonl',
@@ -119,6 +124,7 @@ export function normalizeConfig(raw) {
   if (!isRepoPath(eff.riskRegister) || !eff.riskRegister.endsWith('.jsonl')) throw new Error('modules.review.riskRegister 须为以 .jsonl 结尾的仓库相对路径');
   checkExecution(eff);
   checkTestGroups(eff.testGroups);
+  checkTestMetrics(eff);
   checkRequiredChecks(eff.requiredChecks);
   if (!Array.isArray(eff.reviewSections) || !eff.reviewSections.every((x) => typeof x === 'string' && x.trim() && x === x.trim() && !x.includes(String.fromCharCode(10))) || new Set(eff.reviewSections).size !== eff.reviewSections.length) {
     throw new Error('engineering.config.json 的 modules.review.reviewSections 必须是不重复的字符串数组，节名不能为空、不能有首尾空白和换行（写成空数组表示不要求任何节）');
@@ -135,7 +141,7 @@ export const COMMENT_MODES = ['header', 'header+exports'];
 
 /**
  * 校验其余字段的类型（新旧两种结构展开后共用）：写错的类型会让某项检查静默失效（如 reviewMinChars 写成字符串，最少字数检查就不执行），
- * 所以一律报错，不回退默认值。允许 null 的只有 ciRunner、ciFallback、session、parallel（表示未声明，见 checkExecution）。
+ * 所以一律报错，不回退默认值。可选的执行位置与测试工具另由 checkExecution 和 checkTestMetrics 校验。
  */
 function checkTypes(eff) {
   const at = (k) => `engineering.config.json 的 ${k}`;
@@ -208,6 +214,25 @@ function checkTestGroups(groups) {
   });
 }
 
+/** 测试度量只影响报告；错误带上整个配置项，方便排查嵌套的层级或路径。 */
+function checkTestMetrics({ testLayers, testReports, coverage, mutationCommand }) {
+  const nonEmpty = (value) => typeof value === 'string' && value.trim() !== '';
+  const strings = (value) => Array.isArray(value) && value.every(nonEmpty);
+  const invalid = (key, value, reason) => {
+    throw new Error(`engineering.config.json 的 modules.gate.${key} ${reason}（当前 ${JSON.stringify(value)}）`);
+  };
+  if (!Array.isArray(testLayers) || !testLayers.every((layer) => isObject(layer) && nonEmpty(layer.name)
+    && layer.name.trim() === layer.name && strings(layer.paths) && layer.paths.length > 0)
+    || new Set(testLayers.map((layer) => layer.name)).size !== testLayers.length) {
+    invalid('testLayers', testLayers, '须为层级数组，层名不重复且无首尾空白，每层 paths 至少包含一个 glob');
+  }
+  if (!strings(testReports)) invalid('testReports', testReports, '须为非空字符串组成的数组');
+  if (coverage !== null && !(isObject(coverage) && nonEmpty(coverage.command) && isRepoPath(coverage.lcov))) {
+    invalid('coverage', coverage, '须为 null 或含非空 command 与仓库相对路径 lcov 的对象');
+  }
+  if (mutationCommand !== null && !nonEmpty(mutationCommand)) invalid('mutationCommand', mutationCommand, '须为 null 或非空命令');
+}
+
 /**
  * 校验必需检查名（modules.gate.requiredChecks）：不重复的非空字符串数组，写检查运行的 name（job 名，含矩阵后缀，不含工作流名和事件）或提交状态的 context。
  * 格式不对时抛错：拼错的类型会让必需检查静默变少，不能忽略。
@@ -236,7 +261,7 @@ function expand(raw) {
   if (raw.profile === undefined) {
     // 旧版扁平结构：原样使用，缺省值补齐；_profile 段（回滚时保存的 profile 专有设置）同样生效
     const prof = isObject(raw._profile) ? raw._profile : {};
-    for (const k of FLAT_KEYS) pick(raw, k, '');
+    for (const k of FLAT_KEYS) pick(raw, k, ['testLayers', 'testReports'].includes(k) ? 'modules.gate' : '');
     return {
       ...DEFAULTS,
       ...raw,
@@ -261,6 +286,10 @@ function expand(raw) {
     lockMaxAgeMinutes: pick(gate, 'lockMaxAgeMinutes', 'modules.gate'),
     reviewFlow: pick(gate, 'reviewFlow', 'modules.gate'),
     testGroups: pick(gate, 'testGroups', 'modules.gate'),
+    testLayers: pick(gate, 'testLayers', 'modules.gate'),
+    testReports: pick(gate, 'testReports', 'modules.gate'),
+    coverage: pick(gate, 'coverage', 'modules.gate'),
+    mutationCommand: pick(gate, 'mutationCommand', 'modules.gate'),
     requiredChecks: pick(gate, 'requiredChecks', 'modules.gate'),
     fullTests: pick(gate, 'fullTests', 'modules.gate'),
     ciRunner: pick(gate, 'ciRunner', 'modules.gate'),
@@ -297,6 +326,10 @@ export function toProfile(flat, { keepZeroMinChars = false } = {}) {
   if (f.ciRunner !== null) gate.ciRunner = f.ciRunner;
   if (f.ciFallback !== null) gate.ciFallback = f.ciFallback;
   if (f.testGroups.length > 0) gate.testGroups = f.testGroups;
+  if (f.testLayers.length > 0) gate.testLayers = f.testLayers;
+  if (f.testReports.length > 0) gate.testReports = f.testReports;
+  if (f.coverage !== null) gate.coverage = f.coverage;
+  if (f.mutationCommand !== null) gate.mutationCommand = f.mutationCommand;
   if (f.requiredChecks.length > 0) gate.requiredChecks = f.requiredChecks;
   const review = { reviewers: f.reviewers, reviewSections: f.reviewSections, reviewKeyword: f.reviewKeyword, maxReviewRounds: f.maxReviewRounds };
   // 显式写了 0 的旧配置（keepZeroMinChars，由调用方按原始文件判断）保留这个 0：回滚时 toFlat 据此继续写出 0，旧版不会回到自己的默认字数

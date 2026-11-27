@@ -8,7 +8,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { BUNDLE_ROOT, syncKit } from '../sync.mjs';
 import { checkBundle, findBlock, loadBundle, validateBundle } from '../tools/bundle-lib.mjs';
-import { describeEnvironment, renderEnvironmentSection } from '../tools/environment.mjs';
+import { describeEnvironment, renderCiWorkflow, renderEnvironmentSection } from '../tools/environment.mjs';
 import { commitAll, read, tmpDir, tmpRepo, write } from './helpers.mjs';
 
 const USER_AGENTS = '# 项目指导\n\n这是项目自己的规则，不能被同步改动。\n';
@@ -173,4 +173,107 @@ test('旧清单（没有 render 字段）同步出的块不带环境偏好，回
   syncKit({ target: root, bundleRoot: old });
   assert.doesNotMatch(blockOf(root), /执行偏好/);
   assert.equal(checkBundle({ root, bundleRoot: old }).items.find((i) => i.file === 'AGENTS.md').state, 'ok');
+});
+
+// ---------- C3/C6/D2 CI 工作流新作业（规格 spec-CD 第 2.5、3、5 节） ----------
+// renderCiWorkflow 的新参数名规格没写：这里按配置键的名字传 coverage（{ command, lcov }）与 mutationCommand。
+
+const WF_BASE = { ciRunner: 'github-hosted', ciFallback: null, ciOs: ['linux'], testCommand: 'npm test', reviewIgnore: ['docs/**/*.md', 'README.md'] };
+const COVERAGE = { command: 'npm run cov', lcov: 'coverage/lcov.info' };
+
+/** 取名为 name 的作业文本（从 "  name:" 到下一个顶层作业之前）；没有返回 null。 */
+function jobText(yaml, name) {
+  const m = yaml.match(new RegExp(`\\n  ${name}:\\n([\\s\\S]*?)(?=\\n  [A-Za-z0-9_-]+:\\n|\\n?$)`));
+  return m ? m[0] : null;
+}
+
+/** 作业里的步骤文本数组（以 "      - " 开头分隔）。 */
+const stepsOf = (job) => job.split(/\n      - /).slice(1).map((s) => `- ${s}`);
+
+test('C3 CI 步骤：测试作业在测试命令后加一步 if: always() 的 record，再上传台账产物；测试命令那步仍会让作业失败', () => {
+  const y = renderCiWorkflow({ ...WF_BASE, ciOs: ['linux', 'windows'] });
+  const test = jobText(y, 'test');
+  const steps = stepsOf(test);
+  const run = steps.findIndex((s) => /run: npm test/.test(s));
+  assert.ok(run >= 0, '测试命令那一步还在');
+  assert.ok(!/continue-on-error: true/.test(steps[run]), '测试命令失败要让作业失败');
+  const id = steps[run].match(/\bid: ([A-Za-z0-9_-]+)/);
+  assert.ok(id, '测试命令那一步要有 id，记录步骤才能取 steps.<id>.outcome');
+  const record = steps[run + 1];
+  assert.ok(record && /if: always\(\)/.test(record), '记录步骤在测试命令之后，无论成败都运行');
+  assert.ok(record.includes('node scripts/engineering/gate/test-ledger.mjs record --source ci --exit-code'));
+  assert.match(record, new RegExp(`steps\\.${id[1]}\\.outcome`), '退出码由测试步骤的 outcome 换算');
+  assert.ok(record.includes('--os ${{ matrix.os }}'));
+  assert.ok(record.includes('--run-id ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}'));
+  assert.ok(record.includes('--mode full'));
+  assert.ok(record.includes('--out test-ledger-${{ matrix.os }}.jsonl'));
+  assert.match(record, /continue-on-error: true/, '记录步骤失败不影响作业结论');
+  const upload = steps[run + 2];
+  assert.ok(upload && /uses: actions\/upload-artifact@[0-9a-f]{40}/.test(upload), '上传用固定到提交号的 upload-artifact');
+  assert.ok(upload.includes('name: test-ledger-${{ matrix.os }}'));
+  assert.ok(upload.includes('test-ledger-${{ matrix.os }}.jsonl'));
+  assert.match(upload, /if: always\(\)/);
+});
+
+test('C3 CI 步骤：汇总检查 ci-gate 的依赖不变（只等 changes 与 test）', () => {
+  const y = renderCiWorkflow({ ...WF_BASE, coverage: COVERAGE, mutationCommand: 'npx stryker run' });
+  const gate = jobText(y, 'ci-gate');
+  assert.match(gate, /needs: \[changes, test\]/);
+  assert.ok(!/coverage|mutation/.test(gate), 'coverage、mutation 都不进 ci-gate');
+});
+
+test('C6 覆盖率作业：配置 coverage 后新增 coverage 作业（只在 PR 且有代码改动时、fetch-depth 0、跑命令再汇总），不进 ci-gate', () => {
+  const y = renderCiWorkflow({ ...WF_BASE, coverage: COVERAGE });
+  const job = jobText(y, 'coverage');
+  assert.ok(job, '要有 coverage 作业');
+  assert.match(job, /needs: changes\n/);
+  assert.ok(job.includes("if: needs.changes.outputs.code == 'true' && github.event_name == 'pull_request'"));
+  assert.match(job, /runs-on: ubuntu-latest/);
+  assert.match(job, /fetch-depth: 0/);
+  assert.ok(job.includes('run: npm run cov'));
+  assert.ok(job.includes('node scripts/engineering/gate/test-ledger.mjs coverage --lcov coverage/lcov.info --base ${{ github.event.pull_request.base.sha }} --summary "$GITHUB_STEP_SUMMARY"'));
+  assert.ok(job.indexOf('run: npm run cov') < job.indexOf('test-ledger.mjs coverage'), '先跑覆盖率命令，再汇总');
+  assert.ok(!jobText(y, 'ci-gate').includes('coverage'));
+  assert.ok(!/types: \[[^\]]*labeled/.test(y), '只配覆盖率不加 labeled 类型');
+  assert.equal(jobText(y, 'mutation'), null);
+});
+
+test('D2 变异作业：配置 mutationCommand 后新增 mutation 作业（风险标签触发、60 分钟超时、fetch-depth 0、产物 mutation-report），不进 ci-gate；PR 事件类型追加 labeled', () => {
+  const y = renderCiWorkflow({ ...WF_BASE, mutationCommand: 'npx stryker run' });
+  const job = jobText(y, 'mutation');
+  assert.ok(job, '要有 mutation 作业');
+  assert.match(job, /needs: changes\n/);
+  assert.ok(job.includes("if: needs.changes.outputs.code == 'true' && github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'risk:medium') || contains(github.event.pull_request.labels.*.name, 'risk:high'))"));
+  assert.match(job, /timeout-minutes: 60/);
+  assert.match(job, /fetch-depth: 0/);
+  assert.ok(job.includes('node scripts/engineering/gate/mutation.mjs run --base ${{ github.event.pull_request.base.sha }} --out mutation-report.txt'));
+  const upload = stepsOf(job).find((s) => /upload-artifact/.test(s));
+  assert.ok(upload, '要上传产物');
+  assert.match(upload, /actions\/upload-artifact@[0-9a-f]{40}/);
+  assert.ok(upload.includes('name: mutation-report') && upload.includes('mutation-report.txt'));
+  assert.match(upload, /if: always\(\)/);
+  assert.ok(!jobText(y, 'ci-gate').includes('mutation'));
+  const types = y.match(/pull_request:\n\s+types: \[([^\]]*)\]/)[1].split(',').map((s) => s.trim());
+  assert.ok(types.includes('labeled'), `PR 事件类型要追加 labeled：${types}`);
+  for (const t of ['opened', 'synchronize', 'reopened', 'ready_for_review']) assert.ok(types.includes(t), `原有类型 ${t} 保留`);
+  assert.equal(jobText(y, 'coverage'), null, '只配变异不生成 coverage 作业');
+});
+
+test('C6/D2 两者都配：两个作业都在，各自独立，ci-gate 不依赖它们', () => {
+  const y = renderCiWorkflow({ ...WF_BASE, coverage: COVERAGE, mutationCommand: 'npx stryker run' });
+  assert.ok(jobText(y, 'coverage') && jobText(y, 'mutation'));
+  assert.match(jobText(y, 'ci-gate'), /needs: \[changes, test\]/);
+});
+
+test('C6/D2 没配新键：工作流里没有 coverage、mutation 作业，也没有 labeled 类型，也不引用 coverage.mjs 之类的新命令', () => {
+  const y = renderCiWorkflow(WF_BASE);
+  assert.equal(jobText(y, 'coverage'), null);
+  assert.equal(jobText(y, 'mutation'), null);
+  assert.ok(!/labeled/.test(y));
+  assert.ok(!y.includes('mutation.mjs') && !/test-ledger\.mjs coverage/.test(y));
+  assert.ok(!/timeout-minutes/.test(y));
+  // 显式写 null 等于没配
+  const nulls = renderCiWorkflow({ ...WF_BASE, coverage: null, mutationCommand: null });
+  assert.equal(nulls, y, 'null 与不传生成同一份工作流');
+  assert.match(y, /pull_request:\n\s+types: \[opened, synchronize, reopened, ready_for_review\]/);
 });
