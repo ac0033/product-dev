@@ -1,16 +1,13 @@
 // 只读汇总各 PR 的复审登记。collectMetrics 返回 prs、summary、badLines 和 skippedDirs。
 // 每个 PR 含 pr、rounds、missedLater、accepts、closes、lastAt、dataMissing；占比以 0 到 1 表示。
+// unavailable 单列没有 log.jsonl、读不出或只有坏行的 PR（{ pr, reason }），它们不计入 prs 和汇总，其他 PR 照常统计。
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { gitCommonDir, isMain, repoRoot } from './lib.mjs';
 
 function readLog(log, pr, badLines) {
-  let text;
-  try { text = fs.readFileSync(log, 'utf8'); } catch (error) {
-    if (error.code === 'ENOENT') return [];
-    throw error;
-  }
+  const text = fs.readFileSync(log, 'utf8'); // 缺文件、读不出由调用方按 PR 单列
   const lines = text.split(/\r?\n/);
   if (lines.at(-1) === '') lines.pop();
   const records = [];
@@ -54,7 +51,7 @@ function summarizePr(pr, records, lastAt) {
 export function collectMetrics({ commonDir, now = Date.now(), sinceDays = null }) {
   const dir = path.join(commonDir, 'engineering-gate', 'pr');
   const cutoff = sinceDays === null ? -Infinity : new Date(now).getTime() - sinceDays * 86400000;
-  const prs = [], badLines = [], skippedDirs = [];
+  const prs = [], badLines = [], skippedDirs = [], unavailable = [];
   let firstPass = 0;
   const dirs = fs.existsSync(dir) ? fs.readdirSync(dir, { withFileTypes: true }) : [];
   for (const entry of dirs) {
@@ -63,8 +60,17 @@ export function collectMetrics({ commonDir, now = Date.now(), sinceDays = null }
       skippedDirs.push(entry.name);
       continue;
     }
-    const records = readLog(path.join(dir, entry.name, 'log.jsonl'), entry.name, badLines);
-    if (!records.length) continue;
+    let records;
+    try {
+      records = readLog(path.join(dir, entry.name, 'log.jsonl'), entry.name, badLines);
+    } catch (error) {
+      unavailable.push({ pr: entry.name, reason: error.code === 'ENOENT' ? '没有 log.jsonl' : `日志读不出：${error.code ?? error.message}` });
+      continue;
+    }
+    if (!records.length) {
+      unavailable.push({ pr: entry.name, reason: '日志里没有可用的登记（只有坏行或为空）' });
+      continue;
+    }
     const lastAt = records.reduce((last, r) => Date.parse(r.at) > Date.parse(last) ? r.at : last, records[0].at);
     if (Date.parse(lastAt) < cutoff) continue;
     const row = summarizePr(entry.name, records, lastAt);
@@ -75,15 +81,16 @@ export function collectMetrics({ commonDir, now = Date.now(), sinceDays = null }
   const sum = (key) => prs.reduce((n, p) => n + p[key], 0);
   const summary = { prCount: prs.length, averageRounds: prs.length ? sum('rounds') / prs.length : 0,
     firstPassRate: prs.length ? firstPass / prs.length : 0, missedLater: sum('missedLater'), accepts: sum('accepts'), closes: sum('closes') };
-  return { prs, summary, badLines, skippedDirs };
+  return { prs, summary, badLines, skippedDirs, unavailable };
 }
 
-function table({ prs, summary: s, badLines, skippedDirs }) {
+function table({ prs, summary: s, badLines, skippedDirs, unavailable }) {
   const lines = [`共 ${s.prCount} 个 PR，平均失败轮次 ${s.averageRounds.toFixed(2)}，一轮通过 ${(100 * s.firstPassRate).toFixed(1)}%，后续发现原先漏检 ${s.missedLater} 条，接受风险 ${s.accepts} 次，收口 ${s.closes} 次`,
     'PR\t失败轮次\t后续漏检\t接受风险\t收口\t最后登记时间'];
   for (const p of prs) lines.push([p.pr, p.rounds, p.missedLater, p.accepts, p.closes, p.lastAt].join('\t'));
   for (const p of prs) for (const missing of p.dataMissing) lines.push(`PR ${p.pr} 第 ${missing.line} 行复审数据缺失：${missing.reason}`);
   for (const bad of badLines) lines.push(`PR ${bad.pr} 第 ${bad.line} 行登记损坏：${bad.reason}`);
+  for (const u of unavailable) lines.push(`PR ${u.pr} 不计入统计：${u.reason}`);
   if (skippedDirs.length) lines.push(`跳过非数字目录：${skippedDirs.join('、')}`);
   return lines.join('\n');
 }

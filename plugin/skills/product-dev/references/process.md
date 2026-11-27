@@ -34,7 +34,7 @@
 | `modules.gate.requiredChecks` | `pr` 流程的必需检查名，为空时每一项检查都算必需；CI 有按条件跳过的检查时列出必需的那几项。写检查名，不是 PR 页面上显示的“工作流名 / job 名 (事件)”。写法、判定口径、查名字的命令和改名顺序见 [套件流程文档](../../engineering-kit/references/process.md) 第 4 节“套件闸门的两种流程”；它是判定策略字段，合入主干后才生效 |
 | `modules.gate.testLayers` | 可选。测试层级，每项 `{ name, paths }`（如 `unit`、`integration`、`e2e`），按顺序取第一个命中的层。测试台账、功能契约场景表的“层级”一栏和巡检按它归层；没配时一律记“未分层”，巡检会提示补配 |
 | `modules.gate.testReports` | 可选。测试命令产出的 JUnit XML 的 glob（node --test、vitest、jest、pytest 都能产出，要在 `testCommand` 里打开对应的报告选项）。配了，测试台账按测试文件记结果；没配只记整条命令通过或失败 |
-| `modules.gate.coverage` | 可选，`{ command, lcov }`：CI 上跑覆盖率的命令和它产出的 lcov 文件。只报告本次改动文件的行与分支覆盖率，写进作业摘要，不拦截；门槛等数据稳定后由用户定 |
+| `modules.gate.coverage` | 可选，`{ command, lcov }`：CI 上跑覆盖率的命令和它产出的 lcov 文件。只报告本次改动文件的行与分支覆盖率，写进作业摘要和测试台账，不拦截；门槛等数据稳定后由用户定。`pr` 流程的项目配它或下一行的变异测试时，`requiredChecks` 要写明全量检查名（如 `ci-gate`），否则为空时每项检查都算必需，报告型作业失败也会拦住合并 |
 | `modules.gate.mutationCommand` | 可选。自动变异测试命令，改动的源文件经环境变量 `EK_MUTATION_FILES`（换行分隔）和 `EK_MUTATION_FILES_JSON` 传入。CI 只对带 `risk:medium` 或 `risk:high` 标签的 PR 跑，不拦截；没配时沿用下面“首次候选”的人工变异检查 |
 | `modules.gate.reviewFlow` | 默认 `pre-push`；有 GitHub 远程、已登录的 `gh` 且 PR 上有 CI 检查的项目可以改成 `pr`（建议项，由用户决定或按授权采用推荐）；闸门按基准提交上的配置判定，改动合入主干后才生效 |
 

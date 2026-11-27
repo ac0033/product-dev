@@ -356,7 +356,7 @@ export function renderCiWorkflow({ ciRunner, ciFallback = null, ciOs = ['linux']
   const upload = 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4';
   // 台账脚本要 Node 22 起才有的 fs.globSync：测试命令不是 Node 时（如 pytest）在记录步骤前另装 Node 24，不依赖 runner 预装的版本
   const nodeSetup = stackSetup('node');
-  const ledgerNode = stackSetup(testCommand) === nodeSetup ? '' : nodeSetup.replace('      - uses:', '      - if: always()\n        uses:');
+  const ledgerNode = stackSetup(testCommand) === nodeSetup ? '' : nodeSetup.replace('      - uses:', '      - if: always()\n        continue-on-error: true\n        uses:');
   const reportSetup = `      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
@@ -377,8 +377,14 @@ ${stackSetup('node')}${/^\s*(python|pytest|py)\b/.test(testCommand) ? stackSetup
     runs-on: ${linux}
     steps:
 ${reportSetup}      - run: ${command}
-      - run: node scripts/engineering/gate/test-ledger.mjs coverage --lcov ${lcov} --base \${{ github.event.pull_request.base.sha }} --summary "$GITHUB_STEP_SUMMARY"
-${simplePath ? '' : `        env:\n          EK_LCOV: ${yamlSingle(coverage.lcov)}\n`}`;
+      - run: node scripts/engineering/gate/test-ledger.mjs coverage --lcov ${lcov} --base \${{ github.event.pull_request.base.sha }} --summary "$GITHUB_STEP_SUMMARY" --out test-ledger-coverage.jsonl --run-id ci-\${{ github.run_id }}-\${{ github.run_attempt }}-coverage --os linux
+${simplePath ? '' : `        env:\n          EK_LCOV: ${yamlSingle(coverage.lcov)}\n`}      - uses: ${upload}
+        if: always()
+        continue-on-error: true
+        with:
+          name: test-ledger-coverage
+          path: test-ledger-coverage.jsonl
+`;
   }
   if (mutationCommand) {
     reportJobs += `

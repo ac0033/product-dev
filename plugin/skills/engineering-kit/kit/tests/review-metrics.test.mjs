@@ -168,3 +168,61 @@ test('C8 命令行：缺省输出中文表格；--json 输出可解析的 JSON�
   assert.equal(split(parsed).prs.length, 3);
   assert.equal(split(parsed).summary.missedLater, 6);
 });
+
+// ---------- 首轮复审回归（M8） ----------
+
+/** 返回值里除 prs、summary、badLines、skippedDirs 之外，是否有某个数组同时含有全部给定的 PR 编号（视为“缺失/不可用”列表）。 */
+function unavailableListHolds(result, prNumbers) {
+  const skip = new Set(['prs', 'summary', 'badLines', 'skippedDirs']);
+  let found = false;
+  const walk = (v) => {
+    if (!v || typeof v !== 'object' || found) return;
+    if (Array.isArray(v) && prNumbers.every((n) => v.some((x) => JSON.stringify(x).includes(String(n))))) found = true;
+    for (const x of Object.values(v)) walk(x);
+  };
+  for (const [k, v] of Object.entries(result)) if (!skip.has(k)) walk(v);
+  return found;
+}
+
+/** 数字目录但 log.jsonl 读取抛错：把 log.jsonl 建成目录。 */
+function unreadableLog(commonDir, pr) {
+  fs.mkdirSync(path.join(commonDir, 'engineering-gate', 'pr', String(pr), 'log.jsonl'), { recursive: true });
+}
+
+test('M8 指标：数字目录下没有 log.jsonl 的 PR 单列，不计入 prs', async () => {
+  const { collectMetrics } = await import('../gate/review-metrics.mjs');
+  const { commonDir } = repo();
+  writeLog(commonDir, 1, [rec({ verdict: 'pass', headSha: sha('1') })]);
+  fs.mkdirSync(path.join(commonDir, 'engineering-gate', 'pr', '7731'), { recursive: true });
+  const result = collectMetrics({ commonDir, now: NOW, sinceDays: null });
+  const { prs, summary } = split(result);
+  assert.deepEqual(prs.map((p) => p.pr), ['1']);
+  assert.equal(summary.prCount, 1);
+  assert.ok(unavailableListHolds(result, [7731]), `返回值里要有列出 7731 的缺失列表：${JSON.stringify(result)}`);
+});
+
+test('M8 指标：某个 PR 的日志读取抛错时，其他 PR 仍正常汇总、该 PR 单列', async () => {
+  const { collectMetrics } = await import('../gate/review-metrics.mjs');
+  const { commonDir } = repo();
+  seed(commonDir);
+  unreadableLog(commonDir, 7732);
+  const result = collectMetrics({ commonDir, now: NOW, sinceDays: null });
+  const { prs, summary } = split(result);
+  assert.equal(prs.length, 3, '种子里的 3 个 PR 照常');
+  assert.ok(!prs.some((p) => String(p.pr) === '7732'));
+  assert.deepEqual([summary.missedLater, summary.accepts, summary.closes], [6, 2, 1]);
+  assert.ok(unavailableListHolds(result, [7732]), JSON.stringify(result));
+});
+
+test('M8 指标：只有坏行的 PR 也和缺失、不可读的 PR 一起单列，不计入 prs', async () => {
+  const { collectMetrics } = await import('../gate/review-metrics.mjs');
+  const { commonDir } = repo();
+  writeLog(commonDir, 1, [rec({ verdict: 'pass', headSha: sha('1') })]);
+  fs.mkdirSync(path.join(commonDir, 'engineering-gate', 'pr', '7731'), { recursive: true });
+  unreadableLog(commonDir, 7732);
+  writeLog(commonDir, 7733, ['garbage', '{also bad']);
+  const result = collectMetrics({ commonDir, now: NOW, sinceDays: null });
+  const { prs } = split(result);
+  assert.deepEqual(prs.map((p) => p.pr), ['1']);
+  assert.ok(unavailableListHolds(result, [7731, 7732, 7733]), JSON.stringify(result));
+});

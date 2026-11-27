@@ -20,7 +20,7 @@ function ghBin() {
 
 /**
  * 按设定造一份假 gh 的运行环境。cfg：{ prHead, runs: [{ databaseId, attempt, status, conclusion, name }],
- * artifacts: { '<运行号>': { '<产物内的相对路径>': '文本' } }（没列出的运行下载时报“没有产物”）, failOn: 'pr view' 之类 }。
+ * artifacts: { '<运行号>': { '<产物内的相对路径>': '文本' } }（没列出的运行下载时报“没有产物”）, jobs: { '<运行号>': [{ name, conclusion }] }（run view --json jobs 用）, failOn: 'pr view' 之类 }。
  * 返回 { env, calls() }：env 给 spawnSync 的 env 选项；calls() 读出每次 gh 调用的参数数组。
  */
 export function fakeGh(cfg) {
