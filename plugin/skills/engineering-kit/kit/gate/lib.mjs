@@ -425,8 +425,9 @@ function entryDigest(mode, sha) {
 
 /**
  * 每个文件的内容摘要：路径 → 摘要（entryDigest；对象名与 git add 相同：经清洗过滤器）；文件不存在（已删除）记为 deleted。
- * 模式按 git 自己的看法取：core.fileMode 开着（POSIX 默认）时看可执行位；关着（Windows 默认）时 git 不看可执行位，取索引里的模式。
- * 符号链接：core.symlinks 开着时工作区里是真链接，摘要取链接文本；关着时检出为内容是链接文本的普通文件，模式取索引里的 120000。
+ * 模式按 git 自己的看法取，两项配置各管各的：工作区里的真符号链接一律按链接（120000，摘要取链接文本）；
+ * core.symlinks 关着（Windows 默认）时，索引里是 120000 的条目检出为内容是链接文本的普通文件，仍按链接计；
+ * 其余普通文件看 core.fileMode：开着（POSIX 默认）时按可执行位取 100755 或 100644，关着（Windows 默认）时 git 不看可执行位，取索引里的 100755 或 100644。
  * 测试记录保存它（files），以后按影响范围测试时与当前内容逐个比较，算出此后改了哪些文件。
  */
 export function fileHashes(root, files) {
@@ -444,6 +445,7 @@ export function fileHashes(root, files) {
   });
   const index = sorted.length > 0 ? indexEntries(root) : new Map();
   const fileMode = git(root, ['config', '--bool', 'core.fileMode']).out.trim() !== 'false';
+  const symlinks = git(root, ['config', '--bool', 'core.symlinks']).out.trim() !== 'false';
   const out = {};
   // 改动列表里的目录只可能是子模块：按指向的提交号计入，不当作已删除（否则子模块指针变化不改变哈希）
   for (const d of dirs) {
@@ -458,9 +460,10 @@ export function fileHashes(root, files) {
     const shas = r.stdout.split('\n').filter(Boolean);
     present.forEach((f, i) => {
       const indexed = index.get(f)?.mode;
-      const mode = fileMode
-        ? (stats.get(f).mode & 0o100 ? '100755' : '100644')
-        : (indexed === '100755' || indexed === '120000' ? indexed : '100644');
+      let mode;
+      if (!symlinks && indexed === '120000') mode = '120000';
+      else if (fileMode) mode = stats.get(f).mode & 0o100 ? '100755' : '100644';
+      else mode = indexed === '100755' ? '100755' : '100644';
       out[f] = entryDigest(mode, shas[i]);
     });
   }
@@ -697,11 +700,8 @@ export function forkPoint(root, baseRef, commit) {
   return r.ok ? r.out.trim() : null;
 }
 
-/**
- * 取锁的默认参数：retryMs 内对暂态争用重试；staleMs 是回收 git 引用锁文件的第二道条件（见 recoverStaleRefLock），
- * 只防不经本套件改这些引用的 git 进程（0.10.0 及更早的套件、git pack-refs、人手运行的 git update-ref），它们持锁只有几毫秒。
- */
-export const LOCK_DEFAULTS = { staleMs: 600000, retryMs: 3000 };
+/** 取锁的默认参数：retryMs 内对暂态争用（别的进程正在改同一个锁引用）重试。 */
+export const LOCK_DEFAULTS = { retryMs: 3000 };
 /** git 自己等待引用锁文件的时间（core.filesRefLockTimeout）：另一个 git 进程正在改同一个引用（几毫秒）时由 git 等过去。 */
 const GIT_REF_LOCK_WAIT_MS = 200;
 
@@ -711,9 +711,8 @@ const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e)
 const safeName = (name) => name.replace(/[^A-Za-z0-9._-]/g, '_');
 
 /**
- * 改锁引用的意向登记：本套件每次对锁引用运行 git update-ref 之前，在 <公共目录>/engineering-gate/lock-intents/<锁名>/ 下
- * 独占创建一个写着本进程 pid 的文件，git 返回后删除。git 的引用锁文件只在 update-ref 运行期间存在，所以“引用锁文件还在、
- * 却没有任何活着的进程登记过意向”说明创建它的 git 已随调用者异常退出。返回 git 的结果。
+ * 改锁引用的意向登记（只用于诊断）：本套件每次对锁引用运行 git update-ref 之前，在 <公共目录>/engineering-gate/lock-intents/<锁名>/
+ * 独占创建一个写着本进程 pid 的文件，git 返回后删除。拿不到锁时据此说明是不是有活着的本套件进程正在改这个引用。返回 git 的结果。
  */
 function withIntent(intents, run) {
   fs.mkdirSync(intents, { recursive: true });
@@ -722,81 +721,29 @@ function withIntent(intents, run) {
   try { return run(); } finally { fs.rmSync(file, { force: true }); }
 }
 
-/**
- * 意向目录里有没有可能是这个引用锁文件创建者的活着的进程：创建者的意向一定早于它创建的锁文件，所以只看不晚于锁文件修改时间（留一秒余量）的意向；
- * 更晚的意向是在等这个锁文件的进程，不会是它的创建者。读不出 pid 的按活着处理；顺手删掉已退出进程留下的意向。
- */
-function liveCreator(intents, lockMtimeMs) {
-  let live = false;
-  if (!fs.existsSync(intents)) return false;
-  for (const name of fs.readdirSync(intents, { withFileTypes: true }).filter((d) => d.isFile()).map((d) => d.name)) {
-    const file = path.join(intents, name);
-    const pid = Number.parseInt(name, 10);
-    if (pid === process.pid) continue;
-    if (Number.isInteger(pid) && !pidAlive(pid)) { fs.rmSync(file, { force: true }); continue; }
-    const at = fs.statSync(file, { throwIfNoEntry: false })?.mtimeMs;
-    if (at === undefined) continue;
-    if (!Number.isInteger(pid) || at <= lockMtimeMs + 1000) live = true;
-  }
-  return live;
-}
-
-/**
- * 回收一个 git 引用锁文件的残留。两道条件都满足才动它：没有可能是它创建者的活着的本套件进程（主条件：按意向登记与 pid 判活，见 liveCreator），
- * 且文件存在超过 staleMs（防不经本套件的 git 进程）。同一个残留文件（按设备、inode、创建与修改时间、大小认定）只由一个进程回收：
- * 在 lock-recovery/ 下按这个身份独占创建回收标记 <身份>.<代>，标记的持有者已退出时由下一代接手。抢到标记后先把文件改名移走，
- * 再核对移走的确实是判定过的那一个；不是（判定之后被换成了新的锁文件）就原样放回，放不回时报告。返回是否回收。
- * git 独占创建引用锁文件、只有创建它的进程会删它，所以残留在被移走之前不会出现后继的锁文件。
- */
-function recoverStaleRefLock({ common, gitLock, stat, intents, staleMs }) {
-  if (Date.now() - Number(stat.mtimeMs) < staleMs || liveCreator(intents, Number(stat.mtimeMs))) return false;
-  const dir = path.join(common, 'engineering-gate', 'lock-recovery');
-  fs.mkdirSync(dir, { recursive: true });
-  for (const name of fs.readdirSync(dir)) {
-    const p = path.join(dir, name);
-    try { if (Date.now() - fs.statSync(p).mtimeMs > 3600000) fs.rmSync(p, { force: true }); } catch { /* 别的进程同时在清 */ }
-  }
-  const identity = (s) => [s.dev, s.ino, s.birthtimeNs, s.mtimeNs, s.size].join(':');
-  const id = crypto.createHash('sha256').update(identity(stat) + ':' + gitLock).digest('hex').slice(0, 32);
-  let marker = null;
-  for (let gen = 0; gen < 64 && !marker; gen++) {
-    const p = path.join(dir, `${id}.${gen}`);
-    try { fs.writeFileSync(p, String(process.pid), { flag: 'wx' }); marker = p; }
-    catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      const holder = Number.parseInt(fs.readFileSync(p, 'utf8'), 10);
-      if (!Number.isInteger(holder) || pidAlive(holder)) return false; // 另一个进程正在回收同一个残留
-    }
-  }
-  if (!marker) return false;
-  const tomb = `${gitLock}.stale-${crypto.randomUUID()}`;
-  try { fs.renameSync(gitLock, tomb); }
-  catch (e) { if (e.code === 'ENOENT') return false; throw e; }
-  const moved = fs.statSync(tomb, { bigint: true });
-  if (identity(moved) !== identity(stat)) {
-    try { fs.linkSync(tomb, gitLock); fs.rmSync(tomb, { force: true }); }
-    catch { throw new Error(`回收 git 引用锁残留时移走了另一个锁文件，且没能放回（现在在 ${tomb}）；确认没有 git 进程在运行后删除它`); }
-    return false;
-  }
-  fs.rmSync(tomb, { force: true });
-  process.stderr.write(`提示：回收了 git 的残留引用锁文件 ${gitLock}（没有活着的进程在改这个引用，判定为 git 异常退出留下的）\n`);
-  return true;
+/** 别的、还活着的本套件进程正在改这个锁引用时返回它们的 pid；读不出 pid 的意向按活着计。只读，不删任何文件。 */
+function liveIntentPids(intents) {
+  let names = [];
+  try { names = fs.readdirSync(intents); } catch { return []; }
+  return names.map((n) => Number.parseInt(n, 10)).filter((pid) => pid !== process.pid && (!Number.isInteger(pid) || pidAlive(pid))).map((pid) => (Number.isInteger(pid) ? pid : '读不出'));
 }
 
 /**
  * 互斥锁（不等待活着的持有者，被占用就报错）。用 git 引用的比较交换实现：`git update-ref <引用> <新值> <旧值>` 在 git 自己的独占锁文件下核对旧值再改，是原子的。
  * 引用 refs/engineering-gate/locks/<name> 指向一个记着持有者（pid、开始时间、随机令牌）的对象；引用在仓库的公共目录里，各工作树共用。
  * 取锁：引用不存在时创建（旧值写空）；存在而持有者进程已不在时，从判定失效的那个对象比较交换成自己的。换成之后再读一次，引用确实指向自己的对象才算取到。
- * 每次 update-ref 都登记意向（withIntent），git 的引用锁文件残留按 recoverStaleRefLock 的两道条件回收。
+ * 正常争用先由 git 等待引用锁文件（core.filesRefLockTimeout），再在 retryMs 内有界重试。
+ * git 自己的引用锁文件 <引用>.lock 一律不自动删除：它不带持有者身份，套件看不到实际持锁的 git 进程，任何自动删除都可能删掉活锁。
  * 拿不到时的错误带 code，调用方按它区分：
  *   EK_LOCK_BUSY       持有者还活着（持锁多久都不回收：慢请求、进程暂停）
  *   EK_LOCK_BROKEN     持有者信息读不出，要人确认后手动删除引用
- *   EK_LOCK_CONTENDED  retryMs 内一直没换成：别的进程正在改这个引用，或 git 的引用锁文件还不满足回收条件（信息里写明是哪种）。
- * 释放：只在引用仍指向自己的对象时删除，失败时有界重试；仍失败（含释放路径里的诊断与回收出错）只写警告，fn 的返回值或异常原样交回。
- * 进程退出后没释放的锁按“持有者已不在”回收。opts：{ staleMs, retryMs }，缺省见 LOCK_DEFAULTS。
+ *   EK_LOCK_CONTENDED  retryMs 内一直没换成：别的进程正在改这个引用，或 git 的引用锁文件一直在。信息里写明锁文件存在多久、
+ *                      有没有活着的本套件进程在改这个引用，以及确认没有 git 进程后要删除的文件（git 异常退出留下的残留只能这样人工清理）。
+ * 释放：只在引用仍指向自己的对象时删除，失败时有界重试；仍失败（含释放路径里的任何出错）只写警告，fn 的返回值或异常原样交回。
+ * 进程退出后没释放的锁按“持有者已不在”回收。opts：{ retryMs }，缺省见 LOCK_DEFAULTS。
  */
 export function withLock(root, name, fn, label = `锁 ${name}`, opts = {}) {
-  const { staleMs, retryMs } = { ...LOCK_DEFAULTS, ...opts };
+  const { retryMs } = { ...LOCK_DEFAULTS, ...opts };
   const ref = `refs/engineering-gate/locks/${name}`;
   const run = (args, input) => spawnSync('git', args, { cwd: root, encoding: 'utf8', input });
   const common = path.resolve(root, run(['rev-parse', '--git-common-dir']).stdout.trim());
@@ -809,13 +756,14 @@ export function withLock(root, name, fn, label = `锁 ${name}`, opts = {}) {
   const holder = (sha) => (sha ? run(['cat-file', '-p', sha]).stdout ?? '' : '');
   const gitLock = path.join(common, ...ref.split('/')) + '.lock';
 
-  /** 比较交换没成时，判断 git 的引用锁文件：回收了残留返回 null（立即重试），否则返回说明。 */
+  /** 比较交换没成时的说明：git 的引用锁文件在不在、在了多久、有没有活着的本套件进程在改这个引用。 */
   const blocked = (stderr) => {
-    const stat = fs.statSync(gitLock, { throwIfNoEntry: false, bigint: true });
+    const stat = fs.statSync(gitLock, { throwIfNoEntry: false });
     if (!stat) return String(stderr ?? '').trim() || '引用在比较交换时被别的进程改动';
-    if (recoverStaleRefLock({ common, gitLock, stat, intents, staleMs })) return null;
-    const age = Math.round((Date.now() - Number(stat.mtimeMs)) / 1000);
-    return `git 的引用锁文件 ${gitLock} 已存在 ${age} 秒（另一个进程正在改这个引用；没有活着的进程在改、且存在超过 ${Math.round(staleMs / 1000)} 秒的，按 git 异常退出的残留自动回收）`;
+    const age = Math.round((Date.now() - stat.mtimeMs) / 1000);
+    const live = liveIntentPids(intents);
+    const who = live.length ? `本套件进程 ${live.join('、')} 正在改这个引用` : '没有活着的本套件进程在改这个引用，可能是 git 异常退出留下的残留';
+    return `git 的引用锁文件 ${gitLock} 已存在 ${age} 秒（${who}）；它不会自动删除：确认没有 git 进程在改 ${ref} 后手动删除该文件再重试`;
   };
 
   const deadline = Date.now() + retryMs;
@@ -833,9 +781,9 @@ export function withLock(root, name, fn, label = `锁 ${name}`, opts = {}) {
     }
     const swapped = update([ref, mine, expected]);
     if (swapped.status === 0 && read() === mine) break;
-    const why = swapped.status === 0 ? '比较交换后引用不是自己的对象' : blocked(swapped.stderr);
-    if (why === null) continue;
-    if (Date.now() >= deadline) throw lockError('EK_LOCK_CONTENDED', `${label}暂时取不到：${why}；稍后重试`);
+    if (Date.now() >= deadline) {
+      throw lockError('EK_LOCK_CONTENDED', `${label}暂时取不到：${swapped.status === 0 ? '比较交换后引用不是自己的对象' : blocked(swapped.stderr)}；稍后重试`);
+    }
     sleepMs(20 + Math.floor(Math.random() * 40));
   }
   try {
@@ -849,14 +797,13 @@ export function withLock(root, name, fn, label = `锁 ${name}`, opts = {}) {
         if (released.status === 0) { why = ''; break; }
         if (read() !== mine) { why = `引用已不指向自己的对象：${String(released.stderr).trim()}`; break; }
         why = blocked(released.stderr);
-        if (why === null) continue;
         if (Date.now() >= until) break;
         sleepMs(20 + Math.floor(Math.random() * 40));
       }
     } catch (e) {
       why = `释放时出错：${e.message}`;
     }
-    if (why) process.stderr.write(`警告：${label}没有释放（${ref}）：${why}；本进程退出后它会按“持有者已不在”被回收，急用时确认没有进程在用后运行 git update-ref -d ${ref}\n`);
+    if (why) process.stderr.write(`警告：${label}没有释放（${ref}）：${why}；本进程退出后这把锁会按“持有者已不在”被回收\n`);
   }
 }
 
@@ -864,6 +811,8 @@ export function withLock(root, name, fn, label = `锁 ${name}`, opts = {}) {
  * 0.9.x 及更早版本的 PR 锁：目录 <git 公共目录>/engineering-gate/pr/<编号>/lock（mkdir 建，owner.json 记持有者）。
  * 升级期间同一仓库的不同工作树可能装着新旧两个版本：新版取到引用锁后再按旧版同样的算法取这个目录锁，两边才互斥。
  * 失效判定与回收照抄旧版：持有者进程已不在，或没写成 owner.json 且超过十分钟；回收用同级 reclaim 目录互斥。
+ * reclaim 目录残留（旧版回收者中途退出，或还在回收）一律不自动删除：它不记持有者，删掉可能和正在回收的旧版进程冲突；报占用并写明要人工确认后删除。
+ * 释放时读写目录锁出错只写警告，fn 的返回值或异常原样交回。
  */
 function withLegacyPrDirLock(root, no, fn, label) {
   const parent = path.dirname(prLogFile(root, no));
@@ -883,21 +832,25 @@ function withLegacyPrDirLock(root, no, fn, label) {
     return Date.now() - stat.mtimeMs > 600000;
   };
   const occupied = () => lockError('EK_LOCK_BUSY', `${label}被占用（旧版套件的目录锁 ${lock}）：${owner().trim() || '持有者信息还没写成'}`);
+  // Windows 上目录正被别的进程删除、还没删完时，mkdir 报 EPERM 或 EACCES：这是暂态争用，不是故障
+  const deleting = (e) => ['EPERM', 'EACCES'].includes(e.code) && lockError('EK_LOCK_CONTENDED', `${label}暂时取不到：旧版套件的目录锁 ${lock} 正被删除（${e.code}）；稍后重试`);
   try {
     fs.mkdirSync(lock);
   } catch (e) {
+    if (deleting(e)) throw deleting(e);
     if (e.code !== 'EEXIST') throw e;
     if (!stale()) throw occupied();
     const reclaim = path.join(parent, 'reclaim');
-    // 旧版回收只持有 reclaim 几毫秒；超过十分钟还在的是回收中途退出留下的。新版之间已由引用锁互斥，这里删掉它不会和别的新版进程冲突
-    const leftover = fs.statSync(reclaim, { throwIfNoEntry: false });
-    if (leftover && Date.now() - leftover.mtimeMs > 600000) fs.rmSync(reclaim, { recursive: true, force: true });
     try { fs.mkdirSync(reclaim); }
-    catch (err) { if (err.code === 'EEXIST') throw occupied(); throw err; }
+    catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      const age = Math.round((Date.now() - (fs.statSync(reclaim, { throwIfNoEntry: false })?.mtimeMs ?? Date.now())) / 1000);
+      throw lockError('EK_LOCK_BUSY', `${label}被占用：旧版套件的回收目录 ${reclaim} 已存在 ${age} 秒（旧版进程正在回收，或回收中途退出留下的）；它不会自动删除：确认没有旧版套件进程在运行后手动删除它再重试`);
+    }
     try {
       if (stale()) fs.rmSync(lock, { recursive: true });
       try { fs.mkdirSync(lock); }
-      catch (err) { if (err.code === 'EEXIST') throw occupied(); throw err; }
+      catch (err) { if (err.code === 'EEXIST') throw occupied(); throw deleting(err) || err; }
     } finally { fs.rmdirSync(reclaim); }
   }
   const identity = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token: crypto.randomUUID() });
@@ -905,7 +858,12 @@ function withLegacyPrDirLock(root, no, fn, label) {
     fs.writeFileSync(ownerFile, identity);
     return fn();
   } finally {
-    if (!owner() || owner() === identity) fs.rmSync(lock, { recursive: true, force: true });
+    try {
+      const now = owner();
+      if (!now || now === identity) fs.rmSync(lock, { recursive: true, force: true });
+    } catch (e) {
+      process.stderr.write(`警告：${label}的旧版目录锁 ${lock} 没有释放：${e.message}；确认没有进程在用后手动删除\n`);
+    }
   }
 }
 

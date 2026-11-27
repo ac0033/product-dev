@@ -734,3 +734,53 @@ test('M1 roundState：第 N 轮收齐前（经用户决定）在别的提交 D �
   const extra = rs([...early, pass('consistency', B), fail('code', C, [f('M1')]), pass('consistency', C), fail('code', D, [f('M1')]), pass('consistency', D)]);
   assert.equal(extra.phase, 'stop', '收齐之后在别的提交上的不通过仍超出允许的轮次');
 });
+
+// ---------- PR #46 第 2 轮复审的回归 ----------
+
+test('M2 roundState：越权登记（outOfBand）一律不计入轮次；第 N 轮还没收齐时，越权的不通过不会顶掉它成为 latest（PR #46 第 2 轮代码 M2、一致性 M3，用户决定：越权登记不计入轮次）', () => {
+  const oob = (kind, verdict, head, findings = []) => rec(kind, verdict, head, findings, { userDecision: '用户同意', outOfBand: true });
+  const s = rs([...roundHigh(A), fail('code', B, [f('H1'), f('M1')]), oob('code', 'fail', D, [f('M1')])]);
+  assert.equal(s.phase, 'collecting');
+  assert.equal(s.latest.head, B, '越权登记不改变 latest');
+  assert.deepEqual(s.latest.missingKinds, ['consistency']);
+  assert.equal(admitRegistration(s, { kind: 'consistency', verdict: 'pass', head: B }), null, '照常在 B 上补登');
+  const after = rs([...roundHigh(A), fail('code', B, [f('H1'), f('M1')]), oob('code', 'fail', D, [f('M1')]), pass('consistency', B)]);
+  assert.equal(after.phase, 'final-next');
+  assert.equal(after.finalHead, null);
+  assert.equal(RR.finalRoundTarget(after, D), true);
+  // 越权的 pass 也不计：第 N 轮之后在旧轮次提交上经用户决定的登记不占用最后一轮
+  const oldSha = rs([...roundHigh(A), ...roundHigh(B), oob('code', 'pass', A)]);
+  assert.equal(oldSha.finalHead, null);
+  // 停下之后经用户决定继续的登记也不计：阶段仍是停下
+  const stopped = rs([...roundHigh(A), ...roundHigh(B), fail('code', C, [f('H1')]), pass('consistency', C), oob('code', 'pass', D), oob('consistency', 'pass', D)]);
+  assert.equal(stopped.phase, 'stop');
+});
+
+test('M1 parseRiskRegister 拒绝 fixedIn 里的重复路径；closureProblems 把“长度相同、含重复项”的数组判为与申报不一致，修复证据只用本机申报（PR #46 第 2 轮代码 M1、一致性 M4）', () => {
+  const g = goodFacts();
+  const line = JSON.stringify({ ...g.expected[0], summary: SUMMARY, fixedIn: ['src/a.ts', 'src/a.ts'] });
+  const parsed = parseRiskRegister(line);
+  assert.equal(parsed.entries.length, 0);
+  assert.match(parsed.problems.join('|'), /第 1 行/);
+  const facts = goodFacts({ fixDiff: ['src/a.ts'] });
+  const key = riskKey(facts.expected[0]);
+  facts.register = { entries: [{ ...facts.expected[0], summary: SUMMARY, fixedIn: ['src/a.ts', 'src/a.ts'] }], problems: [] };
+  const out = closureProblems({ ...facts, declaredFixedIn: new Map([[key, { findingSha: facts.expected[0].findingSha, fixedIn: ['src/a.ts', 'src/b.ts'] }]]) }).join('|');
+  assert.match(out, /不一致/);
+  // 提交与申报一致、申报里的路径只有一部分在修复差异里：按申报判“都不在修复差异里”
+  const both = goodFacts({ fixDiff: ['src/a.ts'] });
+  both.register = { entries: [{ ...both.expected[0], summary: SUMMARY, fixedIn: ['src/a.ts', 'src/b.ts'] }], problems: [] };
+  const noFiles = { ...both, expected: expectedRiskEntries({ pr: '7', round: 2, failHead: B, failures: [{ kind: 'code', findings: [{ ...FAIL_FINDING, files: [] }], dataSha: DATA_SHA }] }) };
+  noFiles.register = { entries: [{ ...noFiles.expected[0], summary: SUMMARY, fixedIn: ['src/a.ts', 'src/b.ts'] }], problems: [] };
+  noFiles.declaredFixedIn = new Map([[riskKey(noFiles.expected[0]), { findingSha: noFiles.expected[0].findingSha, fixedIn: ['src/a.ts', 'src/b.ts'] }]]);
+  assert.match(closureProblems(noFiles).join('|'), /都不在修复差异里/);
+});
+
+test('M5 displayPath 转义行分隔符、段落分隔符、格式字符和终端控制字符；白名单拒绝提示里的路径同样转义（PR #46 第 2 轮代码 M5）', () => {
+  assert.equal(RR.displayPath('a\u2028b\u2029c'), String.raw`a\u2028b\u2029c`);
+  assert.equal(RR.displayPath('a\u200bb\u001b[31m'), String.raw`a\u200bb\u001b[31m`);
+  assert.equal(RR.displayPath('a\\b'), String.raw`a\\b`);
+  const out = closureProblems(goodFacts({ fixDiff: ['src/dedup.ts', 'src/x\u2028y.ts'] })).join('|');
+  assert.ok(out.includes(String.raw`src/x\u2028y.ts`), out);
+  assert.ok(!out.includes('\u2028'), '提示里没有原样的行分隔符');
+});
