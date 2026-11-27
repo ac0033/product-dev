@@ -58,8 +58,23 @@ function classify({ closure, limit, rounds, latest, finalHead }) {
  * 收齐之前的任何登记都不计入最后一轮的收齐、风险信号和收口证据。finalHead 是收齐之后第一条落在别的提交上的 pass 或 fail。
  */
 export function roundState({ entries, limit, closure, required = ['code', 'consistency'] }) {
-  // 越权登记（不带用户决定就会被拒、经用户决定才登记的，登记时标 outOfBand）只留作追溯，轮次计算一律不计
-  const history = entries.filter((e) => !e.outOfBand && required.includes(e.kind) && (counted(e) || e.verdict === 'accept' || (e.kind === 'consistency' && e.verdict === 'defer')));
+  // 越权登记（不带用户决定就会被拒、经用户决定才登记的）只留作追溯，轮次计算一律不计。0.10.1 起登记时写明 outOfBand；
+  // 更早的记录没有这个字段：带用户决定的按当时已有的记录重放一次准入，不带用户决定就会被拒的同样算越权
+  const valid = (e) => required.includes(e.kind) && (counted(e) || e.verdict === 'accept' || (e.kind === 'consistency' && e.verdict === 'defer'));
+  const kept = [];
+  for (const e of entries) {
+    if (!valid(e) || e.outOfBand === true) continue;
+    if (e.outOfBand === undefined && e.verdict !== 'accept' && hasContent(e.userDecision)) {
+      const then = computeRounds({ history: kept, limit, closure, required });
+      if (admitRegistration(then, { verdict: e.verdict, kind: e.kind, head: e.headSha, userDecision: null })) continue;
+    }
+    kept.push(e);
+  }
+  return computeRounds({ history: kept, limit, closure, required });
+}
+
+/** roundState 的计算部分：history 已去掉越权登记和无关记录。 */
+function computeRounds({ history, limit, closure, required }) {
   const byHead = new Map();
   const firstFail = new Map();
   for (const [i, entry] of history.entries()) {
@@ -155,11 +170,16 @@ export function findingFingerprint(finding) {
   return createHash('sha256').update(canonicalJson(finding)).digest('hex');
 }
 
+/** 可共享摘要的指纹（本机申报里记它，close 与合并核对提交里的摘要没被改过）。 */
+export function summaryFingerprint(summary) {
+  return createHash('sha256').update(String(summary)).digest('hex');
+}
+
 /** 可共享摘要的格式问题，合格返回 null。是否可以共享由作者核对，这里只查形式。 */
 export function summaryProblem(summary) {
   if (typeof summary !== 'string' || !summary.trim()) return '缺少可共享摘要';
   if ([...summary].length > MAX_SUMMARY_CHARS) return '可共享摘要超过 ' + MAX_SUMMARY_CHARS + ' 字';
-  if (/\p{Cc}/u.test(summary)) return '可共享摘要含换行或控制字符';
+  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(summary)) return '可共享摘要含换行、行分隔符、段落分隔符或控制、格式字符';
   return null;
 }
 
@@ -289,6 +309,8 @@ export function closureProblems(facts) {
     }
     const bad = summaryProblem(actual.summary);
     if (bad) problems.push(label + bad);
+    // 摘要只认 risks 核对后写下的那份：本机申报记着它的指纹，提交里改过的摘要不认
+    else if (declared.summarySha !== summaryFingerprint(actual.summary)) problems.push(label + '可共享摘要与本机 risks 登记的不一致：摘要只能经 review.mjs risks --shared-summary 写');
     const files = e[findingFiles] ?? [];
     // “已修”的证据用本机申报（可信的那份），不用提交里的数组
     if (!files.some((f) => changed.has(f)) && !(declared.fixedIn.length && declared.fixedIn.every((f) => changed.has(f)))) {
