@@ -1483,7 +1483,7 @@ test('H6 清理副本：先改名到随机名下再核对身份、逐项删除�
   const outside = tmpDir('ekit-outside-');
   fs.writeFileSync(path.join(outside, 'keep.txt'), 'sentinel');
   fs.symlinkSync(outside, path.join(copy, 'link'), 'junction');
-  const st = fs.lstatSync(copy);
+  const st = fs.lstatSync(copy, { bigint: true });
   const note = ER.removeCopy(copy, runDir, { dev: st.dev, ino: st.ino });
   assert.equal(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'sentinel', '链接指向的目录原样保留');
   // 只读文件也删掉：Windows 上 unlink 在它自己打开的句柄上清只读属性再删（不跟随重解析点），不按路径另改权限
@@ -1493,13 +1493,38 @@ test('H6 清理副本：先改名到随机名下再核对身份、逐项删除�
   // 副本目录被换成另一个目录：不清理
   const copy2 = path.join(runDir, 'workspace2');
   fs.mkdirSync(copy2);
-  const id2 = fs.lstatSync(copy2);
+  const id2 = fs.lstatSync(copy2, { bigint: true });
   // 原目录挪开但保留，新目录才一定是另一个 inode（Linux 上删了马上重建常复用同一个）
   fs.renameSync(copy2, path.join(runDir, 'workspace2-moved'));
   fs.mkdirSync(copy2);
   fs.writeFileSync(path.join(copy2, 'other.txt'), 'other');
   assert.match(String(ER.removeCopy(copy2, runDir, { dev: id2.dev, ino: id2.ino })), /替换|移走/);
   assert.equal(fs.readFileSync(path.join(copy2, 'other.txt'), 'utf8'), 'other');
+});
+
+test('64 位目录标识：不同 inode 的舍入值相同时保留替换目录', (t) => {
+  const runDir = tmpDir('ekit-dir-id-');
+  const replacement = path.join(runDir, 'workspace');
+  fs.mkdirSync(replacement);
+  const sentinel = path.join(replacement, 'keep.txt');
+  fs.writeFileSync(sentinel, 'sentinel');
+
+  const lstat = fs.lstatSync;
+  const stats = lstat(replacement, { bigint: true });
+  const originalIno = 2n ** 60n;
+  const replacementIno = originalIno + 1n;
+  assert.equal(Number(originalIno), Number(replacementIno));
+
+  t.mock.method(fs, 'lstatSync', (file, options) => {
+    if (file !== replacement) return lstat(file, options);
+    assert.equal(options?.bigint, true, '用于身份核对的 stat 须保留完整精度');
+    stats.ino = replacementIno;
+    return stats;
+  });
+
+  const note = ER.removeCopy(replacement, runDir, { dev: stats.dev, ino: originalIno });
+  assert.match(note, /替换|移走/);
+  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'sentinel');
 });
 
 test('报告写明模型选择依据（--model-reason）（PR #42 一致性审 L1）', async () => {
