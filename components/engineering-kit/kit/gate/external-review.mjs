@@ -423,7 +423,7 @@ export function changedParts(before, after) {
 
 /**
  * 删除副本。先把它改名到运行目录里一个随机名下、再核对身份，之后逐项删除：不改任何文件的权限（rmSync 在 Windows 上遇到 EPERM 会按路径改权限重试，所以不用它），
- * 链接只删链接本身，每个目录删之前再核对一次身份；删不掉或身份对不上就停下，返回残留位置。
+ * 链接只删链接本身，每个目录删之前再核对一次身份；删不掉或身份对不上就停下，返回残留位置。目录标识使用 bigint，避免 64 位 inode 被 Number 舍入。
  * 局限：Node 没有按目录句柄删除的接口，能写运行目录的同一用户进程仍可能在两次核对之间替换；运行目录只对当前用户可写（0700），随机名事先不可知。
  */
 export function removeCopy(dir, runDir, identity) {
@@ -432,14 +432,14 @@ export function removeCopy(dir, runDir, identity) {
   try { fs.renameSync(dir, trash); } catch (e) { return `未能清理只读副本：${e.message}`; }
   if (!ownedCopy(trash, runDir, identity)) return `副本在清理时被替换，已停止清理，残留在 ${trash}`;
   const same = (p, id) => {
-    const st = fs.lstatSync(p);
+    const st = fs.lstatSync(p, { bigint: true });
     if (!st.isDirectory() || st.isSymbolicLink() || st.dev !== id.dev || st.ino !== id.ino) throw new Error(`目录 ${p} 在清理时被替换`);
   };
   const remove = (d, id) => {
     same(d, id);
     for (const name of fs.readdirSync(d)) {
       const p = path.join(d, name);
-      const st = fs.lstatSync(p);
+      const st = fs.lstatSync(p, { bigint: true });
       if (st.isDirectory() && !st.isSymbolicLink()) remove(p, st);
       else fs.unlinkSync(p);
     }
@@ -456,7 +456,7 @@ export function removeCopy(dir, runDir, identity) {
 
 /** 只核对、清理本次创建且仍在原位置的目录。 */
 function ownedCopy(dir, runDir, identity) {
-  const stat = fs.lstatSync(dir, { throwIfNoEntry: false });
+  const stat = fs.lstatSync(dir, { bigint: true, throwIfNoEntry: false });
   return stat?.isDirectory() && !stat.isSymbolicLink() && stat.dev === identity.dev && stat.ino === identity.ino && inside(runDir, dir);
 }
 
@@ -879,7 +879,7 @@ export async function runExternalReview(opts) {
   const inputHash = sha256(requestText);
   const runDir = makeRunDir(root, opts.outDir, headSha);
   const copy = path.join(runDir, 'workspace');
-  const runIdentity = fs.lstatSync(runDir);
+  const runIdentity = fs.lstatSync(runDir, { bigint: true });
   const runOwned = () => ownedCopy(runDir, path.dirname(runDir), runIdentity);
   let identity;
   let published = null;
@@ -887,7 +887,7 @@ export async function runExternalReview(opts) {
     fs.writeFileSync(path.join(runDir, 'request.json'), `${JSON.stringify(request, null, 2)}\n`);
     fs.writeFileSync(path.join(runDir, 'input.sha256'), `${inputHash}  request.json（被审 ${headSha}）\n`);
     fs.mkdirSync(copy, { mode: 0o700 });
-    identity = fs.lstatSync(copy);
+    identity = fs.lstatSync(copy, { bigint: true });
     const copied = materialize(root, headSha, copy, { exclude: policy.exclude, maxBytes: limits.maxCopyBytes });
     const copyHash = dirHash(copy);
     const repoBefore = repoState(root);
