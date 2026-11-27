@@ -657,3 +657,21 @@ test('C3 闸门写台账：写台账失败只在输出里加警告，不改变�
   assert.equal(bad.ok, false);
   assert.ok(bad.messages.some((m) => /警告：测试台账没写进去：/.test(m)));
 });
+
+test('R4-5 闸门：测试期间代码变化时不记台账（输出 本次不记台账）；正常运行的条目 commit 等于测试开始时的 HEAD', () => {
+  // 测试命令运行期间改了一个受跟踪的源文件：记录作废，台账不能记下这次运行
+  const root = ledgerRepo({ testCommand: 'node mk-mutate.mjs' });
+  write(root, 'mk-mutate.mjs', `${MK}`.replace("process.exit(bad ? 1 : 0);", "fs.appendFileSync('src/dedup.ts', '// 运行期间改动\\n');\nprocess.exit(bad ? 1 : 0);"));
+  const res = runGate({ root });
+  assert.equal(res.ok, false, res.messages.join('\n'));
+  assert.ok(res.messages.some((m) => /测试运行期间代码发生了变化/.test(m)), res.messages.join('\n'));
+  assert.ok(res.messages.some((m) => /本次不记台账/.test(m)), res.messages.join('\n'));
+  assert.equal(ledgerEntries(root).length, 0, '代码变了，台账不新增条目');
+  // 正常运行：条目的 commit 是测试开始时的 HEAD
+  const ok = ledgerRepo();
+  const head = git(ok, ['rev-parse', 'HEAD']).trim();
+  const good = runGate({ root: ok });
+  assert.equal(good.ok, true, good.messages.join('\n'));
+  const [e] = ledgerEntries(ok);
+  assert.equal(e.commit, head);
+});
