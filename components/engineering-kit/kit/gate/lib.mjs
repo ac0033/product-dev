@@ -423,6 +423,20 @@ function entryDigest(mode, sha) {
   return mode === '100644' ? sha : `${mode}:${sha}`;
 }
 
+/** 路径的某个上级目录在工作区里是符号链接（或已不是目录）时返回 true。 */
+function underSymlink(root, rel) {
+  const parts = rel.split('/');
+  let cur = root;
+  for (const part of parts.slice(0, -1)) {
+    cur = path.join(cur, part);
+    let st;
+    try { st = fs.lstatSync(cur, { throwIfNoEntry: false }); } catch { return true; }
+    if (!st) return false;
+    if (st.isSymbolicLink() || !st.isDirectory()) return true;
+  }
+  return false;
+}
+
 /**
  * 每个文件的内容摘要：路径 → 摘要（entryDigest；对象名与 git add 相同：经清洗过滤器）；文件不存在（已删除）记为 deleted。
  * 模式按 git 自己的看法取，两项配置各管各的：工作区里的真符号链接一律按链接（120000，摘要取链接文本）；
@@ -437,7 +451,8 @@ export function fileHashes(root, files) {
   const stats = new Map();
   const present = sorted.filter((f) => {
     let st;
-    // 父路径已变成普通文件时 lstat 报 ENOTDIR：这个路径在工作区里不存在，与提交快照的 deleted 同一口径
+    // 父路径已变成普通文件时 lstat 报 ENOTDIR、父路径是符号链接时 lstat 会穿过它：这两种路径在 git 看来都不存在，与提交快照的 deleted 同一口径
+    if (underSymlink(root, f)) return false;
     try { st = fs.lstatSync(path.join(root, f), { throwIfNoEntry: false }); }
     catch (e) { if (e.code === 'ENOTDIR') return false; throw e; }
     if (!st) return false;
@@ -734,11 +749,15 @@ function withIntent(intents, run) {
   }
 }
 
-/** 别的、还活着的本套件进程正在改这个锁引用时返回它们的 pid；读不出 pid 的意向按活着计。只读，不删任何文件。 */
+/**
+ * 别的、还活着的本套件进程正在改这个锁引用时返回 { pids }；读不出 pid 的意向按活着计。意向目录不存在算没有意向；
+ * 目录在却读不出时返回 { error }，诊断里如实写“读不出”，不当作没有。只读，不删任何文件。
+ */
 function liveIntentPids(intents) {
   let names = [];
-  try { names = fs.readdirSync(intents); } catch { return []; }
-  return names.map((n) => Number.parseInt(n, 10)).filter((pid) => pid !== process.pid && (!Number.isInteger(pid) || pidAlive(pid))).map((pid) => (Number.isInteger(pid) ? pid : '读不出'));
+  try { names = fs.readdirSync(intents); }
+  catch (e) { return e.code === 'ENOENT' ? { pids: [] } : { error: e.code || e.message }; }
+  return { pids: names.map((n) => Number.parseInt(n, 10)).filter((pid) => pid !== process.pid && (!Number.isInteger(pid) || pidAlive(pid))).map((pid) => (Number.isInteger(pid) ? pid : '读不出')) };
 }
 
 /**
@@ -775,7 +794,8 @@ export function withLock(root, name, fn, label = `锁 ${name}`, opts = {}) {
     if (!stat) return String(stderr ?? '').trim() || '引用在比较交换时被别的进程改动';
     const age = Math.round((Date.now() - stat.mtimeMs) / 1000);
     const live = liveIntentPids(intents);
-    const who = live.length ? `本套件进程 ${live.join('、')} 正在改这个引用` : '没有活着的本套件进程在改这个引用，可能是 git 异常退出留下的残留';
+    const who = live.error ? `意向目录 ${intents} 读不出（${live.error}），判断不了有没有本套件进程在改这个引用`
+      : live.pids.length ? `本套件进程 ${live.pids.join('、')} 正在改这个引用` : '没有活着的本套件进程在改这个引用，可能是 git 异常退出留下的残留';
     return `git 的引用锁文件 ${gitLock} 已存在 ${age} 秒（${who}）；它不会自动删除：确认没有 git 进程在改 ${ref} 后手动删除该文件再重试`;
   };
 
@@ -821,70 +841,26 @@ export function withLock(root, name, fn, label = `锁 ${name}`, opts = {}) {
 }
 
 /**
- * 0.9.x 及更早版本的 PR 锁：目录 <git 公共目录>/engineering-gate/pr/<编号>/lock（mkdir 建，owner.json 记持有者）。
- * 升级期间同一仓库的不同工作树可能装着新旧两个版本：新版取到引用锁后再按旧版同样的算法取这个目录锁，两边才互斥。
- * 失效判定：持有者进程已不在才回收（回收用同级 reclaim 目录互斥，与旧版相同）；旧版另把“没写成 owner.json 且超过十分钟”也当失效，
- * 新版不这样做（认不出持有者的不删）。旧版自身的这条按年龄删除新版改不了：升级时同一仓库的各工作树应一起升级。
- * reclaim 目录残留（旧版回收者中途退出，或还在回收）一律不自动删除：它不记持有者，删掉可能和正在回收的旧版进程冲突；报占用并写明要人工确认后删除。
- * 释放时读写目录锁出错只写警告，fn 的返回值或异常原样交回。
+ * 0.9.x 及更早版本的 PR 锁是目录 <git 公共目录>/engineering-gate/pr/<编号>/lock（回收时另建同级 reclaim）。0.10.x 不再与它共用：
+ * 旧版会按年龄删掉认不出持有者的目录锁，只改新版无法和它可靠互斥，所以新版拒绝混用。取到引用锁后先看这两个目录在不在，
+ * 在就说明同一仓库还有工作树在用（或刚用过）0.9.x 套件：报 EK_LOCK_LEGACY，写明要先把各工作树升级、确认没有旧版进程后删除这两个目录。
+ * 新版持锁期间旧版仍可能取到它自己的目录锁（新版约束不了旧版），这一点写在升级说明里：同一仓库的各工作树要一起升级。
  */
-function withLegacyPrDirLock(root, no, fn, label) {
+function legacyPrLockProblem(root, no, label) {
   const parent = path.dirname(prLogFile(root, no));
-  const lock = path.join(parent, 'lock');
-  const ownerFile = path.join(lock, 'owner.json');
-  const owner = () => {
-    try { return fs.readFileSync(ownerFile, 'utf8'); }
-    catch (e) { if (e.code !== 'ENOENT') throw e; return ''; }
-  };
-  const stale = () => {
-    const stat = fs.statSync(lock, { throwIfNoEntry: false });
-    if (!stat) return false;
-    const text = owner();
-    let pid = null;
-    try { pid = JSON.parse(text).pid; } catch { pid = null; }
-    // 没写成 owner.json 的目录锁认不出持有者（旧版进程可能刚建好目录、还没写持有者就暂停了）：不按年龄删，报占用并写明人工确认
-    return Number.isInteger(pid) ? ownerGone(text) : false;
-  };
-  const occupied = () => lockError('EK_LOCK_BUSY', `${label}被占用（旧版套件的目录锁 ${lock}）：${owner().trim() || '持有者信息还没写成或读不出；它不会自动删除：确认没有旧版套件进程在运行后手动删除这个目录再重试'}`);
-  // Windows 上目录正被别的进程删除、还没删完时，mkdir 报 EPERM 或 EACCES：这是暂态争用，不是故障
-  const deleting = (e) => ['EPERM', 'EACCES'].includes(e.code) && lockError('EK_LOCK_CONTENDED', `${label}暂时取不到：旧版套件的目录锁 ${lock} 正被删除（${e.code}）；稍后重试`);
-  try {
-    fs.mkdirSync(lock);
-  } catch (e) {
-    if (deleting(e)) throw deleting(e);
-    if (e.code !== 'EEXIST') throw e;
-    if (!stale()) throw occupied();
-    const reclaim = path.join(parent, 'reclaim');
-    try { fs.mkdirSync(reclaim); }
-    catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-      const age = Math.round((Date.now() - (fs.statSync(reclaim, { throwIfNoEntry: false })?.mtimeMs ?? Date.now())) / 1000);
-      throw lockError('EK_LOCK_BUSY', `${label}被占用：旧版套件的回收目录 ${reclaim} 已存在 ${age} 秒（旧版进程正在回收，或回收中途退出留下的）；它不会自动删除：确认没有旧版套件进程在运行后手动删除它再重试`);
-    }
-    try {
-      if (stale()) fs.rmSync(lock, { recursive: true });
-      try { fs.mkdirSync(lock); }
-      catch (err) { if (err.code === 'EEXIST') throw occupied(); throw deleting(err) || err; }
-    } finally { fs.rmdirSync(reclaim); }
-  }
-  const identity = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token: crypto.randomUUID() });
-  try {
-    fs.writeFileSync(ownerFile, identity);
-    return fn();
-  } finally {
-    try {
-      const now = owner();
-      if (!now || now === identity) fs.rmSync(lock, { recursive: true, force: true });
-    } catch (e) {
-      process.stderr.write(`警告：${label}的旧版目录锁 ${lock} 没有释放：${e.message}；确认没有进程在用后手动删除\n`);
-    }
-  }
+  const found = ['lock', 'reclaim'].map((n) => path.join(parent, n)).filter((p) => fs.existsSync(p));
+  if (!found.length) return null;
+  return lockError('EK_LOCK_LEGACY', `${label}：发现 0.9.x 及更早版本套件的锁目录 ${found.join('、')}，同一仓库还有工作树在用旧版套件。新版不与旧版混用：先把同一仓库的各工作树都升级到当前版本，确认没有旧版套件进程在运行后删除这些目录再重试`);
 }
 
-/** 序列化同一 PR 的同步登记、收口与合并核对（各工作树共用同一把锁；与旧版套件的目录锁同时持有）。opts 同 withLock。 */
+/** 序列化同一 PR 的同步登记、收口与合并核对（各工作树共用同一把锁）。opts 同 withLock。 */
 export function withPrLock(root, pr, fn, opts = {}) {
   const no = prNumber(pr);
   fs.mkdirSync(path.dirname(prLogFile(root, no)), { recursive: true });
   const label = `PR #${pr} 的登记锁`;
-  return withLock(root, `pr-${no}`, () => withLegacyPrDirLock(root, no, fn, label), label, opts);
+  return withLock(root, `pr-${no}`, () => {
+    const legacy = legacyPrLockProblem(root, no, label);
+    if (legacy) throw legacy;
+    return fn();
+  }, label, opts);
 }

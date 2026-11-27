@@ -63,7 +63,7 @@ import {
 
 import { COVERAGE_RULE, MAX_REVIEW_BYTES, admissionProblems, canonicalJson, compactFindings, coverageOf, fingerprint, renderReport, validateReviewData } from './review-data.mjs';
 import { isRepoPath } from './config.mjs';
-import { MAX_SUMMARY_CHARS, admitRegistration, displayPath, summaryFingerprint, closureProblems, expectedRiskEntries, nextHint, parseRiskRegister, riskKey, riskPhaseProblems, roundState, summaryProblem } from './review-rounds.mjs';
+import { MAX_SUMMARY_CHARS, admitRegistration, displayPath, replayNote, summaryFingerprint, closureProblems, expectedRiskEntries, nextHint, parseRiskRegister, riskKey, riskPhaseProblems, roundState, summaryProblem } from './review-rounds.mjs';
 
 /** 审查种类及中文名。 */
 const KINDS = { code: '代码复审', consistency: '一致性审' };
@@ -379,6 +379,8 @@ function registerLocked({ root, config, verdict, reviewer, data, evidenceChecked
   lines.push(roundLine(entries, verdict, config.maxReviewRounds, scopeName, st.head, keys, updated?.rounds.map((r) => r.head)));
   const hint = updated && nextHint(updated);
   if (hint) lines.push(hint);
+  const replay = updated && replayNote(updated);
+  if (replay) lines.push(replay);
   return { ok: true, message: lines.join('\n'), record };
 }
 
@@ -399,7 +401,7 @@ function savePrRecord(file, logFile, record) {
     if (length === undefined) fs.rmSync(logFile, { force: true });
     else fs.truncateSync(logFile, length);
     throw err;
-  } finally { fs.rmSync(tmp, { force: true }); }
+  } finally { try { fs.rmSync(tmp, { force: true }); } catch { /* 清理暂存文件失败不盖过写入本身的结果 */ } }
 }
 
 /** 从失败登记的数据副本读完整发现，逐字节核对登记时保存的指纹。 */
@@ -484,12 +486,23 @@ function unpushedLegacyCommits(root, config) {
   const upstream = git(root, ['rev-parse', '--verify', '--quiet', '@{u}']);
   const from = upstream.ok ? upstream.out.trim() : config.baseRev;
   if (!from) return { checked: false, commits: [], why: '没有上游，也没有基准提交' };
-  const log = git(root, ['log', '--format=%H', from + '..HEAD', '--', config.riskRegister]);
-  if (!log.ok) return { checked: false, commits: [], why: log.err.trim() || 'git log 失败' };
-  const commits = log.out.split('\n').filter(Boolean).filter((c) => {
-    const blob = git(root, ['show', c + ':' + config.riskRegister]);
-    return blob.ok && legacyLines(blob.out).length > 0;
-  });
+  // 遍历待推送范围的完整提交图（不按路径简化历史：合并进来的侧支上的提交同样会被推送），逐个读风险登记的对象
+  const list = git(root, ['rev-list', from + '..HEAD']);
+  if (!list.ok) return { checked: false, commits: [], why: list.err.trim() || 'git rev-list 失败' };
+  const seen = new Map();
+  const commits = [];
+  for (const c of list.out.split('\n').filter(Boolean)) {
+    const entry = git(root, ['ls-tree', c, '--', config.riskRegister]);
+    if (!entry.ok) return { checked: false, commits, why: '读不出提交 ' + c.slice(0, 12) + ' 的树：' + entry.err.trim() };
+    const m = /^\d+ blob ([0-9a-f]+)\t/.exec(entry.out);
+    if (!m) continue; // 这个提交里没有风险登记
+    if (!seen.has(m[1])) {
+      const blob = git(root, ['cat-file', 'blob', m[1]]);
+      if (!blob.ok) return { checked: false, commits, why: '读不出提交 ' + c.slice(0, 12) + ' 里的风险登记：' + blob.err.trim() };
+      seen.set(m[1], legacyLines(blob.out).length > 0);
+    }
+    if (seen.get(m[1])) commits.push(c);
+  }
   return { checked: true, commits, why: '' };
 }
 
@@ -507,28 +520,40 @@ function replaceFile(file, text) {
   try {
     fs.writeFileSync(tmp, text, { flag: 'wx' });
     fs.renameSync(tmp, file);
-  } finally { fs.rmSync(tmp, { force: true }); }
+  } finally {
+    // 清理暂存文件失败不能盖过写入本身的结果（成功或原来的错误）
+    try { fs.rmSync(tmp, { force: true }); } catch { /* 留下的暂存文件不影响结果 */ }
+  }
 }
 
 /** 本机的修复路径申报：git 公共目录 pr/<编号>/risks.json，由 risks 在 PR 锁内写，PR 的提交改不到。返回把它恢复成写之前样子的函数。 */
 function saveDeclaredFixedIn(root, no, latest, entries) {
   const file = prRecordFile(root, no, 'risks');
   const before = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+  // 上一代申报落盘保留：进程在两份文件之间退出时，已提交的旧风险登记仍能和上一代申报对上（declaredFixedIn 两代都读）
+  if (before !== null) replaceFile(prRecordFile(root, no, 'risks.prev'), before);
   const record = { pr: no, failHead: latest.head, round: latest.index, at: new Date().toISOString(),
     entries: entries.map((e) => ({ key: riskKey(e), findingSha: e.findingSha, fixedIn: e.fixedIn, summary: e.summary, summarySha: summaryFingerprint(e.summary) })) };
   replaceFile(file, JSON.stringify(record, null, 2) + '\n');
   return () => replaceFile(file, before);
 }
 
-/** 读本机的修复路径申报，只取针对当前失败提交与轮次的那份；没有或对不上时返回空表。 */
+/**
+ * 读本机的修复路径申报（当前一代 risks.json 和上一代 risks.prev.json），只取针对当前失败提交与轮次的；
+ * 返回 身份 → 候选数组（当前一代在前）。没有或对不上时返回空表。
+ */
 function declaredFixedIn(root, no, latest) {
   const map = new Map();
-  let record = null;
-  try { record = JSON.parse(fs.readFileSync(prRecordFile(root, no, 'risks'), 'utf8')); } catch { return map; }
-  if (!latest || record?.failHead !== latest.head || record.round !== latest.index || !Array.isArray(record.entries)) return map;
-  for (const e of record.entries) {
-    if (typeof e?.key === 'string' && typeof e.findingSha === 'string' && Array.isArray(e.fixedIn) && e.fixedIn.every(isRepoPath)) {
-      map.set(e.key, { findingSha: e.findingSha, fixedIn: e.fixedIn, summary: typeof e.summary === 'string' ? e.summary : null, summarySha: typeof e.summarySha === 'string' ? e.summarySha : null });
+  if (!latest) return map;
+  for (const name of ['risks', 'risks.prev']) {
+    let record = null;
+    try { record = JSON.parse(fs.readFileSync(prRecordFile(root, no, name), 'utf8')); } catch { continue; }
+    if (record?.failHead !== latest.head || record.round !== latest.index || !Array.isArray(record.entries)) continue;
+    for (const e of record.entries) {
+      if (typeof e?.key === 'string' && typeof e.findingSha === 'string' && Array.isArray(e.fixedIn) && e.fixedIn.every(isRepoPath)) {
+        if (!map.has(e.key)) map.set(e.key, []);
+        map.get(e.key).push({ findingSha: e.findingSha, fixedIn: e.fixedIn, summary: typeof e.summary === 'string' ? e.summary : null, summarySha: typeof e.summarySha === 'string' ? e.summarySha : null });
+      }
     }
   }
   return map;
@@ -561,7 +586,8 @@ function registerFile(root, rel) {
 }
 
 /**
- * 按 --shared-summary 填每条中级的可共享摘要。没给的沿用风险登记里同身份、同一条发现（findingSha 相同）的新格式条目的摘要。
+ * 按 --shared-summary 填每条中级的可共享摘要。没给的只从本机申报（risks 上次核对后写下的那份，PR 的提交改不到）沿用：
+ * 须是同一条发现（findingSha 相同），且摘要与申报里记的指纹对得上；不从 PR 能改的风险登记文件沿用。
  * 返回拒绝信息或 null。
  */
 function applySummaries(expected, specs, existing) {
@@ -580,8 +606,8 @@ function applySummaries(expected, specs, existing) {
   for (const e of expected) {
     if (e.summary !== null) continue;
     // 只从本机申报（risks 上次核对后写下的那份）沿用，不从 PR 能改的风险登记文件沿用
-    const kept = existing.get(riskKey(e));
-    if (kept && kept.findingSha === e.findingSha && !summaryProblem(kept.summary) && kept.summarySha === summaryFingerprint(kept.summary)) e.summary = kept.summary;
+    const kept = (existing.get(riskKey(e)) ?? []).find((c) => c.findingSha === e.findingSha && !summaryProblem(c.summary) && c.summarySha === summaryFingerprint(c.summary));
+    if (kept) e.summary = kept.summary;
     else missing.push(e.kind + ':' + e.id);
   }
   if (!missing.length) return null;
@@ -629,7 +655,7 @@ export function writeRisks({ root, pr, fixedIn = [], sharedSummary = [] }) {
       try { restore(); }
       catch (re) { throw new Error(e.message + '；本机申报也没能恢复（' + re.message + '）：风险登记与本机申报可能对不上，修好原因后重跑 review.mjs risks'); }
       throw e;
-    } finally { fs.rmSync(tmp, { force: true }); }
+    } finally { try { fs.rmSync(tmp, { force: true }); } catch { /* 清理暂存文件失败不盖过写入本身的结果 */ } }
     // 提醒放在下一步指引之前：旧格式原文可能在当前文件里，也可能只在还没推送的提交里
     const out = ['已写入 ' + entries.length + ' 条风险登记到 ' + config.riskRegister];
     const legacy = legacyLines(content);
