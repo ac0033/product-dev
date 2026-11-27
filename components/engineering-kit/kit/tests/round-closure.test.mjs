@@ -817,7 +817,7 @@ test('M2 越权登记：第 N 轮收齐前经用户决定在别的提交上的�
   assert.match(early.message, /越权/);
   // 第 2 轮的 b 仍缺一致性审：照常在 b 上补登（迟到的那份针对 b，PR 的最终提交暂时回到 b）
   const late = must(reg(root, 'consistency', 'pass', b, [], { prHead: b }));
-  assert.equal(late.record.outOfBand, undefined, '按规则的登记不带标记');
+  assert.equal(late.record.outOfBand, false, '按规则的登记写明 outOfBand: false');
   // 最后一轮在 d 上：代码复审只剩中级；提前的那份一致性审不算，阶段是收齐前
   must(reg(root, 'code', 'fail', d, [M()]));
   const fix = fixCommit(root, 4);
@@ -852,16 +852,99 @@ test('M8 risks 写风险登记失败时把本机申报恢复原样，不留下�
   assert.ok(fs.existsSync(declared));
 });
 
-test('M7 风险登记或它的历史里有旧格式行时，risks 提示推送前检查还没推送的提交；close 成功时提示最终提交上仍有的旧格式行号（PR #46 第 2 轮代码 M7、一致性 M5）', async () => {
+test('M7 风险登记里有旧格式行时，risks 点出行号且提醒排在“提交并推送”之前；close 成功时提示最终提交上仍有的旧格式行号（PR #46 第 2 轮代码 M7、一致性 M5；只在历史里的情况见第 3 轮 M3）', async () => {
   const { root } = midRounds();
   const fix = fixCommit(root, 3);
   const unrelated = { pr: '3', commit: 'a'.repeat(40), round: 1, kind: 'code', id: 'M5', severity: 'medium', location: 'src/x.ts:1', problem: '无关旧行的原文', reason: '理由', fix: '改法', status: '已修、未再复审', fixedIn: [] };
   write(root, REG, `${JSON.stringify(unrelated)}${NL}`);
   const w = must(await writeRisks(root, fix));
-  assert.match(msgOf(w), /git log -p/);
-  assert.match(msgOf(w), /推送/);
+  assert.match(msgOf(w), /第 1 行仍是旧格式/);
+  assert.ok(msgOf(w).indexOf('旧格式') < msgOf(w).indexOf('提交并推送'), '提醒排在下一步指引之前');
   commitAll(root, 'risks');
   const c = must(await closeRound(root, headOf(root)));
   assert.match(msgOf(c), /第 1 行仍是旧格式/);
   assert.ok(!msgOf(c).includes('无关旧行的原文'));
+});
+
+// ---------- PR #46 第 3 轮复审的回归 ----------
+
+test('M2 收口成功之后本机申报丢失或被改：合并入口重新核对时拒绝，不按收口放行（PR #46 第 3 轮一致性 M2）', async () => {
+  const { root } = midRounds();
+  const { head } = await fixAndRecord(root, 3);
+  must(await closeRound(root, head));
+  const declared = path.join(prDir(root), 'risks.json');
+  const saved = fs.readFileSync(declared, 'utf8');
+  fs.rmSync(declared);
+  const gh = fakeGh(head);
+  const m = mergePr({ root, pr: '7', gh });
+  assert.equal(m.ok, false);
+  assert.match(m.problems.join(' / '), /本机没有 risks/);
+  assert.equal(gh.calls.some((a) => a[1] === 'merge'), false);
+  const changed = JSON.parse(saved);
+  changed.entries[0].fixedIn = ['src/other.ts'];
+  fs.writeFileSync(declared, JSON.stringify(changed));
+  const m2 = mergePr({ root, pr: '7', gh: fakeGh(head) });
+  assert.equal(m2.ok, false);
+  assert.match(m2.problems.join(' / '), /申报/);
+});
+
+test('M6 改写已提交风险登记里的可共享摘要（格式合格）：close 拒绝；重跑 risks 不沿用改过的文字，沿用本机申报里核对过的那份（PR #46 第 3 轮代码 M6）', async () => {
+  const { root } = midRounds();
+  const fix = fixCommit(root, 3);
+  must(await writeRisks(root, fix));
+  const original = JSON.parse(read(root, REG).split(NL)[0]);
+  const entry = { ...original, summary: '改写后的另一句合格摘要' };
+  write(root, REG, `${JSON.stringify(entry)}${NL}`);
+  commitAll(root, 'tamper summary');
+  const rows = logRows(root).length;
+  const r = await closeRound(root, headOf(root));
+  assertCloseRefused(root, r, rows);
+  assert.match(msgOf(r), /摘要与本机/);
+  must(await writeRisks(root, fix, { sharedSummary: [] }));
+  assert.equal(JSON.parse(read(root, REG).split(NL)[0]).summary, original.summary, '沿用本机申报里的摘要');
+});
+
+test('M3 旧格式原文只在还没推送的提交里（当前文件已是新格式）：risks 仍点出这些提交并提醒先改写再推送；提醒排在“提交并推送”之前（PR #46 第 3 轮代码 M3、一致性 M3）', async () => {
+  const { root, c2 } = midRounds();
+  const legacy = { pr: '3', commit: 'a'.repeat(40), round: 1, kind: 'code', id: 'M5', severity: 'medium', location: 'src/x.ts:1', problem: '只在历史里的原文', reason: '理由', fix: '改法', status: '已修、未再复审', fixedIn: [] };
+  write(root, REG, `${JSON.stringify(legacy)}${NL}`);
+  commitAll(root, 'legacy in history');
+  const legacyCommit = headOf(root);
+  fs.rmSync(path.join(root, REG));
+  commitAll(root, 'cleaned');
+  const fix = fixCommit(root, 3);
+  const w = must(await writeRisks(root, fix));
+  const msg = msgOf(w);
+  assert.ok(msg.includes(legacyCommit.slice(0, 12)), msg);
+  assert.ok(msg.indexOf(legacyCommit.slice(0, 12)) < msg.indexOf('提交并推送'), '提醒在下一步指引之前');
+  assert.ok(!msg.includes('只在历史里的原文'));
+  assert.ok(c2);
+});
+
+test('M4 风险登记替换失败、恢复原申报也失败时：保留原错误并写明申报没能恢复、重跑 risks（PR #46 第 3 轮代码 M4）', async () => {
+  const { root } = midRounds();
+  const fix = fixCommit(root, 3);
+  must(await writeRisks(root, fix));
+  const rename = fs.renameSync;
+  const rm = fs.rmSync;
+  fs.renameSync = (from, to) => {
+    if (String(to).endsWith('review-risks.jsonl')) throw Object.assign(new Error('注入的风险登记写入失败（测试）'), { code: 'EIO' });
+    if (String(to).endsWith('risks.json') && String(from).includes('.tmp') && fs.existsSync(String(to)) && failRestore.armed) throw Object.assign(new Error('注入的申报恢复失败（测试）'), { code: 'EIO' });
+    return rename(from, to);
+  };
+  const failRestore = { armed: false };
+  const writeFile = fs.writeFileSync;
+  let n = 0;
+  fs.writeFileSync = (file, ...rest) => {
+    // 第一次写申报照常，第二次（恢复）时让改名失败
+    if (String(file).includes('risks.json.') && String(file).endsWith('.tmp')) { n++; if (n === 2) failRestore.armed = true; }
+    return writeFile(file, ...rest);
+  };
+  let res;
+  try { res = await writeRisks(root, fix, { fixedIn: ['code:M1=src/dedup.ts'] }).catch((e) => ({ ok: false, message: e.message })); }
+  finally { fs.renameSync = rename; fs.writeFileSync = writeFile; fs.rmSync = rm; }
+  assert.equal(res.ok, false);
+  assert.match(msgOf(res), /注入的风险登记写入失败/, '保留原错误');
+  assert.match(msgOf(res), /没能恢复/);
+  assert.match(msgOf(res), /重跑/);
 });

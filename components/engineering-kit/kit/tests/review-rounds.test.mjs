@@ -408,7 +408,7 @@ function baseFacts(over) {
  * 用 getter，测试改了 register 之后仍按改后的条目算；要测申报与提交不一致时显式给 declaredFixedIn。
  */
 function declaredOf(entries) {
-  return new Map(entries.filter((e) => !e.legacy).map((e) => [riskKey(e), { findingSha: e.findingSha, fixedIn: e.fixedIn }]));
+  return new Map(entries.filter((e) => !e.legacy).map((e) => [riskKey(e), { findingSha: e.findingSha, fixedIn: e.fixedIn, summary: e.summary, summarySha: RR.summaryFingerprint(e.summary) }]));
 }
 const all = (facts) => closureProblems(facts).join('|');
 const withEntry = (over) => {
@@ -691,12 +691,12 @@ test('H1 closureProblems：提交里的 fixedIn 与本机 risks 申报不一致�
   const g = goodFacts({ fixDiff: ['src/dedup.ts', 'src/f9.ts'] });
   g.register = { entries: [{ ...g.expected[0], summary: SUMMARY, fixedIn: ['src/f9.ts'] }], problems: [] };
   const key = riskKey(g.expected[0]);
-  const tampered = closureProblems({ ...g, declaredFixedIn: new Map([[key, { findingSha: g.expected[0].findingSha, fixedIn: [] }]]) }).join('|');
+  const tampered = closureProblems({ ...g, declaredFixedIn: new Map([[key, { findingSha: g.expected[0].findingSha, fixedIn: [], summarySha: RR.summaryFingerprint(SUMMARY) }]]) }).join('|');
   assert.match(tampered, /申报/);
   assert.match(tampered, /M1/);
   assert.match(closureProblems({ ...g, declaredFixedIn: new Map() }).join('|'), /本机没有 risks/);
   assert.match(closureProblems({ ...g, declaredFixedIn: new Map([[key, { findingSha: 'f'.repeat(64), fixedIn: ['src/f9.ts'] }]]) }).join('|'), /本机没有 risks/, '申报针对的不是同一条发现');
-  assert.deepEqual(closureProblems({ ...g, declaredFixedIn: new Map([[key, { findingSha: g.expected[0].findingSha, fixedIn: ['src/f9.ts'] }]]) }), [], '与申报一致时放行');
+  assert.deepEqual(closureProblems({ ...g, declaredFixedIn: new Map([[key, { findingSha: g.expected[0].findingSha, fixedIn: ['src/f9.ts'], summarySha: RR.summaryFingerprint(SUMMARY) }]]) }), [], '与申报一致时放行');
 });
 
 // ---------- 0.10.1：收口的修复差异白名单（代码 H1） ----------
@@ -765,14 +765,14 @@ test('M1 parseRiskRegister 拒绝 fixedIn 里的重复路径；closureProblems �
   const facts = goodFacts({ fixDiff: ['src/a.ts'] });
   const key = riskKey(facts.expected[0]);
   facts.register = { entries: [{ ...facts.expected[0], summary: SUMMARY, fixedIn: ['src/a.ts', 'src/a.ts'] }], problems: [] };
-  const out = closureProblems({ ...facts, declaredFixedIn: new Map([[key, { findingSha: facts.expected[0].findingSha, fixedIn: ['src/a.ts', 'src/b.ts'] }]]) }).join('|');
+  const out = closureProblems({ ...facts, declaredFixedIn: new Map([[key, { findingSha: facts.expected[0].findingSha, fixedIn: ['src/a.ts', 'src/b.ts'], summarySha: RR.summaryFingerprint(SUMMARY) }]]) }).join('|');
   assert.match(out, /不一致/);
   // 提交与申报一致、申报里的路径只有一部分在修复差异里：按申报判“都不在修复差异里”
   const both = goodFacts({ fixDiff: ['src/a.ts'] });
   both.register = { entries: [{ ...both.expected[0], summary: SUMMARY, fixedIn: ['src/a.ts', 'src/b.ts'] }], problems: [] };
   const noFiles = { ...both, expected: expectedRiskEntries({ pr: '7', round: 2, failHead: B, failures: [{ kind: 'code', findings: [{ ...FAIL_FINDING, files: [] }], dataSha: DATA_SHA }] }) };
   noFiles.register = { entries: [{ ...noFiles.expected[0], summary: SUMMARY, fixedIn: ['src/a.ts', 'src/b.ts'] }], problems: [] };
-  noFiles.declaredFixedIn = new Map([[riskKey(noFiles.expected[0]), { findingSha: noFiles.expected[0].findingSha, fixedIn: ['src/a.ts', 'src/b.ts'] }]]);
+  noFiles.declaredFixedIn = new Map([[riskKey(noFiles.expected[0]), { findingSha: noFiles.expected[0].findingSha, fixedIn: ['src/a.ts', 'src/b.ts'], summarySha: RR.summaryFingerprint(SUMMARY) }]]);
   assert.match(closureProblems(noFiles).join('|'), /都不在修复差异里/);
 });
 
@@ -783,4 +783,37 @@ test('M5 displayPath 转义行分隔符、段落分隔符、格式字符和终�
   const out = closureProblems(goodFacts({ fixDiff: ['src/dedup.ts', 'src/x\u2028y.ts'] })).join('|');
   assert.ok(out.includes(String.raw`src/x\u2028y.ts`), out);
   assert.ok(!out.includes('\u2028'), '提示里没有原样的行分隔符');
+});
+
+// ---------- PR #46 第 3 轮复审的回归 ----------
+
+test('M1 roundState：升级前（没有 outOfBand 字段）带用户决定的登记按当时的记录重放准入，越权的不计入轮次；不带用户决定的旧记录照常计入（PR #46 第 3 轮代码 M1、一致性 M1）', () => {
+  const legacyOob = rec('code', 'fail', D, [f('M1')], { userDecision: '0.10.0 时用户同意先审 D' });
+  assert.equal(Object.hasOwn(legacyOob, 'outOfBand'), false, '模拟升级前的记录');
+  const s = rs([...roundHigh(A), fail('code', B, [f('H1'), f('M1')]), legacyOob]);
+  assert.equal(s.phase, 'collecting');
+  assert.equal(s.latest.head, B, '重放判定为越权，不顶掉待补齐的 B');
+  assert.equal(admitRegistration(s, { kind: 'consistency', verdict: 'pass', head: B }), null);
+  // 带用户决定但当时本来就放行的（例如第 1 轮 open 阶段），照常计入
+  const allowed = rs([rec('code', 'fail', A, [f('M1')], { userDecision: '多余的用户决定' }), pass('consistency', A)]);
+  assert.equal(allowed.rounds.length, 1);
+  assert.equal(allowed.latest.head, A);
+  // 新记录显式写了 outOfBand: false 的，不重放
+  const explicit = rs([...roundHigh(A), fail('code', B, [f('H1'), f('M1')]), rec('code', 'fail', D, [f('M1')], { userDecision: 'x', outOfBand: false })]);
+  assert.equal(explicit.latest.head, D, '显式标为按规则登记的照常计入');
+});
+
+test('M7 summaryProblem 拒绝行分隔符、段落分隔符和格式字符（PR #46 第 3 轮代码 M7）', () => {
+  for (const cp of [0x2028, 0x2029, 0x200b, 0x0a]) {
+    assert.ok(RR.summaryProblem('前' + String.fromCodePoint(cp) + '后'), cp.toString(16));
+  }
+  assert.equal(RR.summaryProblem('普通的一句摘要'), null);
+});
+
+test('M6 closureProblems：提交里的可共享摘要与本机申报记下的指纹不一致时拒绝（PR #46 第 3 轮代码 M6）', () => {
+  const g = goodFacts();
+  const key = riskKey(g.expected[0]);
+  const declared = new Map([[key, { findingSha: g.expected[0].findingSha, fixedIn: [], summarySha: RR.summaryFingerprint('核对过的另一句摘要') }]]);
+  assert.match(closureProblems({ ...g, declaredFixedIn: declared }).join('|'), /摘要与本机/);
+  assert.deepEqual(closureProblems(g), [], '对照：与申报一致时放行');
 });
