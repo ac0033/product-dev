@@ -180,6 +180,8 @@ test('旧清单（没有 render 字段）同步出的块不带环境偏好，回
 
 const WF_BASE = { ciRunner: 'github-hosted', ciFallback: null, ciOs: ['linux'], testCommand: 'npm test', reviewIgnore: ['docs/**/*.md', 'README.md'] };
 const COVERAGE = { command: 'npm run cov', lcov: 'coverage/lcov.info' };
+/** 测试被跳过或取消时不记台账：记录步骤与非 Node 项目的 Node 安装步骤共用的条件（规格第 10 节）。 */
+const LEDGER_IF = "always() && (steps.tests.outcome == 'success' || steps.tests.outcome == 'failure')";
 
 /** 取名为 name 的作业文本（从 "  name:" 到下一个顶层作业之前）；没有返回 null。 */
 function jobText(yaml, name) {
@@ -200,7 +202,7 @@ test('C3 CI 步骤：测试作业在测试命令后加一步 if: always() 的 re
   const id = steps[run].match(/\bid: ([A-Za-z0-9_-]+)/);
   assert.ok(id, '测试命令那一步要有 id，记录步骤才能取 steps.<id>.outcome');
   const record = steps[run + 1];
-  assert.ok(record && /if: always\(\)/.test(record), '记录步骤在测试命令之后，无论成败都运行');
+  assert.ok(record && record.includes(`if: ${LEDGER_IF}`), '记录步骤在测试命令之后，测试成败都记、被跳过或取消不记');
   assert.ok(record.includes('node scripts/engineering/gate/test-ledger.mjs record --source ci --exit-code'));
   assert.match(record, new RegExp(`steps\\.${id[1]}\\.outcome`), '退出码由测试步骤的 outcome 换算');
   assert.ok(record.includes('--os ${{ matrix.os }}'));
@@ -213,6 +215,7 @@ test('C3 CI 步骤：测试作业在测试命令后加一步 if: always() 的 re
   assert.ok(upload.includes('name: test-ledger-${{ matrix.os }}'));
   assert.ok(upload.includes('test-ledger-${{ matrix.os }}.jsonl'));
   assert.match(upload, /if: always\(\)/);
+  assert.match(upload, /if-no-files-found: ignore/, 'R2-4 没有台账文件时上传步骤不报错');
 });
 
 test('C3 CI 步骤：汇总检查 ci-gate 的依赖不变（只等 changes 与 test）', () => {
@@ -238,20 +241,22 @@ test('C6 覆盖率作业：配置 coverage 后新增 coverage 作业（只在 PR
   assert.equal(jobText(y, 'mutation'), null);
 });
 
-test('D2 变异作业：配置 mutationCommand 后新增 mutation 作业（风险标签触发、60 分钟超时、fetch-depth 0、产物 mutation-report），不进 ci-gate；PR 事件类型追加 labeled', () => {
+test('D2 变异作业：配置 mutationCommand 后新增 mutation 作业（风险标签触发、变异步骤 60 分钟超时、fetch-depth 0、产物 mutation-report），不进 ci-gate；PR 事件类型追加 labeled', () => {
   const y = renderCiWorkflow({ ...WF_BASE, mutationCommand: 'npx stryker run' });
   const job = jobText(y, 'mutation');
   assert.ok(job, '要有 mutation 作业');
   assert.match(job, /needs: changes\n/);
   assert.ok(job.includes("if: needs.changes.outputs.code == 'true' && github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'risk:medium') || contains(github.event.pull_request.labels.*.name, 'risk:high'))"));
-  assert.match(job, /timeout-minutes: 60/);
+  assert.ok(!/\n    timeout-minutes:/.test(job), 'R2-5 mutation 作业没有作业级 timeout-minutes（超时只能让变异那一步失败，作业仍成功）');
   assert.match(job, /fetch-depth: 0/);
   assert.ok(job.includes('node scripts/engineering/gate/mutation.mjs run --base ${{ github.event.pull_request.base.sha }} --out mutation-report.txt'));
   const upload = stepsOf(job).find((s) => /upload-artifact/.test(s));
   assert.ok(upload, '要上传产物');
   assert.match(upload, /actions\/upload-artifact@[0-9a-f]{40}/);
-  assert.ok(upload.includes('name: mutation-report') && upload.includes('mutation-report.txt'));
+  assert.ok(upload.includes('name: mutation-report') && upload.includes('mutation-report.txt') && upload.includes('mutation-status.json'), 'R2-5 报告与状态文件一起上传');
   assert.match(upload, /if: always\(\)/);
+  const mutStep = stepsOf(job).find((s) => s.includes('mutation.mjs run'));
+  assert.match(mutStep, /timeout-minutes: 60/, 'R2-5 60 分钟超时落在变异那一步');
   assert.ok(!jobText(y, 'ci-gate').includes('mutation'));
   const types = y.match(/pull_request:\n\s+types: \[([^\]]*)\]/)[1].split(',').map((s) => s.trim());
   assert.ok(types.includes('labeled'), `PR 事件类型要追加 labeled：${types}`);
@@ -286,6 +291,7 @@ test('M1 CI 步骤：测试命令不是 Node（如 pytest）时，为台账加�
   const nodeSteps = steps.filter((s) => /actions\/setup-node/.test(s));
   assert.ok(nodeSteps.length >= 1, '要有为台账装 Node 的步骤');
   for (const s of nodeSteps) assert.match(s, /continue-on-error: true/, s);
+  for (const s of nodeSteps) assert.ok(s.includes(`if: ${LEDGER_IF}`), `R2-4 Node 安装步骤的条件与记录步骤一致：${s}`);
   const nodeAt = steps.findIndex((s) => /actions\/setup-node/.test(s));
   const record = steps.findIndex((s) => s.includes('test-ledger.mjs record'));
   assert.ok(nodeAt < record, 'Node 安装在记录步骤之前');
@@ -302,4 +308,30 @@ test('M9 CI 步骤：coverage 作业的汇总命令带上 --out/--run-id/--os，
   assert.match(upload, /if: always\(\)/);
   assert.match(upload, /continue-on-error: true/);
   assert.ok(!jobText(y, 'ci-gate').includes('coverage'), '仍不进 ci-gate');
+});
+
+// ---------- 第 2 轮复审回归（规格第 10 节：报告型作业总成功、覆盖率命令写法） ----------
+
+test('R2-5 报告型作业总成功：coverage、mutation 两个作业里每一步都有 continue-on-error: true', () => {
+  const y = renderCiWorkflow({ ...WF_BASE, coverage: COVERAGE, mutationCommand: 'npx stryker run' });
+  for (const name of ['coverage', 'mutation']) {
+    const steps = stepsOf(jobText(y, name));
+    assert.ok(steps.length >= 3, `${name} 作业要有若干步骤`);
+    for (const st of steps) assert.match(st, /continue-on-error: true/, `${name} 作业的这一步缺 continue-on-error：${st}`);
+  }
+});
+
+test('R2-5 覆盖率命令：含换行或首行缩进时不写成 run: | 块标量，改用环境变量 EK_COVERAGE_COMMAND（JSON 字符串）加 bash -eo pipefail -c；简单命令仍是 run: <命令>', () => {
+  for (const command of ['npm run a\nnpm run b', '  npm run cov']) {
+    const y = renderCiWorkflow({ ...WF_BASE, coverage: { command, lcov: 'coverage/lcov.info' } });
+    const job = jobText(y, 'coverage');
+    assert.ok(job, '要有 coverage 作业');
+    assert.ok(!/run: \|/.test(job), `不出现 run: | 块标量：${JSON.stringify(command)}`);
+    assert.ok(job.includes(`EK_COVERAGE_COMMAND: ${JSON.stringify(command)}`), `环境变量用 JSON 字符串：${job}`);
+    assert.ok(job.includes('bash -eo pipefail -c "$EK_COVERAGE_COMMAND"'));
+    assert.ok(job.indexOf('EK_COVERAGE_COMMAND') < job.indexOf('test-ledger.mjs coverage'), '先跑覆盖率命令，再汇总');
+  }
+  const simple = jobText(renderCiWorkflow({ ...WF_BASE, coverage: COVERAGE }), 'coverage');
+  assert.ok(simple.includes('run: npm run cov'));
+  assert.ok(!simple.includes('EK_COVERAGE_COMMAND'));
 });

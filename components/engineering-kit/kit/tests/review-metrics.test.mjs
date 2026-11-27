@@ -226,3 +226,26 @@ test('M8 指标：只有坏行的 PR 也和缺失、不可读的 PR 一起单列
   assert.deepEqual(prs.map((p) => p.pr), ['1']);
   assert.ok(unavailableListHolds(result, [7731, 7732, 7733]), JSON.stringify(result));
 });
+
+// ---------- 第 2 轮复审回归（规格第 10 节：登记行字段校验 M7） ----------
+
+test('R2-7 指标：kind、verdict、headSha 值不合法的行归入 badLines；只有这类行的 PR 进入不可用列表、不计入 prs，其余 PR 不受影响', async () => {
+  const { collectMetrics } = await import('../gate/review-metrics.mjs');
+  const { commonDir } = repo();
+  seed(commonDir);
+  writeLog(commonDir, 7741, [rec({ kind: 'weird', headSha: sha('1') })]);
+  writeLog(commonDir, 7742, [rec({ verdict: 'maybe', headSha: sha('2') })]);
+  writeLog(commonDir, 7743, [rec({ headSha: 'xyz' }), rec({ headSha: 'a'.repeat(39) })]);
+  writeLog(commonDir, 7744, [rec({ kind: 'consistency', verdict: 'defer', headSha: 'b'.repeat(64) }), rec({ verdict: 'accept', headSha: sha('c') })]);
+  writeLog(commonDir, 7745, [rec({ headSha: sha('d') }), rec({ kind: 'weird', headSha: sha('e') })]);
+  const result = collectMetrics({ commonDir, now: NOW, sinceDays: null });
+  const { prs, summary } = split(result);
+  const listed = prs.map((p) => String(p.pr));
+  for (const bad of ['7741', '7742', '7743']) assert.ok(!listed.includes(bad), `${bad} 只有不合法的行：不计入 prs`);
+  for (const good of ['1', '2', '3', '7744', '7745']) assert.ok(listed.includes(good), `${good} 照常汇总：${listed}`);
+  assert.equal(summary.prCount, 5);
+  assert.ok(unavailableListHolds(result, [7741, 7742, 7743]), JSON.stringify(result));
+  assert.ok(!unavailableListHolds(result, [7744]) && !unavailableListHolds(result, [7745]), '有合法行的 PR 不进不可用列表');
+  const bad = JSON.stringify(result.badLines);
+  assert.ok(bad && bad !== '[]' && bad !== '{}' && bad !== 'null', 'badLines 里要有这些行');
+});

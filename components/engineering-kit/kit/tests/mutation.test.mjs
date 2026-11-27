@@ -4,7 +4,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -135,12 +134,21 @@ test('D2 pull：没有产物 → 说明 本 PR 的 CI 没有变异测试产物�
 // ---------- 首轮复审回归（M3、M10） ----------
 
 const jobsOf = (...jobs) => jobs.map(([name, conclusion]) => ({ name, conclusion }));
-const MUT_ART = { 'mutation-report/mutation-report.txt': 'MUTANTS SURVIVED: 5\n', 'mutation-report.txt': 'MUTANTS SURVIVED: 5\n' };
+/** 一份带状态文件的变异产物（两种下载布局各放一份）：exitCode 为 null 时不放状态文件。 */
+function mutArt(report, exitCode, files = ['src/a.mjs']) {
+  const art = { 'mutation-report/mutation-report.txt': report, 'mutation-report.txt': report };
+  if (exitCode !== null) {
+    const status = JSON.stringify({ schema: 'ek-mutation-status/1', exitCode, files });
+    art['mutation-report/mutation-status.json'] = status;
+    art['mutation-status.json'] = status;
+  }
+  return art;
+}
 
 test('M3 pull：有产物但变异作业结论不是 success → 输出 变异作业结论：<结论>，写明报告可能不完整，报告仍写出；success 不加警告', () => {
   const { root } = repo();
   const out = path.join(tmpDir('ekit-mut-'), 'got.txt');
-  const gh = fakeGh({ prHead: 'd1'.repeat(20), runs: [RUN], artifacts: { 301: MUT_ART }, jobs: { 301: jobsOf(['test (linux)', 'success'], ['mutation', 'failure']) } });
+  const gh = fakeGh({ prHead: 'd1'.repeat(20), runs: [RUN], artifacts: { 301: mutArt('MUTANTS SURVIVED: 5\n', 1) }, jobs: { 301: jobsOf(['test (linux)', 'success'], ['mutation', 'failure']) } });
   const r = cli(root, ['pull', '--pr', '9', '--out', out], gh.env);
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.match(r.stdout, /变异作业结论：failure/);
@@ -148,7 +156,7 @@ test('M3 pull：有产物但变异作业结论不是 success → 输出 变异�
   assert.equal(fs.readFileSync(out, 'utf8'), 'MUTANTS SURVIVED: 5\n');
   const view = gh.calls().find((c) => c[0] === 'run' && c[1] === 'view');
   assert.ok(view && view.includes('301') && view.includes('--json') && view.includes('jobs'), JSON.stringify(gh.calls()));
-  const ok = fakeGh({ prHead: 'd2'.repeat(20), runs: [RUN], artifacts: { 301: MUT_ART }, jobs: { 301: jobsOf(['mutation', 'success']) } });
+  const ok = fakeGh({ prHead: 'd2'.repeat(20), runs: [RUN], artifacts: { 301: mutArt('MUTANTS SURVIVED: 5\n', 0) }, jobs: { 301: jobsOf(['mutation', 'success']) } });
   const okRun = cli(root, ['pull', '--pr', '9', '--out', path.join(tmpDir('ekit-mut-'), 'ok.txt')], ok.env);
   assert.equal(okRun.status, 0, okRun.stderr + okRun.stdout);
   assert.doesNotMatch(okRun.stdout, /不完整/);
@@ -169,36 +177,135 @@ test('M3 pull：没有产物且变异作业结论是 failure / cancelled / timed
   assert.match(r.stdout, /没配置/, '没有 mutation 作业：仍是通用说明（其他作业失败不算）');
 });
 
-test('M10 pull：不给 --out 时写到每次新建的独占临时目录——两次调用的路径不同，也不是固定的 <tmpdir>/ek-mutation-<PR>.txt', () => {
+test('M10 pull：不给 --out 时写到每次新建的独占临时目录——两次调用的路径不同，也不是固定的 <tmpdir>/ek-mutation-<PR>.txt（子进程的 TMP/TEMP/TMPDIR 指向本用例自己的目录，只在其中检查）', () => {
   const { root } = repo();
-  const fixed = path.join(os.tmpdir(), 'ek-mutation-4243.txt');
-  fs.rmSync(fixed, { force: true });
+  const sandbox = tmpDir('ekit-mut-tmp-'); // 本用例独占的“系统临时目录”；不碰真正的系统临时目录
+  const fixed = path.join(sandbox, 'ek-mutation-4243.txt');
   const paths = [];
-  try {
-    for (let i = 0; i < 2; i++) {
-      const gh = fakeGh({ prHead: 'b2'.repeat(20), runs: [RUN], artifacts: { 301: { 'mutation-report/mutation-report.txt': 'R\n', 'mutation-report.txt': 'R\n' } } });
-      const r = cli(root, ['pull', '--pr', '4243'], gh.env);
-      assert.equal(r.status, 0, r.stderr + r.stdout);
-      const printed = r.stdout.match(/变异测试报告：(.+)/)[1].trim();
-      assert.equal(fs.readFileSync(printed, 'utf8'), 'R\n');
-      paths.push(path.resolve(printed));
-    }
-    assert.notEqual(paths[0], paths[1], '两次调用的路径不同');
-    assert.notEqual(path.dirname(paths[0]), path.dirname(paths[1]), '各用各的新目录');
-    for (const p of paths) {
-      assert.notEqual(p, path.resolve(fixed), '不是固定路径');
-      assert.notEqual(path.resolve(path.dirname(p)), path.resolve(os.tmpdir()), '放在新建的子目录里，不直接放系统临时目录');
-    }
-    assert.equal(fs.existsSync(fixed), false, '固定路径不再被写');
-  } finally {
-    for (const p of paths) {
-      // 只删自己的文件；目录只在它正是系统临时目录下、以 ek-mutation- 开头的独占子目录时才删（只删空目录，不递归），绝不碰别的目录
-      fs.rmSync(p, { force: true });
-      const dir = path.resolve(path.dirname(p));
-      if (path.dirname(dir) === path.resolve(os.tmpdir()) && path.basename(dir).startsWith('ek-mutation-')) {
-        try { fs.rmdirSync(dir); } catch { /* 目录不空或已删：留给系统清理，不扩大删除范围 */ }
-      }
-    }
-    fs.rmSync(fixed, { force: true });
+  for (let i = 0; i < 2; i++) {
+    const gh = fakeGh({ prHead: 'b2'.repeat(20), runs: [RUN], artifacts: { 301: { 'mutation-report/mutation-report.txt': 'R\n', 'mutation-report.txt': 'R\n' } } });
+    const env = { ...gh.env, TMP: sandbox, TEMP: sandbox, TMPDIR: sandbox };
+    const r = cli(root, ['pull', '--pr', '4243'], env);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    const printed = r.stdout.match(/变异测试报告：(.+)/)[1].trim();
+    assert.equal(fs.readFileSync(printed, 'utf8'), 'R\n');
+    paths.push(path.resolve(printed));
   }
+  assert.notEqual(paths[0], paths[1], '两次调用的路径不同');
+  assert.notEqual(path.dirname(paths[0]), path.dirname(paths[1]), '各用各的新目录');
+  for (const p of paths) {
+    assert.ok(p.startsWith(path.resolve(sandbox) + path.sep), `报告写在子进程的临时目录里：${p}`);
+    assert.notEqual(p, path.resolve(fixed), '不是固定路径');
+    assert.notEqual(path.resolve(path.dirname(p)), path.resolve(sandbox), '放在新建的子目录里，不直接放临时目录');
+  }
+  assert.equal(fs.existsSync(fixed), false, '固定路径不再被写');
+  // 清理：沙盒是本用例自己建的，随临时目录一起由系统清理；这里不删除任何别处的文件
+});
+
+// ---------- 第 2 轮复审回归（规格第 10 节：变异状态 M1、M2/M3） ----------
+
+test('R2-6 run：在报告旁写 mutation-status.json（schema、exitCode、files）；变异命令退出码非 0 时 exitCode 照写、files 是传给命令的源文件', () => {
+  const { root, base } = repo({ exit: 7 });
+  write(root, 'src/a.mjs', '// changed a\n');
+  write(root, 'src/b.mjs', '// changed b\n');
+  commitAll(root, 'change');
+  const dir = tmpDir('ekit-mut-');
+  const out = path.join(dir, 'report.txt');
+  const r = cli(root, ['run', '--base', base, '--out', out]);
+  assert.equal(r.status, 7, r.stderr + r.stdout);
+  const status = JSON.parse(fs.readFileSync(path.join(dir, 'mutation-status.json'), 'utf8'));
+  assert.equal(status.schema, 'ek-mutation-status/1');
+  assert.equal(status.exitCode, 7);
+  assert.deepEqual([...status.files].sort(), ['src/a.mjs', 'src/b.mjs']);
+  const ok = repo({ exit: 0 });
+  write(ok.root, 'src/a.mjs', '// changed a\n');
+  commitAll(ok.root, 'change');
+  const dir2 = tmpDir('ekit-mut-');
+  assert.equal(cli(ok.root, ['run', '--base', ok.base, '--out', path.join(dir2, 'report.txt')]).status, 0);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir2, 'mutation-status.json'), 'utf8')).exitCode, 0);
+});
+
+test('R2-6 run：没有源文件而跳过时也写状态文件：exitCode 0、skipped 为 没有源文件，报告文件写明跳过原因', () => {
+  const { root, base } = repo();
+  write(root, 'docs/n.md', 'changed\n');
+  commitAll(root, 'docs only');
+  const dir = tmpDir('ekit-mut-');
+  const out = path.join(dir, 'report.txt');
+  const r = cli(root, ['run', '--base', base, '--out', out]);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const status = JSON.parse(fs.readFileSync(path.join(dir, 'mutation-status.json'), 'utf8'));
+  assert.equal(status.schema, 'ek-mutation-status/1');
+  assert.equal(status.exitCode, 0);
+  assert.equal(status.skipped, '没有源文件');
+  assert.ok(fs.readFileSync(out, 'utf8').includes('没有源文件'), '报告文件写明跳过原因');
+});
+
+test('R2-6 pull：状态文件 exitCode 为 0 → 完整，不出现 不完整；输出写明 报告来自运行 <id>', () => {
+  const { root } = repo();
+  const gh = fakeGh({ prHead: 'f1'.repeat(20), runs: [RUN], artifacts: { 301: mutArt('R\n', 0) }, jobs: { 301: jobsOf(['mutation', 'success']) } });
+  const r = cli(root, ['pull', '--pr', '9', '--out', path.join(tmpDir('ekit-mut-'), 'got.txt')], gh.env);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.doesNotMatch(r.stdout, /不完整/);
+  assert.match(r.stdout, /报告来自运行 301/);
+});
+
+test('R2-6 pull：状态文件 exitCode 非 0 → 输出 变异命令退出码 <n> 与 不完整；报告仍写出', () => {
+  const { root } = repo();
+  const out = path.join(tmpDir('ekit-mut-'), 'got.txt');
+  const gh = fakeGh({ prHead: 'f2'.repeat(20), runs: [RUN], artifacts: { 301: mutArt('R2\n', 3) }, jobs: { 301: jobsOf(['mutation', 'success']) } });
+  const r = cli(root, ['pull', '--pr', '9', '--out', out], gh.env);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /变异命令退出码 ?3/);
+  assert.match(r.stdout, /不完整/);
+  assert.equal(fs.readFileSync(out, 'utf8'), 'R2\n');
+});
+
+test('R2-6 pull：有报告没有状态文件 → 输出 没有状态文件 与 不完整（步骤可能超时或被取消）', () => {
+  const { root } = repo();
+  const gh = fakeGh({ prHead: 'f3'.repeat(20), runs: [RUN], artifacts: { 301: mutArt('R\n', null) }, jobs: { 301: jobsOf(['mutation', 'success']) } });
+  const r = cli(root, ['pull', '--pr', '9', '--out', path.join(tmpDir('ekit-mut-'), 'got.txt')], gh.env);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /没有状态文件/);
+  assert.match(r.stdout, /不完整/);
+});
+
+test('R2-6 pull：gh run view 绑定到该次 attempt（带 --attempt <attempt>）', () => {
+  const { root } = repo();
+  const run = { ...RUN, attempt: 3 };
+  const gh = fakeGh({ prHead: 'f4'.repeat(20), runs: [run], artifacts: { 301: mutArt('R\n', 0) }, jobs: { 301: jobsOf(['mutation', 'success']) } });
+  const r = cli(root, ['pull', '--pr', '9', '--out', path.join(tmpDir('ekit-mut-'), 'got.txt')], gh.env);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const views = gh.calls().filter((c) => c[0] === 'run' && c[1] === 'view');
+  assert.ok(views.length >= 1 && views.every((c) => c.includes('--attempt') && c[c.indexOf('--attempt') + 1] === '3'), JSON.stringify(views));
+});
+
+test('R2-6 pull：最新有 mutation 作业的运行没有产物、更早的运行有 → 用较早的报告，输出 可能过期 与两个运行号', () => {
+  const { root } = repo();
+  const newer = { ...RUN, databaseId: 302, conclusion: 'failure' };
+  const older = { ...RUN, databaseId: 301 };
+  const out = path.join(tmpDir('ekit-mut-'), 'got.txt');
+  const gh = fakeGh({ prHead: 'f5'.repeat(20), runs: [newer, older], artifacts: { 301: mutArt('OLD\n', 0) },
+    jobs: { 302: jobsOf(['mutation', 'failure']), 301: jobsOf(['mutation', 'success']) } });
+  const r = cli(root, ['pull', '--pr', '9', '--out', out], gh.env);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /可能过期/);
+  assert.ok(r.stdout.includes('302') && r.stdout.includes('301'), r.stdout);
+  assert.equal(fs.readFileSync(out, 'utf8'), 'OLD\n');
+});
+
+test('R2-6 pull：报告所在运行里找不到 mutation 作业 → 输出 未能确认报告对应的变异作业', () => {
+  const { root } = repo();
+  const gh = fakeGh({ prHead: 'f6'.repeat(20), runs: [RUN], artifacts: { 301: mutArt('R\n', 0) }, jobs: { 301: jobsOf(['test (linux)', 'success']) } });
+  const r = cli(root, ['pull', '--pr', '9', '--out', path.join(tmpDir('ekit-mut-'), 'got.txt')], gh.env);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /未能确认报告对应的变异作业/);
+});
+
+test('R2-6 pull：一个产物都没有且最新 mutation 作业结论是 failure → 输出 变异作业结论：failure，不说通用的没配置', () => {
+  const { root } = repo();
+  const gh = fakeGh({ prHead: 'f7'.repeat(20), runs: [{ ...RUN, conclusion: 'failure' }], artifacts: {}, jobs: { 301: jobsOf(['mutation', 'failure']) } });
+  const r = cli(root, ['pull', '--pr', '9', '--out', path.join(tmpDir('ekit-mut-'), 'none.txt')], gh.env);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /变异作业结论：failure/);
+  assert.doesNotMatch(r.stdout, /没配置/);
 });
