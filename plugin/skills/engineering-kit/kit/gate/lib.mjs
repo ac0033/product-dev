@@ -436,7 +436,10 @@ export function fileHashes(root, files) {
   const links = [];
   const stats = new Map();
   const present = sorted.filter((f) => {
-    const st = fs.lstatSync(path.join(root, f), { throwIfNoEntry: false });
+    let st;
+    // 父路径已变成普通文件时 lstat 报 ENOTDIR：这个路径在工作区里不存在，与提交快照的 deleted 同一口径
+    try { st = fs.lstatSync(path.join(root, f), { throwIfNoEntry: false }); }
+    catch (e) { if (e.code === 'ENOTDIR') return false; throw e; }
     if (!st) return false;
     stats.set(f, st);
     if (st.isSymbolicLink()) { links.push(f); return false; }
@@ -452,25 +455,29 @@ export function fileHashes(root, files) {
     const sha = gitlinkCommit(root, d, index);
     if (sha) out[d] = entryDigest('160000', sha);
   }
-  // 内容哈希交给 git hash-object（与 git add 相同的清洗过滤器）：Windows 的 core.autocrlf 会在 checkout 时
-  // 把 LF 改成 CRLF，直接读字节会让同一份提交的哈希变化，从而误判“代码变了”。
-  if (present.length > 0) {
-    const r = spawnSync('git', ['-C', root, 'hash-object', '--stdin-paths'], { input: `${present.join('\n')}\n`, encoding: 'utf8' });
+  // 先定模式，再按模式选摘要算法：普通文件交给 git hash-object（与 git add 相同的清洗过滤器：Windows 的 core.autocrlf 会在 checkout 时
+  // 把 LF 改成 CRLF，直接读字节会让同一份提交的哈希变化）；链接（含 core.symlinks 关时检出成普通文件的链接）的对象是原始链接文本，不经过滤器
+  const modes = new Map();
+  for (const f of present) {
+    const indexed = index.get(f)?.mode;
+    if (!symlinks && indexed === '120000') modes.set(f, '120000');
+    else if (fileMode) modes.set(f, stats.get(f).mode & 0o100 ? '100755' : '100644');
+    else modes.set(f, indexed === '100755' ? '100755' : '100644');
+  }
+  const hashPaths = (list, raw) => {
+    if (list.length === 0) return;
+    const r = spawnSync('git', ['-C', root, 'hash-object', ...(raw ? ['--no-filters'] : []), '--stdin-paths'], { input: `${list.join('\n')}\n`, encoding: 'utf8' });
     if (r.status !== 0) throw new Error(`计算代码树哈希失败：${r.stderr}`);
     const shas = r.stdout.split('\n').filter(Boolean);
-    present.forEach((f, i) => {
-      const indexed = index.get(f)?.mode;
-      let mode;
-      if (!symlinks && indexed === '120000') mode = '120000';
-      else if (fileMode) mode = stats.get(f).mode & 0o100 ? '100755' : '100644';
-      else mode = indexed === '100755' ? '100755' : '100644';
-      out[f] = entryDigest(mode, shas[i]);
-    });
-  }
+    list.forEach((f, i) => { out[f] = entryDigest(modes.get(f), shas[i]); });
+  };
+  hashPaths(present.filter((f) => modes.get(f) !== '120000'), false);
+  hashPaths(present.filter((f) => modes.get(f) === '120000'), true);
   for (const f of links) {
-    const r = spawnSync('git', ['-C', root, 'hash-object', '--stdin'], { input: fs.readlinkSync(path.join(root, f)), encoding: 'utf8' });
+    // 链接目标按原始字节读（POSIX 上可以不是合法 UTF-8），原样交给 git 算对象名
+    const r = spawnSync('git', ['-C', root, 'hash-object', '--no-filters', '--stdin'], { input: fs.readlinkSync(path.join(root, f), { encoding: 'buffer' }) });
     if (r.status !== 0) throw new Error(`计算符号链接 ${f} 的摘要失败：${r.stderr}`);
-    out[f] = entryDigest('120000', r.stdout.trim());
+    out[f] = entryDigest('120000', String(r.stdout).trim());
   }
   const sortedOut = {};
   for (const f of sorted) sortedOut[f] = out[f] ?? 'deleted';
@@ -715,10 +722,16 @@ const safeName = (name) => name.replace(/[^A-Za-z0-9._-]/g, '_');
  * 独占创建一个写着本进程 pid 的文件，git 返回后删除。拿不到锁时据此说明是不是有活着的本套件进程正在改这个引用。返回 git 的结果。
  */
 function withIntent(intents, run) {
-  fs.mkdirSync(intents, { recursive: true });
-  const file = path.join(intents, `${process.pid}-${crypto.randomUUID()}`);
-  fs.writeFileSync(file, String(process.pid), { flag: 'wx' });
-  try { return run(); } finally { fs.rmSync(file, { force: true }); }
+  // 意向只用于诊断：建不出、删不掉都不影响 git 的结果（尽力而为，不抛错）
+  let file = null;
+  try {
+    fs.mkdirSync(intents, { recursive: true });
+    file = path.join(intents, `${process.pid}-${crypto.randomUUID()}`);
+    fs.writeFileSync(file, String(process.pid), { flag: 'wx' });
+  } catch { file = null; }
+  try { return run(); } finally {
+    if (file) { try { fs.rmSync(file, { force: true }); } catch { /* 诊断用的文件，留下也不影响锁 */ } }
+  }
 }
 
 /** 别的、还活着的本套件进程正在改这个锁引用时返回它们的 pid；读不出 pid 的意向按活着计。只读，不删任何文件。 */
@@ -810,7 +823,8 @@ export function withLock(root, name, fn, label = `锁 ${name}`, opts = {}) {
 /**
  * 0.9.x 及更早版本的 PR 锁：目录 <git 公共目录>/engineering-gate/pr/<编号>/lock（mkdir 建，owner.json 记持有者）。
  * 升级期间同一仓库的不同工作树可能装着新旧两个版本：新版取到引用锁后再按旧版同样的算法取这个目录锁，两边才互斥。
- * 失效判定与回收照抄旧版：持有者进程已不在，或没写成 owner.json 且超过十分钟；回收用同级 reclaim 目录互斥。
+ * 失效判定：持有者进程已不在才回收（回收用同级 reclaim 目录互斥，与旧版相同）；旧版另把“没写成 owner.json 且超过十分钟”也当失效，
+ * 新版不这样做（认不出持有者的不删）。旧版自身的这条按年龄删除新版改不了：升级时同一仓库的各工作树应一起升级。
  * reclaim 目录残留（旧版回收者中途退出，或还在回收）一律不自动删除：它不记持有者，删掉可能和正在回收的旧版进程冲突；报占用并写明要人工确认后删除。
  * 释放时读写目录锁出错只写警告，fn 的返回值或异常原样交回。
  */
@@ -828,10 +842,10 @@ function withLegacyPrDirLock(root, no, fn, label) {
     const text = owner();
     let pid = null;
     try { pid = JSON.parse(text).pid; } catch { pid = null; }
-    if (Number.isInteger(pid)) return ownerGone(text);
-    return Date.now() - stat.mtimeMs > 600000;
+    // 没写成 owner.json 的目录锁认不出持有者（旧版进程可能刚建好目录、还没写持有者就暂停了）：不按年龄删，报占用并写明人工确认
+    return Number.isInteger(pid) ? ownerGone(text) : false;
   };
-  const occupied = () => lockError('EK_LOCK_BUSY', `${label}被占用（旧版套件的目录锁 ${lock}）：${owner().trim() || '持有者信息还没写成'}`);
+  const occupied = () => lockError('EK_LOCK_BUSY', `${label}被占用（旧版套件的目录锁 ${lock}）：${owner().trim() || '持有者信息还没写成或读不出；它不会自动删除：确认没有旧版套件进程在运行后手动删除这个目录再重试'}`);
   // Windows 上目录正被别的进程删除、还没删完时，mkdir 报 EPERM 或 EACCES：这是暂态争用，不是故障
   const deleting = (e) => ['EPERM', 'EACCES'].includes(e.code) && lockError('EK_LOCK_CONTENDED', `${label}暂时取不到：旧版套件的目录锁 ${lock} 正被删除（${e.code}）；稍后重试`);
   try {

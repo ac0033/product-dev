@@ -63,7 +63,7 @@ import {
 
 import { COVERAGE_RULE, MAX_REVIEW_BYTES, admissionProblems, canonicalJson, compactFindings, coverageOf, fingerprint, renderReport, validateReviewData } from './review-data.mjs';
 import { isRepoPath } from './config.mjs';
-import { MAX_SUMMARY_CHARS, admitRegistration, displayPath, closureProblems, expectedRiskEntries, nextHint, parseRiskRegister, riskKey, riskPhaseProblems, roundState, summaryProblem } from './review-rounds.mjs';
+import { MAX_SUMMARY_CHARS, admitRegistration, displayPath, summaryFingerprint, closureProblems, expectedRiskEntries, nextHint, parseRiskRegister, riskKey, riskPhaseProblems, roundState, summaryProblem } from './review-rounds.mjs';
 
 /** 审查种类及中文名。 */
 const KINDS = { code: '代码复审', consistency: '一致性审' };
@@ -366,7 +366,7 @@ function registerLocked({ root, config, verdict, reviewer, data, evidenceChecked
   const file = prRecordFile(root, no, kind);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const record = { pr: no, kind, verdict, reviewer: reviewer ?? null, headSha: st.head, summary, reason: reason ?? null, userDecision: userDecision ?? null, report: null, at: new Date().toISOString() };
-  if (outOfBand) record.outOfBand = true;
+  if (closureEnabled) record.outOfBand = outOfBand; // 0.10.1 起开收口时一律写明；没有这个字段的旧记录由 roundState 重放判定
   if (coverage) Object.assign(record, { coverage: coverage.full ? 'full' : 'partial', coverageRule: COVERAGE_RULE });
   saveCopies(path.dirname(file), record, data, evidenceChecked, config.reviewKeyword);
   // 先追加历史（轮次按它计数），再写最新记录（merge.mjs 读它）
@@ -476,6 +476,23 @@ function legacyLines(text) {
   return out;
 }
 
+/**
+ * 还没推送的提交里含旧格式风险登记行的那些（按提交逐个读风险登记）。待推送范围：有上游时是 @{u}..HEAD，
+ * 没有上游时是基准提交..HEAD（功能分支上的全部提交）。返回 { checked, commits, why }。
+ */
+function unpushedLegacyCommits(root, config) {
+  const upstream = git(root, ['rev-parse', '--verify', '--quiet', '@{u}']);
+  const from = upstream.ok ? upstream.out.trim() : config.baseRev;
+  if (!from) return { checked: false, commits: [], why: '没有上游，也没有基准提交' };
+  const log = git(root, ['log', '--format=%H', from + '..HEAD', '--', config.riskRegister]);
+  if (!log.ok) return { checked: false, commits: [], why: log.err.trim() || 'git log 失败' };
+  const commits = log.out.split('\n').filter(Boolean).filter((c) => {
+    const blob = git(root, ['show', c + ':' + config.riskRegister]);
+    return blob.ok && legacyLines(blob.out).length > 0;
+  });
+  return { checked: true, commits, why: '' };
+}
+
 /** 收口成功时提示：最终提交上的风险登记仍有不属于本轮的旧格式行（含复审原文），只写行号。 */
 function legacyHint(root, head, registerPath) {
   const blob = git(root, ['show', head + ':' + registerPath]);
@@ -498,7 +515,7 @@ function saveDeclaredFixedIn(root, no, latest, entries) {
   const file = prRecordFile(root, no, 'risks');
   const before = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
   const record = { pr: no, failHead: latest.head, round: latest.index, at: new Date().toISOString(),
-    entries: entries.map((e) => ({ key: riskKey(e), findingSha: e.findingSha, fixedIn: e.fixedIn })) };
+    entries: entries.map((e) => ({ key: riskKey(e), findingSha: e.findingSha, fixedIn: e.fixedIn, summary: e.summary, summarySha: summaryFingerprint(e.summary) })) };
   replaceFile(file, JSON.stringify(record, null, 2) + '\n');
   return () => replaceFile(file, before);
 }
@@ -510,7 +527,9 @@ function declaredFixedIn(root, no, latest) {
   try { record = JSON.parse(fs.readFileSync(prRecordFile(root, no, 'risks'), 'utf8')); } catch { return map; }
   if (!latest || record?.failHead !== latest.head || record.round !== latest.index || !Array.isArray(record.entries)) return map;
   for (const e of record.entries) {
-    if (typeof e?.key === 'string' && typeof e.findingSha === 'string' && Array.isArray(e.fixedIn) && e.fixedIn.every(isRepoPath)) map.set(e.key, { findingSha: e.findingSha, fixedIn: e.fixedIn });
+    if (typeof e?.key === 'string' && typeof e.findingSha === 'string' && Array.isArray(e.fixedIn) && e.fixedIn.every(isRepoPath)) {
+      map.set(e.key, { findingSha: e.findingSha, fixedIn: e.fixedIn, summary: typeof e.summary === 'string' ? e.summary : null, summarySha: typeof e.summarySha === 'string' ? e.summarySha : null });
+    }
   }
   return map;
 }
@@ -560,8 +579,9 @@ function applySummaries(expected, specs, existing) {
   const missing = [];
   for (const e of expected) {
     if (e.summary !== null) continue;
-    const kept = existing.find((v) => !v.legacy && riskKey(v) === riskKey(e) && v.findingSha === e.findingSha && !summaryProblem(v.summary));
-    if (kept) e.summary = kept.summary;
+    // 只从本机申报（risks 上次核对后写下的那份）沿用，不从 PR 能改的风险登记文件沿用
+    const kept = existing.get(riskKey(e));
+    if (kept && kept.findingSha === e.findingSha && !summaryProblem(kept.summary) && kept.summarySha === summaryFingerprint(kept.summary)) e.summary = kept.summary;
     else missing.push(e.kind + ':' + e.id);
   }
   if (!missing.length) return null;
@@ -588,7 +608,7 @@ export function writeRisks({ root, pr, fixedIn = [], sharedSummary = [] }) {
     const original = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
     const parsed = parseRiskRegister(original);
     if (parsed.problems.length) return { ok: false, message: parsed.problems.join('\n') };
-    const unsummarized = applySummaries(entries, sharedSummary, parsed.entries);
+    const unsummarized = applySummaries(entries, sharedSummary, declaredFixedIn(root, no, state.latest));
     if (unsummarized) return { ok: false, message: unsummarized };
     const replace = new Set(entries.map(riskKey));
     const lines = original.split(/\r?\n/);
@@ -605,15 +625,22 @@ export function writeRisks({ root, pr, fixedIn = [], sharedSummary = [] }) {
       fs.writeFileSync(tmp, content, { flag: 'wx' });
       fs.renameSync(tmp, file);
     } catch (e) {
-      restore();
+      // 保留原来的错误；申报也恢复不了时一并写明，两份文件对不上的状态重跑 risks 即可修复
+      try { restore(); }
+      catch (re) { throw new Error(e.message + '；本机申报也没能恢复（' + re.message + '）：风险登记与本机申报可能对不上，修好原因后重跑 review.mjs risks'); }
       throw e;
     } finally { fs.rmSync(tmp, { force: true }); }
-    const out = ['已写入 ' + entries.length + ' 条风险登记到 ' + config.riskRegister + '，提交并推送后运行 review.mjs close'];
+    // 提醒放在下一步指引之前：旧格式原文可能在当前文件里，也可能只在还没推送的提交里
+    const out = ['已写入 ' + entries.length + ' 条风险登记到 ' + config.riskRegister];
     const legacy = legacyLines(content);
     if (legacy.length) out.push('提示：风险登记第 ' + legacy.join('、') + ' 行仍是旧格式（0.10.0，逐字写了复审原文），不属于本轮；要清除原文须另行改写这些行');
-    if (legacy.length || legacyLines(original).length) {
-      out.push('提示：旧格式行的原文还在 git 历史里：推送前用 git log -p -- ' + config.riskRegister + ' 查看还没推送的提交，含原文的本地提交要先改写（例如交互式变基）再推送；已经推送过的按项目规则另行处理');
+    const unpushed = unpushedLegacyCommits(root, config);
+    if (unpushed.commits.length) {
+      out.push('注意：还没推送的提交 ' + unpushed.commits.map((c) => c.slice(0, 12)).join('、') + ' 里的风险登记含旧格式行（复审原文），推送会把它们一起外发：先改写这些提交（例如交互式变基）再推送');
+    } else if (!unpushed.checked) {
+      out.push('注意：读不出还没推送的提交范围（' + unpushed.why + '）：推送前用 git log -p -- ' + config.riskRegister + ' 人工确认待推送的提交里没有旧格式行');
     }
+    out.push('提交并推送后运行 review.mjs close');
     return { ok: true, message: out.join('\n') };
     }, '风险登记的写入锁');
   });
